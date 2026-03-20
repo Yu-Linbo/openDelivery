@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>机器人管理平台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <main class="content">
+        <section id="view-monitor" class="view active">
+          <header class="view-header">
+            <h1>机器人监控</h1>
+            <p>楼层地图与栅格展示</p>
+          </header>
+
+          <div class="toolbar">
+            <label for="floor-select">楼层</label>
+            <select id="floor-select"></select>
+
+            <label class="checkbox">
+              <input type="checkbox" id="grid-toggle" checked />
+              显示栅格
+            </label>
+
+            <span id="robot-status" class="robot-status">机器人: 未连接</span>
+            <span id="map-status" class="status">等待加载地图...</span>
+          </div>
+
+          <div class="map-wrapper">
+            <canvas id="map-canvas" width="900" height="600"></canvas>
+          </div>
+
+          <pre id="map-meta" class="map-meta"></pre>
+        </section>
+
+        <section id="view-settings" class="view">
+          <header class="view-header">
+            <h1>参数设置</h1>
+            <p>基础控制参数配置</p>
+          </header>
+
+          <form id="settings-form" class="settings-form">
+            <label>
+              最大速度 (m/s)
+              <input name="maxSpeed" type="number" step="0.1" min="0" required />
+            </label>
+            <label>
+              角速度 (rad/s)
+              <input name="angularSpeed" type="number" step="0.1" min="0" required />
+            </label>
+            <label>
+              避障距离 (m)
+              <input name="safetyDistance" type="number" step="0.1" min="0" required />
+            </label>
+            <label>
+              刷新间隔 (ms)
+              <input name="refreshInterval" type="number" step="100" min="100" required />
+            </label>
+            <button type="submit">保存参数</button>
+          </form>
+          <p id="settings-message" class="message"></p>
+        </section>
+
+        <section id="view-logs" class="view">
+          <header class="view-header">
+            <h1>日志</h1>
+            <p>系统事件与运行信息</p>
+          </header>
+
+          <div class="log-toolbar">
+            <button id="btn-add-log" type="button">新增模拟日志</button>
+            <button id="btn-clear-log" type="button">清空日志</button>
+          </div>
+          <ul id="log-list" class="log-list"></ul>
+        </section>
+      </main>
+
+      <aside class="sidebar">
+        <h2>机器人管理</h2>
+        <nav>
+          <button class="menu-item active" data-view="monitor">监控</button>
+          <button class="menu-item" data-view="settings">参数设置</button>
+          <button class="menu-item" data-view="logs">日志</button>
+        </nav>
+      </aside>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
