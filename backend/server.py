@@ -2,12 +2,16 @@
 import json
 import math
 import os
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+_BACKEND_DIR = Path(__file__).resolve().parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
@@ -98,49 +102,139 @@ def read_floor_map(floor):
 
 
 class RobotPoseProvider:
+    """Multi-robot snapshot for web display. Each robot has id, name, current_map, pose."""
+
     def __init__(self):
         self._lock = threading.Lock()
-        self._mode = os.environ.get("ROBOT_POSE_MODE", "mock")
-        self._pose = {
-            "timestamp": time.time(),
-            "frame_id": "map",
-            "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
-            "velocity": {"linear": 0.0, "angular": 0.0},
-            "localization": "ok",
-            "task_status": "Idle",
-            "current_map": "nh_102",
-            "source": self._mode,
-        }
         self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        self._thread = None
+
+        raw = (os.environ.get("ROBOT_POSE_MODE") or "ros2_tf").strip().lower()
+        if raw in ("", "default"):
+            raw = "ros2_tf"
+
+        # 默认：真数据来自 ROS2 TF。仅当显式 ROBOT_POSE_MODE=mock 时使用假轨迹演示。
+        if raw == "mock":
+            self._mode = "mock"
+            self._pose = {
+                "timestamp": time.time(),
+                "source": "mock",
+                "robots": self._mock_robots_seed(),
+            }
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+            return
+
+        if raw in ("none", "empty"):
+            self._mode = raw
+            self._pose = self._empty_snapshot("empty")
+            return
+
+        if raw != "ros2_tf":
+            print(f"[pose] unknown ROBOT_POSE_MODE={raw!r}, using empty robots (no fake data)")
+            self._mode = "empty"
+            self._pose = self._empty_snapshot("empty")
+            return
+
+        self._mode = "ros2_tf"
+        self._pose = self._empty_snapshot("ros2_tf")
+        try:
+            from ros_tf_bridge import start_ros_tf_thread
+
+            start_ros_tf_thread(self._apply_ros_update)
+            print("[pose] ROS2 TF bridge started (default; set ROBOT_POSE_MODE=mock for demo only)")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[pose] ROS2 TF unavailable ({exc}). "
+                "Robots list stays empty (no fake data). "
+                "Install/sourced ROS2 + rclpy/tf2, or set ROBOT_POSE_MODE=mock for local demo."
+            )
+            self._mode = "ros2_unavailable"
+            self._pose = self._empty_snapshot("ros2_unavailable")
+
+    @staticmethod
+    def _empty_snapshot(source):
+        return {
+            "timestamp": time.time(),
+            "source": source,
+            "robots": [],
+        }
+
+    @staticmethod
+    def _mock_robots_seed():
+        return [
+            {
+                "id": "robot-1",
+                "name": "送餐-01",
+                "frame_id": "map",
+                "current_map": "nh_102",
+                "pose": {"x": 3.0, "y": 3.0, "yaw": 0.0},
+                "velocity": {"linear": 0.0, "angular": 0.0},
+                "localization": "ok",
+                "task_status": "Monitoring",
+            },
+            {
+                "id": "robot-2",
+                "name": "送餐-02",
+                "frame_id": "map",
+                "current_map": "nh_103",
+                "pose": {"x": 4.0, "y": 4.0, "yaw": 0.0},
+                "velocity": {"linear": 0.0, "angular": 0.0},
+                "localization": "ok",
+                "task_status": "Idle",
+            },
+        ]
+
+    def _apply_ros_update(self, robots, stamp):
+        with self._lock:
+            self._pose = {
+                "timestamp": float(stamp),
+                "source": "ros2_tf",
+                "robots": json.loads(json.dumps(robots)),
+            }
 
     def _run(self):
         t = 0.0
         while self._running:
             if self._mode == "mock":
-                x = 3.0 + 1.8 * math.cos(t / 7.0)
-                y = 3.0 + 1.4 * math.sin(t / 5.0)
-                yaw = math.atan2(math.cos(t / 5.0), -math.sin(t / 7.0))
-                linear = 0.25
-                angular = 0.08
+                x1 = 3.0 + 1.8 * math.cos(t / 7.0)
+                y1 = 3.0 + 1.4 * math.sin(t / 5.0)
+                yaw1 = math.atan2(math.cos(t / 5.0), -math.sin(t / 7.0))
+                x2 = 5.0 + 1.2 * math.sin(t / 6.0)
+                y2 = 5.0 + 1.0 * math.cos(t / 4.0)
+                yaw2 = t * 0.15
                 with self._lock:
-                    self._pose.update(
-                        {
-                            "timestamp": time.time(),
-                            "pose": {"x": round(x, 3), "y": round(y, 3), "yaw": round(yaw, 3)},
-                            "velocity": {"linear": linear, "angular": angular},
-                            "localization": "ok",
-                            "task_status": "Monitoring",
-                            "source": "mock",
+                    self._pose["timestamp"] = time.time()
+                    self._pose["source"] = "mock"
+                    robots = self._pose["robots"]
+                    if len(robots) >= 1:
+                        robots[0]["pose"] = {
+                            "x": round(x1, 3),
+                            "y": round(y1, 3),
+                            "yaw": round(yaw1, 3),
                         }
-                    )
+                        robots[0]["velocity"] = {"linear": 0.25, "angular": 0.08}
+                    if len(robots) >= 2:
+                        robots[1]["pose"] = {
+                            "x": round(x2, 3),
+                            "y": round(y2, 3),
+                            "yaw": round(yaw2, 3),
+                        }
+                        robots[1]["velocity"] = {"linear": 0.2, "angular": 0.05}
                 t += 0.2
             time.sleep(0.2)
 
     def get_pose(self):
         with self._lock:
             return json.loads(json.dumps(self._pose))
+
+    def get_primary_robot(self):
+        """First robot, for legacy /api/robot/status."""
+        with self._lock:
+            robots = list(self._pose.get("robots") or [])
+        if not robots:
+            return None
+        return json.loads(json.dumps(robots[0]))
 
 
 POSE_PROVIDER = RobotPoseProvider()
@@ -195,17 +289,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/robot/status":
-            pose = POSE_PROVIDER.get_pose()
-            self._send_json(
-                {
-                    "online": True,
-                    "timestamp": pose["timestamp"],
-                    "localization": pose["localization"],
-                    "task_status": pose["task_status"],
-                    "current_map": pose["current_map"],
-                    "source": pose["source"],
-                }
-            )
+            snap = POSE_PROVIDER.get_pose()
+            primary = POSE_PROVIDER.get_primary_robot()
+            if primary:
+                self._send_json(
+                    {
+                        "online": True,
+                        "timestamp": snap["timestamp"],
+                        "localization": primary.get("localization"),
+                        "task_status": primary.get("task_status"),
+                        "current_map": primary.get("current_map"),
+                        "robot_id": primary.get("id"),
+                        "robot_name": primary.get("name"),
+                        "source": snap.get("source"),
+                    }
+                )
+            else:
+                self._send_json(
+                    {
+                        "online": False,
+                        "timestamp": snap["timestamp"],
+                        "source": snap.get("source"),
+                    }
+                )
             return
 
         if path == "/api/robot/pose/stream":

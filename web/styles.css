@@ -144,13 +144,19 @@ button {
   border-radius: 12px;
   overflow: hidden;
   background: #020617;
-  min-height: 460px;
+  /* 固定纵横比由 PGM 与 viewScale 保证；容器高度决定画布像素，避免 CSS 强行拉伸 bitmap */
+  width: 100%;
+  height: min(70vh, 720px);
+  min-height: 420px;
+  position: relative;
 }
 
 #map-canvas {
   width: 100%;
-  height: 600px;
+  height: 100%;
   display: block;
+  vertical-align: top;
+  touch-action: none;
 }
 
 .map-meta {

@@ -24,12 +24,14 @@
               显示栅格
             </label>
 
+            <button id="btn-reset-view" type="button" title="重置缩放与平移">重置视图</button>
+
             <span id="robot-status" class="robot-status">机器人: 未连接</span>
             <span id="map-status" class="status">等待加载地图...</span>
           </div>
 
           <div class="map-wrapper">
-            <canvas id="map-canvas" width="900" height="600"></canvas>
+            <canvas id="map-canvas" aria-label="地图"></canvas>
           </div>
 
           <pre id="map-meta" class="map-meta"></pre>

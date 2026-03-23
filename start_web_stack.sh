@@ -39,7 +39,11 @@ while [[ "${BACKEND_PORT}" -eq "${FRONTEND_PORT}" ]] || port_is_busy "${BACKEND_
   BACKEND_PORT=$((BACKEND_PORT + 1))
 done
 
-echo "[open-delivery] starting backend on ${BACKEND_HOST}:${BACKEND_PORT}"
+# 默认 ROBOT_POSE_MODE=ros2_tf（真 TF）；无 ROS 时位姿列表为空。仅演示轨迹请: export ROBOT_POSE_MODE=mock
+: "${ROBOT_POSE_MODE:=ros2_tf}"
+export ROBOT_POSE_MODE
+
+echo "[open-delivery] starting backend on ${BACKEND_HOST}:${BACKEND_PORT} (ROBOT_POSE_MODE=${ROBOT_POSE_MODE})"
 MAP_API_PORT="${BACKEND_PORT}" MAP_API_HOST="${BACKEND_HOST}" python3 "${BACKEND_SCRIPT}" &
 BACKEND_PID=$!
 
