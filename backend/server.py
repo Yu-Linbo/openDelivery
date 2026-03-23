@@ -2,12 +2,16 @@
 import json
 import math
 import os
+import queue
+import re
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+from ros_sensor_store import get_planned_path, get_scan
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -247,7 +251,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(raw)
@@ -258,9 +262,93 @@ class ApiHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path != "/api/robot/command":
+            self._not_found("endpoint not found")
+            return
+
+        length_s = self.headers.get("Content-Length")
+        try:
+            length = int(length_s) if length_s else 0
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json({"error": "invalid JSON body"}, 400)
+            return
+
+        if not isinstance(data, dict):
+            self._send_json({"error": "body must be a JSON object"}, 400)
+            return
+
+        mode = str(data.get("mode") or "").strip()
+        if mode not in ("map_only", "pose_only", "both"):
+            self._send_json(
+                {"error": "mode must be map_only, pose_only, or both"},
+                400,
+            )
+            return
+
+        robot_id = str(data.get("robot_id") or "").strip()
+        if not robot_id:
+            self._send_json({"error": "robot_id is required"}, 400)
+            return
+
+        map_name = data.get("map_name")
+        if map_name is not None:
+            map_name = str(map_name).strip()
+        x = data.get("x")
+        y = data.get("y")
+        yaw = data.get("yaw")
+
+        if mode in ("map_only", "both"):
+            if not map_name:
+                self._send_json({"error": "map_name is required for this mode"}, 400)
+                return
+        if mode in ("pose_only", "both"):
+            try:
+                xf = float(x)
+                yf = float(y)
+                yawf = float(yaw if yaw is not None else 0.0)
+            except (TypeError, ValueError):
+                self._send_json(
+                    {"error": "x, y and yaw (number, rad) are required for pose"},
+                    400,
+                )
+                return
+        else:
+            xf = yf = yawf = 0.0
+
+        try:
+            import ros_command_queue as rcq
+        except ImportError:
+            self._send_json({"error": "ros_command_queue not available"}, 500)
+            return
+
+        cmd = {"mode": mode, "robot_id": robot_id}
+        if mode in ("map_only", "both"):
+            cmd["map_name"] = map_name
+        if mode in ("pose_only", "both"):
+            cmd["x"] = xf
+            cmd["y"] = yf
+            cmd["yaw"] = yawf
+
+        try:
+            rcq.enqueue_command(cmd)
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, 503)
+        except queue.Full:
+            self._send_json({"error": "command queue full"}, 503)
+        else:
+            self._send_json({"ok": True})
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -286,6 +374,28 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/robot/pose":
             self._send_json(POSE_PROVIDER.get_pose())
+            return
+
+        m_scan = re.match(r"^/api/robot/([^/]+)/scan_2d$", path)
+        if m_scan:
+            rid = unquote(m_scan.group(1))
+            data = get_scan(rid)
+            if not data:
+                self._send_json({"error": "no scan data", "robot_id": rid}, 404)
+            else:
+                clean = {k: v for k, v in data.items() if not str(k).startswith("_")}
+                self._send_json(clean)
+            return
+
+        m_path = re.match(r"^/api/robot/([^/]+)/planned_path$", path)
+        if m_path:
+            rid = unquote(m_path.group(1))
+            data = get_planned_path(rid)
+            if not data:
+                self._send_json({"error": "no path data", "robot_id": rid}, 404)
+            else:
+                clean = {k: v for k, v in data.items() if not str(k).startswith("_")}
+                self._send_json(clean)
             return
 
         if path == "/api/robot/status":

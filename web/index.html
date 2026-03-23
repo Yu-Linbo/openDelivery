@@ -15,26 +15,88 @@
             <p>楼层地图与栅格展示</p>
           </header>
 
-          <div class="toolbar">
-            <label for="floor-select">楼层</label>
-            <select id="floor-select"></select>
+          <div class="monitor-layout">
+            <div class="monitor-main">
+              <div class="toolbar">
+                <label for="floor-select">楼层</label>
+                <select id="floor-select"></select>
 
-            <label class="checkbox">
-              <input type="checkbox" id="grid-toggle" checked />
-              显示栅格
-            </label>
+                <label class="checkbox">
+                  <input type="checkbox" id="grid-toggle" checked />
+                  显示栅格
+                </label>
 
-            <button id="btn-reset-view" type="button" title="重置缩放与平移">重置视图</button>
+                <label class="checkbox">
+                  <input type="checkbox" id="scan-2d-toggle" />
+                  显示 scan_2d
+                </label>
 
-            <span id="robot-status" class="robot-status">机器人: 未连接</span>
-            <span id="map-status" class="status">等待加载地图...</span>
+                <label class="checkbox">
+                  <input type="checkbox" id="planned-path-toggle" />
+                  显示规划路径
+                </label>
+
+                <button id="btn-reset-view" type="button" title="重置缩放与平移">重置视图</button>
+
+                <span id="robot-status" class="robot-status">机器人: 未连接</span>
+                <span id="map-status" class="status">等待加载地图...</span>
+              </div>
+
+              <p class="map-hint">
+                开启右侧「地图选位姿」后：单击定位置，再单击定朝向；<kbd>Shift</kbd>+ 拖拽仍平移地图。
+              </p>
+
+              <div class="map-wrapper" id="map-wrapper">
+                <canvas id="map-canvas" aria-label="地图"></canvas>
+              </div>
+
+              <pre id="map-meta" class="map-meta"></pre>
+            </div>
+
+            <aside class="monitor-aside">
+              <div
+                class="reloc-panel"
+                title="需 ROS2 TF 桥；与 fake_pub 联动：订阅 current_map 与 initial"
+              >
+                <span class="reloc-title">切图 / 重定位</span>
+                <label class="checkbox reloc-pick-row">
+                  <input type="checkbox" id="reloc-pick-toggle" />
+                  地图选位姿
+                </label>
+                <label class="reloc-field">
+                  机器人 ID
+                  <input id="reloc-robot-id" type="text" value="robot1" autocomplete="off" />
+                </label>
+                <label class="reloc-field">
+                  X (m)
+                  <input id="reloc-x" type="number" step="0.01" placeholder="0" />
+                </label>
+                <label class="reloc-field">
+                  Y (m)
+                  <input id="reloc-y" type="number" step="0.01" placeholder="0" />
+                </label>
+                <label class="reloc-field">
+                  Yaw (rad)
+                  <input id="reloc-yaw" type="number" step="0.01" placeholder="0" />
+                </label>
+                <div class="reloc-actions reloc-actions-stack">
+                  <button id="btn-reloc-skip-heading" type="button" class="btn-secondary">
+                    跳过朝向
+                  </button>
+                  <button id="btn-reloc-clear-pick" type="button" class="btn-secondary">
+                    清除选点
+                  </button>
+                  <button id="btn-reloc-fill-pose" type="button" class="btn-secondary">填入位姿</button>
+                </div>
+                <div class="reloc-actions reloc-actions-stack">
+                  <button id="btn-reloc-map-only" type="button">仅切图</button>
+                  <button id="btn-reloc-pose-only" type="button">仅重定位</button>
+                  <button id="btn-reloc-both" type="button">切图并重定位</button>
+                </div>
+                <span id="reloc-message" class="reloc-message-block"></span>
+              </div>
+            </aside>
           </div>
-
-          <div class="map-wrapper">
-            <canvas id="map-canvas" aria-label="地图"></canvas>
-          </div>
-
-          <pre id="map-meta" class="map-meta"></pre>
         </section>
 
         <section id="view-settings" class="view">

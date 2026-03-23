@@ -26,6 +26,24 @@ If ports are occupied, the script automatically picks the next available ports a
 - `GET /api/robot/pose`
 - `GET /api/robot/status`
 - `GET /api/robot/pose/stream` (Server-Sent Events)
+- `GET /api/robot/{robot_id}/scan_2d` — map-frame laser hits (`origin`, `hits`) from `/{id}/scan_2d`
+- `GET /api/robot/{robot_id}/planned_path` — `points` `[[x,y],...]` in `map` from `/{id}/planned_path`
+- `POST /api/robot/command` — enqueue **switch map** and/or **initial pose** (requires `ROBOT_POSE_MODE=ros2_tf` and a running TF bridge). JSON body:
+  - `robot_id` (string, e.g. `robot1`)
+  - `mode`: `map_only` | `pose_only` | `both`
+  - `map_name` (string, floor id under `map/`) — required for `map_only` and `both`
+  - `x`, `y`, `yaw` (numbers, meters and radians) — required for `pose_only` and `both`
+
+ROS publishes from the bridge:
+
+- `std_msgs/String` on `/{robot_id}/current_map` with the floor id (same topic as subscribed for display).
+- `geometry_msgs/PoseWithCovarianceStamped` on `/{robot_id}/initial` (override template with `ROS_INITIAL_POSE_TOPIC_TEMPLATE`, default `/{id}/initial`). Header `frame_id` is the robot’s `map_frame` from spec.
+
+**Demo stack (`src/fake/scripts/fake_pub.py`)** subscribes to the same `/{name}/current_map` and `/{name}/initial` topics: Web 切图会更新楼层并重算演示圆心；Web 重定位会把机体 **接回** 与该圆一致的轨迹并继续绕圈运动。
+
+Disable ROS subscriptions if needed: `ROS_SUBSCRIBE_SCAN_2D=0`, `ROS_SUBSCRIBE_PLANNED_PATH=0`.  
+Topic suffixes: `ROS_SCAN_2D_TOPIC_SUFFIX=/scan_2d`, `ROS_PLANNED_PATH_TOPIC_SUFFIX=/planned_path`.  
+Downsample: `ROS_SCAN_STRIDE`, `ROS_SCAN_MAX_HITS`.
 
 ## Robot pose: ROS2 TF (default)
 
@@ -46,8 +64,12 @@ map
 
 Lookup is **`map` → `robot1/base_link`** (chains through `robot1/odom` in the buffer).
 
-**Current map (floor id for the web UI):** bridge subscribes to **`/robot1/current_map`** (`std_msgs/String`, same as `robot_id`).  
-Until the first message, `ROS_CURRENT_MAP` applies. Disable with `ROS_SUBSCRIBE_CURRENT_MAP_TOPIC=0`.
+**Default two robots (no `ROS_ROBOTS_TF_JSON`):** the bridge also tracks **`robot2`** → `robot2/base_link`, subscribes **`/robot2/current_map`**, etc., matching dual `fake_pub`.  
+Only one real robot? `export ROS_TF_DISABLE_SECOND_ROBOT=1`.  
+Optional: `ROS_SECOND_ROBOT_ID`, `ROS_ROBOT_NAME_2`, `ROS_CURRENT_MAP_2`.
+
+**Current map (floor id for the web UI):** bridge subscribes to **`/{id}/current_map`** per robot (`std_msgs/String`).  
+Until the first message, `ROS_CURRENT_MAP` / `ROS_CURRENT_MAP_2` apply. Disable with `ROS_SUBSCRIBE_CURRENT_MAP_TOPIC=0`.
 
 ```bash
 export ROBOT_POSE_MODE=ros2_tf

@@ -23,9 +23,24 @@ const logList = document.getElementById("log-list");
 const addLogBtn = document.getElementById("btn-add-log");
 const clearLogBtn = document.getElementById("btn-clear-log");
 const btnResetView = document.getElementById("btn-reset-view");
+const scan2dToggle = document.getElementById("scan-2d-toggle");
+const plannedPathToggle = document.getElementById("planned-path-toggle");
+const relocRobotId = document.getElementById("reloc-robot-id");
+const relocX = document.getElementById("reloc-x");
+const relocY = document.getElementById("reloc-y");
+const relocYaw = document.getElementById("reloc-yaw");
+const relocMessage = document.getElementById("reloc-message");
+const btnRelocMapOnly = document.getElementById("btn-reloc-map-only");
+const btnRelocPoseOnly = document.getElementById("btn-reloc-pose-only");
+const btnRelocBoth = document.getElementById("btn-reloc-both");
+const btnRelocFillPose = document.getElementById("btn-reloc-fill-pose");
+const relocPickToggle = document.getElementById("reloc-pick-toggle");
+const btnRelocSkipHeading = document.getElementById("btn-reloc-skip-heading");
+const btnRelocClearPick = document.getElementById("btn-reloc-clear-pick");
 
 const SETTINGS_KEY = "robotSettings";
 const LOGS_KEY = "robotLogs";
+const MONITOR_CHECKBOXES_KEY = "openDelivery_monitor_checkboxes_v1";
 const ROBOT_ICON_PATH = "./icons/robot.svg";
 
 const ZOOM_MIN = 0.15;
@@ -40,6 +55,11 @@ let mapBitmap = null;
 
 /** Latest snapshot from backend: { timestamp, source, robots: [...] } */
 let latestSnapshot = null;
+
+/** Per-robot overlays from REST (map frame) */
+const latestScanByRobot = {};
+const latestPathByRobot = {};
+let sensorPollTimer = null;
 
 let robotIconLoaded = false;
 const robotIcon = new Image();
@@ -60,6 +80,13 @@ let viewPanY = 0;
 let isDragging = false;
 let dragLastX = 0;
 let dragLastY = 0;
+
+/** 地图选位姿：0 定点，1 定朝向 */
+let relocPickStep = 0;
+/** @type {{ x: number, y: number } | null} */
+let relocPickAnchorWorld = null;
+let relocPickHoverSx = null;
+let relocPickHoverSy = null;
 
 menuButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -85,6 +112,35 @@ async function fetchJson(path) {
   const res = await fetch(path);
   if (!res.ok) {
     throw new Error(`请求失败: ${path} (${res.status})`);
+  }
+  return res.json();
+}
+
+async function postRobotCommand(payload) {
+  const res = await fetch(`${API_BASE_URL}/api/robot/command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `请求失败 (${res.status})`);
+  }
+  return data;
+}
+
+async function fetchJsonOptional(path) {
+  const res = await fetch(path);
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    return null;
   }
   return res.json();
 }
@@ -204,6 +260,21 @@ function worldToMapPixels(pose) {
   return { mapX, mapY };
 }
 
+/** 地图像素 (左上原点、y 向下) → 世界坐标 (与 worldToMapPixels 互逆) */
+function mapPixelsToWorld(mapX, mapY) {
+  if (!activePgm || !activeMeta) {
+    return null;
+  }
+  const resolution = Number(activeMeta.resolution);
+  if (!resolution || Number.isNaN(resolution)) {
+    return null;
+  }
+  const [ox, oy] = parseOrigin(activeMeta.origin);
+  const x = ox + mapX * resolution;
+  const y = oy + (activePgm.height - mapY) * resolution;
+  return { x, y };
+}
+
 function mapPixelToScreen(mapX, mapY) {
   return {
     sx: viewPanX + mapX * viewScale,
@@ -267,6 +338,8 @@ function drawRobotAtScreen(sx, sy, yaw, name, localization) {
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(-(yaw || 0));
+  // robot.svg 美术坐标与地图 yaw 差 90°，顺时针补正（canvas 正角为顺时针）
+  ctx.rotate(Math.PI / 2);
   if (isLost) {
     ctx.globalAlpha = 0.55;
   }
@@ -319,6 +392,231 @@ function drawRobotAtScreen(sx, sy, yaw, name, localization) {
   }
 }
 
+function saveMonitorCheckboxPrefs() {
+  try {
+    localStorage.setItem(
+      MONITOR_CHECKBOXES_KEY,
+      JSON.stringify({
+        grid: !!(gridToggle && gridToggle.checked),
+        scan2d: !!(scan2dToggle && scan2dToggle.checked),
+        plannedPath: !!(plannedPathToggle && plannedPathToggle.checked),
+        relocPick: !!(relocPickToggle && relocPickToggle.checked),
+      })
+    );
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+function loadAndApplyMonitorCheckboxPrefs() {
+  try {
+    const raw = localStorage.getItem(MONITOR_CHECKBOXES_KEY);
+    if (!raw) {
+      return;
+    }
+    const p = JSON.parse(raw);
+    if (!p || typeof p !== "object") {
+      return;
+    }
+    if (gridToggle && typeof p.grid === "boolean") {
+      gridToggle.checked = p.grid;
+    }
+    if (scan2dToggle && typeof p.scan2d === "boolean") {
+      scan2dToggle.checked = p.scan2d;
+    }
+    if (plannedPathToggle && typeof p.plannedPath === "boolean") {
+      plannedPathToggle.checked = p.plannedPath;
+    }
+    if (relocPickToggle && typeof p.relocPick === "boolean") {
+      relocPickToggle.checked = p.relocPick;
+    }
+  } catch {
+    /* ignore */
+  }
+  syncRelocPickCursorClass();
+}
+
+function syncRelocPickCursorClass() {
+  if (!mapWrapper || !relocPickToggle) {
+    return;
+  }
+  mapWrapper.classList.toggle("pick-mode", relocPickToggle.checked);
+}
+
+/** 一次选点流程结束：清状态、取消「地图选位姿」勾选 */
+function exitRelocPickModeAfterDone(message) {
+  relocPickStep = 0;
+  relocPickAnchorWorld = null;
+  relocPickHoverSx = null;
+  relocPickHoverSy = null;
+  if (relocMessage && message) {
+    relocMessage.textContent = message;
+  }
+  if (relocPickToggle) {
+    relocPickToggle.checked = false;
+    syncRelocPickCursorClass();
+  }
+  saveMonitorCheckboxPrefs();
+  renderScene();
+}
+
+function resetRelocPickState(hint) {
+  relocPickStep = 0;
+  relocPickAnchorWorld = null;
+  relocPickHoverSx = null;
+  relocPickHoverSy = null;
+  if (relocMessage && hint) {
+    relocMessage.textContent = hint;
+  }
+  renderScene();
+}
+
+/**
+ * @returns {boolean} 是否已处理（阻止地图拖拽）
+ */
+function handleRelocMapClick(ev) {
+  if (!relocPickToggle || !relocPickToggle.checked || !activePgm || !activeMeta) {
+    return false;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const sx = ev.clientX - rect.left;
+  const sy = ev.clientY - rect.top;
+  const { w, h } = getCanvasCssSize();
+  if (sx < 0 || sy < 0 || sx > w || sy > h) {
+    return false;
+  }
+  const { mapX, mapY } = screenToMapPixel(sx, sy);
+  const mw = activePgm.width;
+  const mh = activePgm.height;
+  if (mapX < 0 || mapX > mw || mapY < 0 || mapY > mh) {
+    return false;
+  }
+  const world = mapPixelsToWorld(mapX, mapY);
+  if (!world) {
+    return false;
+  }
+
+  if (relocPickStep === 0) {
+    relocPickAnchorWorld = { x: world.x, y: world.y };
+    relocPickStep = 1;
+    if (relocX) {
+      relocX.value = String(Number(world.x.toFixed(3)));
+    }
+    if (relocY) {
+      relocY.value = String(Number(world.y.toFixed(3)));
+    }
+    if (relocMessage) {
+      relocMessage.textContent = "已定点，再点击地图设置朝向（或「跳过朝向」）";
+    }
+    renderScene();
+    return true;
+  }
+
+  const yaw = Math.atan2(world.y - relocPickAnchorWorld.y, world.x - relocPickAnchorWorld.x);
+  if (relocYaw) {
+    relocYaw.value = String(Number(yaw.toFixed(4)));
+  }
+  exitRelocPickModeAfterDone("已设置朝向，可下发重定位");
+  return true;
+}
+
+function drawRelocPickOverlay() {
+  if (!activePgm || relocPickStep !== 1 || !relocPickAnchorWorld) {
+    return;
+  }
+  const pix = worldToMapPixels({ x: relocPickAnchorWorld.x, y: relocPickAnchorWorld.y });
+  if (!pix) {
+    return;
+  }
+  const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
+  ctx.save();
+  ctx.fillStyle = "rgba(250, 204, 21, 0.95)";
+  ctx.strokeStyle = "#f59e0b";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  if (relocPickHoverSx != null && relocPickHoverSy != null) {
+    ctx.strokeStyle = "rgba(251, 191, 36, 0.95)";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(relocPickHoverSx, relocPickHoverSy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function drawPlannedPathOnMap(points) {
+  if (!activePgm || !points || points.length < 2) {
+    return;
+  }
+  ctx.save();
+  ctx.strokeStyle = "rgba(96, 165, 250, 0.9)";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  let started = false;
+  points.forEach((pt) => {
+    if (!pt || pt.length < 2) {
+      return;
+    }
+    const pix = worldToMapPixels({ x: pt[0], y: pt[1] });
+    if (!pix) {
+      return;
+    }
+    const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
+    if (!started) {
+      ctx.moveTo(sx, sy);
+      started = true;
+    } else {
+      ctx.lineTo(sx, sy);
+    }
+  });
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawScan2dOnMap(data) {
+  if (!activePgm || !data || !data.hits || data.hits.length === 0) {
+    return;
+  }
+  const o = data.origin;
+  let osx;
+  let osy;
+  if (o && o.length >= 2) {
+    const op = worldToMapPixels({ x: o[0], y: o[1] });
+    if (op) {
+      const s = mapPixelToScreen(op.mapX, op.mapY);
+      osx = s.sx;
+      osy = s.sy;
+    }
+  }
+  ctx.save();
+  ctx.strokeStyle = "rgba(249, 115, 22, 0.4)";
+  ctx.lineWidth = 1;
+  data.hits.forEach((hit) => {
+    if (!hit || hit.length < 2) {
+      return;
+    }
+    const pix = worldToMapPixels({ x: hit[0], y: hit[1] });
+    if (!pix) {
+      return;
+    }
+    const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
+    if (osx != null && osy != null) {
+      ctx.beginPath();
+      ctx.moveTo(osx, osy);
+      ctx.lineTo(sx, sy);
+      ctx.stroke();
+    }
+  });
+  ctx.restore();
+}
+
 function getRobotsOnCurrentMap() {
   if (!latestSnapshot || !Array.isArray(latestSnapshot.robots) || !activeFloor) {
     return [];
@@ -344,6 +642,23 @@ function renderScene() {
   drawGridScreen();
 
   const robotsHere = getRobotsOnCurrentMap();
+  if (plannedPathToggle && plannedPathToggle.checked) {
+    robotsHere.forEach((r) => {
+      const pathData = latestPathByRobot[r.id];
+      if (pathData && pathData.points && pathData.points.length) {
+        drawPlannedPathOnMap(pathData.points);
+      }
+    });
+  }
+  if (scan2dToggle && scan2dToggle.checked) {
+    robotsHere.forEach((r) => {
+      const sd = latestScanByRobot[r.id];
+      if (sd && sd.hits && sd.hits.length) {
+        drawScan2dOnMap(sd);
+      }
+    });
+  }
+
   robotsHere.forEach((r) => {
     const pixels = worldToMapPixels(r.pose);
     if (!pixels) {
@@ -362,6 +677,8 @@ function renderScene() {
       r.localization
     );
   });
+
+  drawRelocPickOverlay();
 }
 
 function updateRobotStatus() {
@@ -388,6 +705,38 @@ function updateRobotStatus() {
     return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
   });
   robotStatus.textContent = `本图定位 (${here.length}): ${parts.join(" · ")}`;
+  if (relocRobotId && relocRobotId.dataset.userEdited !== "1") {
+    const pick = here[0] || (latestSnapshot?.robots || [])[0];
+    if (pick?.id) {
+      relocRobotId.value = pick.id;
+    }
+  }
+}
+
+function fillRelocPoseFromScreenRobot() {
+  if (!relocX || !relocY || !relocYaw) {
+    return;
+  }
+  const here = getRobotsOnCurrentMap();
+  const rid = relocRobotId?.value?.trim();
+  const r =
+    here.find((bot) => bot.id === rid) ||
+    here[0] ||
+    (latestSnapshot?.robots || []).find((bot) => bot.id === rid) ||
+    (latestSnapshot?.robots || [])[0];
+  if (!r?.pose) {
+    if (relocMessage) {
+      relocMessage.textContent = "无可用位姿，请手填 x/y/yaw";
+    }
+    return;
+  }
+  const p = r.pose;
+  relocX.value = String(p.x ?? 0);
+  relocY.value = String(p.y ?? 0);
+  relocYaw.value = String(p.yaw ?? 0);
+  if (relocMessage) {
+    relocMessage.textContent = `已填入 ${r.name || r.id} 位姿`;
+  }
 }
 
 function refreshMetaPanel() {
@@ -495,6 +844,10 @@ function onMouseDown(ev) {
   if (ev.button !== 0) {
     return;
   }
+  const pickOn = relocPickToggle && relocPickToggle.checked;
+  if (pickOn && activePgm && !ev.shiftKey && handleRelocMapClick(ev)) {
+    return;
+  }
   isDragging = true;
   dragLastX = ev.clientX;
   dragLastY = ev.clientY;
@@ -502,6 +855,24 @@ function onMouseDown(ev) {
 }
 
 function onMouseMove(ev) {
+  if (
+    relocPickToggle &&
+    relocPickToggle.checked &&
+    relocPickStep === 1 &&
+    relocPickAnchorWorld
+  ) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = ev.clientX - rect.left;
+    const sy = ev.clientY - rect.top;
+    const { w, h } = getCanvasCssSize();
+    if (sx >= 0 && sy >= 0 && sx <= w && sy <= h) {
+      if (relocPickHoverSx !== sx || relocPickHoverSy !== sy) {
+        relocPickHoverSx = sx;
+        relocPickHoverSy = sy;
+        renderScene();
+      }
+    }
+  }
   if (!isDragging) {
     return;
   }
@@ -518,6 +889,52 @@ function onMouseMove(ev) {
 function onMouseUp() {
   isDragging = false;
   canvas.style.cursor = "";
+}
+
+function stopSensorPolling() {
+  if (sensorPollTimer) {
+    clearInterval(sensorPollTimer);
+    sensorPollTimer = null;
+  }
+}
+
+function startSensorPolling() {
+  stopSensorPolling();
+  const wantScan = scan2dToggle && scan2dToggle.checked;
+  const wantPath = plannedPathToggle && plannedPathToggle.checked;
+  if (!wantScan && !wantPath) {
+    return;
+  }
+  sensorPollTimer = setInterval(async () => {
+    const here = getRobotsOnCurrentMap();
+    if (here.length === 0) {
+      return;
+    }
+    const ws = scan2dToggle && scan2dToggle.checked;
+    const wp = plannedPathToggle && plannedPathToggle.checked;
+    await Promise.all(
+      here.map(async (r) => {
+        const id = encodeURIComponent(r.id);
+        if (ws) {
+          const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/scan_2d`);
+          if (d) {
+            latestScanByRobot[r.id] = d;
+          } else {
+            delete latestScanByRobot[r.id];
+          }
+        }
+        if (wp) {
+          const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/planned_path`);
+          if (d) {
+            latestPathByRobot[r.id] = d;
+          } else {
+            delete latestPathByRobot[r.id];
+          }
+        }
+      })
+    );
+    renderScene();
+  }, 250);
 }
 
 function bindMapInteractions() {
@@ -599,6 +1016,8 @@ function initLogs() {
 }
 
 async function initMonitor() {
+  loadAndApplyMonitorCheckboxPrefs();
+
   bindMapInteractions();
 
   if (btnResetView) {
@@ -608,6 +1027,93 @@ async function initMonitor() {
       refreshMetaPanel();
       appendLog("地图视图已重置");
     });
+  }
+
+  if (relocRobotId) {
+    relocRobotId.addEventListener("input", () => {
+      relocRobotId.dataset.userEdited = "1";
+    });
+  }
+  if (btnRelocFillPose) {
+    btnRelocFillPose.addEventListener("click", () => {
+      fillRelocPoseFromScreenRobot();
+    });
+  }
+
+  syncRelocPickCursorClass();
+  if (relocPickToggle) {
+    relocPickToggle.addEventListener("change", () => {
+      syncRelocPickCursorClass();
+      if (!relocPickToggle.checked) {
+        resetRelocPickState("");
+      }
+      saveMonitorCheckboxPrefs();
+    });
+  }
+  if (btnRelocSkipHeading) {
+    btnRelocSkipHeading.addEventListener("click", () => {
+      if (relocPickStep !== 1) {
+        return;
+      }
+      exitRelocPickModeAfterDone("已定点，朝向请手填或保持原值");
+    });
+  }
+  if (btnRelocClearPick) {
+    btnRelocClearPick.addEventListener("click", () => {
+      exitRelocPickModeAfterDone("已清除地图选点");
+    });
+  }
+
+  const targetMapName = () => (floorSelect && floorSelect.value ? floorSelect.value.trim() : "");
+
+  async function runRelocCommand(mode) {
+    if (!relocMessage) {
+      return;
+    }
+    const rid = relocRobotId && relocRobotId.value ? relocRobotId.value.trim() : "";
+    if (!rid) {
+      relocMessage.textContent = "请填写机器人 ID";
+      return;
+    }
+    const payload = { mode, robot_id: rid };
+    if (mode === "map_only" || mode === "both") {
+      const mn = targetMapName();
+      if (!mn) {
+        relocMessage.textContent = "请先选择目标地图（上方楼层）";
+        return;
+      }
+      payload.map_name = mn;
+    }
+    if (mode === "pose_only" || mode === "both") {
+      const x = parseFloat(relocX && relocX.value);
+      const y = parseFloat(relocY && relocY.value);
+      const yaw = parseFloat((relocYaw && relocYaw.value) || "0");
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        relocMessage.textContent = "请填写 x、y（米），可用「填入位姿」";
+        return;
+      }
+      payload.x = x;
+      payload.y = y;
+      payload.yaw = Number.isNaN(yaw) ? 0 : yaw;
+    }
+    relocMessage.textContent = "发送中…";
+    try {
+      await postRobotCommand(payload);
+      relocMessage.textContent = "已下发到 ROS";
+      appendLog(`下发 ${mode} → ${rid}`);
+    } catch (err) {
+      relocMessage.textContent = err.message || String(err);
+    }
+  }
+
+  if (btnRelocMapOnly) {
+    btnRelocMapOnly.addEventListener("click", () => runRelocCommand("map_only"));
+  }
+  if (btnRelocPoseOnly) {
+    btnRelocPoseOnly.addEventListener("click", () => runRelocCommand("pose_only"));
+  }
+  if (btnRelocBoth) {
+    btnRelocBoth.addEventListener("click", () => runRelocCommand("both"));
   }
 
   if (typeof ResizeObserver !== "undefined" && mapWrapper) {
@@ -633,8 +1139,35 @@ async function initMonitor() {
   });
 
   gridToggle.addEventListener("change", () => {
+    saveMonitorCheckboxPrefs();
     renderScene();
   });
+
+  if (scan2dToggle) {
+    scan2dToggle.addEventListener("change", () => {
+      if (!scan2dToggle.checked) {
+        Object.keys(latestScanByRobot).forEach((k) => {
+          delete latestScanByRobot[k];
+        });
+      }
+      saveMonitorCheckboxPrefs();
+      startSensorPolling();
+      renderScene();
+    });
+  }
+  if (plannedPathToggle) {
+    plannedPathToggle.addEventListener("change", () => {
+      if (!plannedPathToggle.checked) {
+        Object.keys(latestPathByRobot).forEach((k) => {
+          delete latestPathByRobot[k];
+        });
+      }
+      saveMonitorCheckboxPrefs();
+      startSensorPolling();
+      renderScene();
+    });
+  }
+  startSensorPolling();
 }
 
 async function bootstrap() {
