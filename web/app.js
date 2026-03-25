@@ -1,9 +1,10 @@
-const API_BASE_URL =
+let API_BASE_URL =
   window.API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8001`;
 
 const menuButtons = Array.from(document.querySelectorAll(".menu-item"));
 const views = {
   monitor: document.getElementById("view-monitor"),
+  ros: document.getElementById("view-ros"),
   settings: document.getElementById("view-settings"),
   logs: document.getElementById("view-logs"),
 };
@@ -37,10 +38,29 @@ const btnRelocFillPose = document.getElementById("btn-reloc-fill-pose");
 const relocPickToggle = document.getElementById("reloc-pick-toggle");
 const btnRelocSkipHeading = document.getElementById("btn-reloc-skip-heading");
 const btnRelocClearPick = document.getElementById("btn-reloc-clear-pick");
+const mapNameInput = document.getElementById("map-name-input");
+const btnSaveMap = document.getElementById("btn-save-map");
+const rosNodesSummary = document.getElementById("ros-nodes-summary");
+const rosNodesError = document.getElementById("ros-nodes-error");
+const rosNodesPersistentList = document.getElementById("ros-nodes-persistent");
+const rosNodesCreatedList = document.getElementById("ros-nodes-created");
+const btnRosNodesRefresh = document.getElementById("btn-ros-nodes-refresh");
+const rosNodeCreateForm = document.getElementById("ros-node-create-form");
+const rosNodeCreateTypeSelect = document.getElementById("ros-node-create-type");
+const rosNodeFieldsFakePub = document.getElementById("ros-node-fields-fake_pub");
+const rosNodeFieldsSlamMapping = document.getElementById(
+  "ros-node-fields-slam_bringup_mapping"
+);
+const rosNodeRobotName = document.getElementById("ros-node-robot-name");
+const rosNodeCurrentMap = document.getElementById("ros-node-current-map");
+const btnRosNodeCreate = document.getElementById("btn-ros-node-create");
 
 const SETTINGS_KEY = "robotSettings";
 const LOGS_KEY = "robotLogs";
 const MONITOR_CHECKBOXES_KEY = "openDelivery_monitor_checkboxes_v1";
+const FLOOR_PREF_KEY = "openDelivery_active_floor_v1";
+const MAP_NAME_PREF_KEY = "openDelivery_map_name_v1";
+const MAPPING_SUFFIX = "_mapping";
 const ROBOT_ICON_PATH = "./icons/robot.svg";
 
 const ZOOM_MIN = 0.15;
@@ -60,6 +80,13 @@ let latestSnapshot = null;
 const latestScanByRobot = {};
 const latestPathByRobot = {};
 let sensorPollTimer = null;
+
+/** Live OccupancyGrid polling for floor like robot1_mapping → GET /api/mapping/live?robot_id= */
+let mapLiveTimer = null;
+let mapLiveInitializedView = false;
+/** @type {string | null} */
+let activeMappingRobotId = null;
+let rosNodesPollTimer = null;
 
 let robotIconLoaded = false;
 const robotIcon = new Image();
@@ -98,12 +125,31 @@ menuButtons.forEach((btn) => {
   });
 });
 
+function isMappingFloor(f) {
+  return typeof f === "string" && f.endsWith(MAPPING_SUFFIX);
+}
+
+function robotIdFromMappingFloor(f) {
+  if (!isMappingFloor(f)) {
+    return "";
+  }
+  return f.slice(0, -MAPPING_SUFFIX.length);
+}
+
+function updateMappingToolbar() {
+  const row = document.getElementById("mapping-toolbar-row");
+  if (!row) {
+    return;
+  }
+  row.classList.toggle("is-active", isMappingFloor(activeFloor));
+}
+
 function addFloorOptions() {
   floorSelect.innerHTML = "";
   floors.forEach((floor) => {
     const option = document.createElement("option");
     option.value = floor;
-    option.textContent = floor;
+    option.textContent = isMappingFloor(floor) ? `${floor} · 建图中` : floor;
     floorSelect.appendChild(option);
   });
 }
@@ -114,6 +160,47 @@ async function fetchJson(path) {
     throw new Error(`请求失败: ${path} (${res.status})`);
   }
   return res.json();
+}
+
+async function canReachApi(baseUrl, timeoutMs = 1200) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${baseUrl}/api/floors`, { signal: ctrl.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveApiBaseUrl() {
+  if (window.API_BASE_URL) {
+    API_BASE_URL = window.API_BASE_URL;
+    return;
+  }
+  if (await canReachApi(API_BASE_URL)) {
+    return;
+  }
+
+  const protoHost = `${window.location.protocol}//${window.location.hostname}`;
+  const originPort = Number(window.location.port || 0);
+  const candidatePorts = [8001, 8002, 8003, originPort + 1, originPort + 2].filter(
+    (p) => Number.isInteger(p) && p > 0
+  );
+  const seen = new Set();
+  for (const p of candidatePorts) {
+    if (seen.has(p)) {
+      continue;
+    }
+    seen.add(p);
+    const base = `${protoHost}:${p}`;
+    if (await canReachApi(base)) {
+      API_BASE_URL = base;
+      return;
+    }
+  }
 }
 
 async function postRobotCommand(payload) {
@@ -147,10 +234,7 @@ async function fetchJsonOptional(path) {
 
 async function fetchFloors() {
   const data = await fetchJson(`${API_BASE_URL}/api/floors`);
-  if (!Array.isArray(data.floors) || data.floors.length === 0) {
-    throw new Error("后端没有可用地图楼层");
-  }
-  floors = data.floors;
+  floors = Array.isArray(data.floors) ? data.floors : [];
 }
 
 function parseYaml(text) {
@@ -436,6 +520,283 @@ function loadAndApplyMonitorCheckboxPrefs() {
   syncRelocPickCursorClass();
 }
 
+function saveFloorPreference(floor) {
+  if (!floor) {
+    return;
+  }
+  try {
+    localStorage.setItem(FLOOR_PREF_KEY, String(floor));
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadMapNamePreference() {
+  try {
+    return localStorage.getItem(MAP_NAME_PREF_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveMapNamePreference(v) {
+  try {
+    localStorage.setItem(MAP_NAME_PREF_KEY, v);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function fetchRosNodesStatus() {
+  return fetchJsonOptional(`${API_BASE_URL}/api/ros/nodes/status`);
+}
+
+async function controlRosNode(nodeId, action) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/nodes/control`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, action }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `请求失败 (${res.status})`);
+  }
+  return payload;
+}
+
+async function createRosNode(nodeType, params) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/nodes/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: nodeType, ...(params || {}) }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `请求失败 (${res.status})`);
+  }
+  return payload;
+}
+
+function renderRosNodesStatus(data) {
+  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesSummary) {
+    return;
+  }
+
+  if (!data) {
+    rosNodesSummary.textContent = "状态: 无法连接后端";
+    rosNodesPersistentList.innerHTML = "";
+    rosNodesCreatedList.innerHTML = "";
+    return;
+  }
+
+  const managed = Array.isArray(data.managed_nodes) ? data.managed_nodes : [];
+  const persistentNodes = managed.filter((n) => !!n.persistent);
+  const createdNodes = managed.filter((n) => !n.persistent);
+  const discovered = Array.isArray(data.discovered_nodes) ? data.discovered_nodes : [];
+  const running = managed.filter((n) => n.running).length;
+
+  rosNodesSummary.textContent = `受管节点: ${running}/${managed.length} 运行中 · ROS发现节点: ${discovered.length}`;
+
+  const renderInto = (listEl, nodes) => {
+    listEl.innerHTML = "";
+    nodes.forEach((node) => {
+      const card = document.createElement("article");
+      card.className = "ros-node-card";
+      const statusClass = node.running ? "running" : "stopped";
+      card.innerHTML = `
+        <div class="ros-node-head">
+          <strong>${node.name || node.id}</strong>
+          <span class="ros-node-badge ${statusClass}">${
+            node.running ? "运行中" : "已停止"
+          }</span>
+        </div>
+        <div class="ros-node-meta">ID: ${
+          node.id
+        } · 进程: ${node.process_count || 0}${
+        node.note ? ` · ${node.note}` : ""
+      }</div>
+        <div class="ros-node-actions">
+          <button type="button" data-node-action="pause" data-node-id="${
+            node.id
+          }">暂停</button>
+          <button type="button" data-node-action="restart" data-node-id="${
+            node.id
+          }">重启</button>
+        </div>
+      `;
+      listEl.appendChild(card);
+    });
+  };
+
+  renderInto(rosNodesPersistentList, persistentNodes);
+  renderInto(rosNodesCreatedList, createdNodes);
+}
+
+function setRosNodeButtonsDisabled(disabled) {
+  const lists = [rosNodesPersistentList, rosNodesCreatedList].filter(Boolean);
+  lists.forEach((listEl) => {
+    listEl.querySelectorAll("button[data-node-action]").forEach((b) => {
+      b.disabled = disabled;
+    });
+  });
+  if (btnRosNodesRefresh) {
+    btnRosNodesRefresh.disabled = disabled;
+  }
+}
+
+async function refreshRosNodesStatus() {
+  const data = await fetchRosNodesStatus();
+  renderRosNodesStatus(data);
+  if (rosNodesError) {
+    rosNodesError.textContent = data && data.last_error ? String(data.last_error) : "";
+  }
+}
+
+function initRosNodesPage() {
+  if (!rosNodesPersistentList || !rosNodesCreatedList) {
+    return;
+  }
+  if (btnRosNodesRefresh) {
+    btnRosNodesRefresh.addEventListener("click", () => {
+      refreshRosNodesStatus().catch((err) => {
+        if (rosNodesError) {
+          rosNodesError.textContent = err.message || String(err);
+        }
+      });
+    });
+  }
+
+  const bindNodeActions = (listEl) => {
+    if (!listEl) {
+      return;
+    }
+    listEl.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-node-action]");
+      if (!btn) {
+        return;
+      }
+      const nodeId = btn.dataset.nodeId;
+      const action = btn.dataset.nodeAction;
+      if (!nodeId || !action) {
+        return;
+      }
+      setRosNodeButtonsDisabled(true);
+      if (rosNodesError) {
+        rosNodesError.textContent = "";
+      }
+      try {
+        await controlRosNode(nodeId, action);
+        appendLog(`ROS节点 ${nodeId} ${action} 成功`);
+      } catch (err) {
+        if (rosNodesError) {
+          rosNodesError.textContent = err.message || String(err);
+        }
+        appendLog(`ROS节点 ${nodeId} ${action} 失败: ${err.message || err}`);
+      } finally {
+        setRosNodeButtonsDisabled(false);
+        refreshRosNodesStatus().catch(() => {});
+      }
+    });
+  };
+  bindNodeActions(rosNodesPersistentList);
+  bindNodeActions(rosNodesCreatedList);
+
+  refreshRosNodesStatus().catch(() => {});
+  if (rosNodeCreateForm) {
+    rosNodeCreateForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+
+      const nodeType = rosNodeCreateTypeSelect ? rosNodeCreateTypeSelect.value : "";
+      if (!nodeType) {
+        if (rosNodesError) {
+          rosNodesError.textContent = "请选择节点类型";
+        }
+        return;
+      }
+
+      let params = {};
+      if (nodeType === "fake_pub") {
+        const rn = (rosNodeRobotName && rosNodeRobotName.value ? rosNodeRobotName.value : "")
+          .trim();
+        const cm = (rosNodeCurrentMap && rosNodeCurrentMap.value ? rosNodeCurrentMap.value : "")
+          .trim();
+        if (!rn || !cm) {
+          if (rosNodesError) {
+            rosNodesError.textContent = "请填写 robot_name 与 current_map";
+          }
+          return;
+        }
+        params = { robot_name: rn, current_map: cm };
+      }
+
+      if (btnRosNodeCreate) {
+        btnRosNodeCreate.disabled = true;
+      }
+      if (rosNodesError) {
+        rosNodesError.textContent = "";
+      }
+
+      try {
+        const payload = await createRosNode(nodeType, params);
+        appendLog(`创建节点 ${payload.node_id || ""} 并启动`);
+        await refreshRosNodesStatus();
+      } catch (err) {
+        if (rosNodesError) {
+          rosNodesError.textContent = err.message || String(err);
+        }
+        appendLog(`创建节点失败: ${err.message || err}`);
+      } finally {
+        if (btnRosNodeCreate) {
+          btnRosNodeCreate.disabled = false;
+        }
+      }
+    });
+
+    const syncFields = () => {
+      const nodeType = rosNodeCreateTypeSelect ? rosNodeCreateTypeSelect.value : "";
+      const showFake = nodeType === "fake_pub";
+      if (rosNodeFieldsFakePub) {
+        rosNodeFieldsFakePub.style.display = showFake ? "" : "none";
+      }
+      if (rosNodeFieldsSlamMapping) {
+        rosNodeFieldsSlamMapping.style.display = showFake ? "none" : "";
+      }
+    };
+
+    if (rosNodeFieldsFakePub && rosNodeFieldsSlamMapping) {
+      syncFields();
+      if (rosNodeCreateTypeSelect) {
+        rosNodeCreateTypeSelect.addEventListener("change", () => syncFields());
+      }
+    }
+  }
+  if (rosNodesPollTimer) {
+    clearInterval(rosNodesPollTimer);
+  }
+  rosNodesPollTimer = setInterval(() => {
+    refreshRosNodesStatus().catch(() => {});
+  }, 2500);
+}
+
+function loadFloorPreference() {
+  try {
+    const v = localStorage.getItem(FLOOR_PREF_KEY);
+    return v ? String(v).trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 function syncRelocPickCursorClass() {
   if (!mapWrapper || !relocPickToggle) {
     return;
@@ -621,6 +982,13 @@ function getRobotsOnCurrentMap() {
   if (!latestSnapshot || !Array.isArray(latestSnapshot.robots) || !activeFloor) {
     return [];
   }
+  if (isMappingFloor(activeFloor)) {
+    const rid = robotIdFromMappingFloor(activeFloor);
+    if (!rid) {
+      return [];
+    }
+    return latestSnapshot.robots.filter((r) => r && r.id === rid);
+  }
   return latestSnapshot.robots.filter((r) => r && r.current_map === activeFloor);
 }
 
@@ -690,6 +1058,22 @@ function updateRobotStatus() {
     robotStatus.textContent = "定位: 未选择地图";
     return;
   }
+  if (isMappingFloor(activeFloor)) {
+    const rid = robotIdFromMappingFloor(activeFloor);
+    const topic = rid ? `/${rid}/mapping` : "";
+    if (here.length === 0) {
+      robotStatus.textContent = `建图 ${activeFloor} · ${topic} · 无该机器人位姿`;
+    } else {
+      const parts = here.map((r) => {
+        const p = r.pose || {};
+        const nm = r.name || r.id;
+        const loc = r.localization === "lost" ? "丢失" : "OK";
+        return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
+      });
+      robotStatus.textContent = `建图 (${here.length}): ${parts.join(" · ")}`;
+    }
+    return;
+  }
   if (!latestSnapshot) {
     robotStatus.textContent = `地图 ${activeFloor} · 无实时数据`;
     return;
@@ -747,7 +1131,9 @@ function refreshMetaPanel() {
   mapMeta.textContent = JSON.stringify(
     {
       floor: activeFloor,
-      source: "backend-api",
+      source: isMappingFloor(activeFloor)
+        ? `mapping-live-/${robotIdFromMappingFloor(activeFloor) || "?"}/mapping`
+        : "backend-api",
       width: activePgm.width,
       height: activePgm.height,
       resolution: activeMeta.resolution,
@@ -766,6 +1152,30 @@ function refreshMetaPanel() {
 }
 
 async function loadFloorMap(floor) {
+  stopMapLivePolling();
+  activeMappingRobotId = null;
+  updateMappingToolbar();
+  if (isMappingFloor(floor)) {
+    const rid = robotIdFromMappingFloor(floor);
+    if (!rid) {
+      mapStatus.textContent = "无效的建图楼层名";
+      return;
+    }
+    mapStatus.textContent = `正在连接 /${rid}/mapping …`;
+    activePgm = null;
+    mapBitmap = null;
+    activeFloor = floor;
+    activeMappingRobotId = rid;
+    if (relocRobotId && !relocRobotId.dataset.userEdited) {
+      relocRobotId.value = rid;
+    }
+    startMapLivePolling();
+    updateMappingToolbar();
+    updateRobotStatus();
+    renderScene();
+    appendLog(`建图视图: ${floor} → /${rid}/mapping`);
+    return;
+  }
   mapStatus.textContent = `正在加载 ${floor}...`;
   try {
     const mapData = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(floor)}`);
@@ -782,6 +1192,7 @@ async function loadFloorMap(floor) {
     renderScene();
     updateRobotStatus();
     refreshMetaPanel();
+    updateMappingToolbar();
     mapStatus.textContent = `${floor} 加载完成 · 滚轮缩放 · 拖拽平移`;
   } catch (err) {
     mapStatus.textContent = `加载失败: ${err.message}`;
@@ -790,6 +1201,7 @@ async function loadFloorMap(floor) {
     const { w, h } = getCanvasCssSize();
     ctx.fillStyle = "#020617";
     ctx.fillRect(0, 0, w, h);
+    updateMappingToolbar();
   }
 }
 
@@ -896,6 +1308,82 @@ function stopSensorPolling() {
     clearInterval(sensorPollTimer);
     sensorPollTimer = null;
   }
+}
+
+function stopMapLivePolling() {
+  if (mapLiveTimer) {
+    clearInterval(mapLiveTimer);
+    mapLiveTimer = null;
+  }
+  mapLiveInitializedView = false;
+}
+
+async function applyLiveMappingFrame() {
+  const rid = activeMappingRobotId;
+  if (!rid) {
+    return;
+  }
+  const url = `${API_BASE_URL}/api/mapping/live?robot_id=${encodeURIComponent(rid)}`;
+  const data = await fetchJsonOptional(url);
+  if (!data || !data.available) {
+    mapStatus.textContent =
+      (data && data.reason) ||
+      `等待 /${rid}/mapping（需向该 topic 发布 OccupancyGrid，且 ROS 桥运行中）…`;
+    return;
+  }
+  const raw = atob(data.data_b64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    bytes[i] = raw.charCodeAt(i);
+  }
+  const pgm = {
+    width: data.width,
+    height: data.height,
+    maxVal: 255,
+    data: Array.from(bytes),
+  };
+  activePgm = pgm;
+  activeMeta = {
+    resolution: String(data.resolution),
+    origin: `[${data.origin[0]}, ${data.origin[1]}, ${data.origin[2]}]`,
+    occupied_thresh: "0.65",
+    free_thresh: "0.196",
+  };
+  mapBitmap = buildMapBitmap(pgm);
+  if (!mapLiveInitializedView) {
+    resetViewToFit();
+    mapLiveInitializedView = true;
+  }
+  renderScene();
+  refreshMetaPanel();
+  mapStatus.textContent = `建图 ${rid} ${data.width}×${data.height} · res ${data.resolution} m/cell`;
+}
+
+function startMapLivePolling() {
+  stopMapLivePolling();
+  mapLiveInitializedView = false;
+  applyLiveMappingFrame().catch(() => {});
+  mapLiveTimer = setInterval(() => {
+    applyLiveMappingFrame().catch(() => {});
+  }, 400);
+}
+
+async function postSaveMap(mapName) {
+  const res = await fetch(`${API_BASE_URL}/api/mapping/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ map_name: mapName }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `保存失败 (${res.status})`);
+  }
+  return payload;
 }
 
 function startSensorPolling() {
@@ -1016,6 +1504,7 @@ function initLogs() {
 }
 
 async function initMonitor() {
+  await resolveApiBaseUrl();
   loadAndApplyMonitorCheckboxPrefs();
 
   bindMapInteractions();
@@ -1064,7 +1553,16 @@ async function initMonitor() {
     });
   }
 
-  const targetMapName = () => (floorSelect && floorSelect.value ? floorSelect.value.trim() : "");
+  const targetMapName = () => {
+    const fv = floorSelect && floorSelect.value ? floorSelect.value.trim() : "";
+    if (isMappingFloor(fv)) {
+      return mapNameInput && mapNameInput.value ? mapNameInput.value.trim() : "";
+    }
+    if (fv) {
+      return fv;
+    }
+    return mapNameInput && mapNameInput.value ? mapNameInput.value.trim() : "";
+  };
 
   async function runRelocCommand(mode) {
     if (!relocMessage) {
@@ -1079,7 +1577,10 @@ async function initMonitor() {
     if (mode === "map_only" || mode === "both") {
       const mn = targetMapName();
       if (!mn) {
-        relocMessage.textContent = "请先选择目标地图（上方楼层）";
+        relocMessage.textContent =
+          isMappingFloor(floorSelect && floorSelect.value)
+            ? "建图模式下请填写「保存为」地图名（用于切图发布 current_map）"
+            : "请填写「保存为」地图名或选择已保存楼层";
         return;
       }
       payload.map_name = mn;
@@ -1127,15 +1628,63 @@ async function initMonitor() {
 
   await fetchFloors();
   addFloorOptions();
-  floorSelect.value = floors[0];
+  const preferredFloor = loadFloorPreference();
+  const initialFloor = preferredFloor && floors.includes(preferredFloor) ? preferredFloor : floors[0];
+  floorSelect.value = initialFloor;
+  if (mapNameInput) {
+    const sn = loadMapNamePreference();
+    if (sn) {
+      mapNameInput.value = sn;
+    }
+    mapNameInput.addEventListener("change", () => {
+      saveMapNamePreference(mapNameInput.value.trim());
+      updateRobotStatus();
+      renderScene();
+    });
+    if (isMappingFloor(initialFloor)) {
+      updateMappingToolbar();
+    }
+  }
+  if (btnSaveMap) {
+    btnSaveMap.addEventListener("click", async () => {
+      const name = mapNameInput && mapNameInput.value ? mapNameInput.value.trim() : "";
+      if (!name) {
+        mapStatus.textContent = "保存失败: 请先填写地图名";
+        return;
+      }
+      btnSaveMap.disabled = true;
+      mapStatus.textContent = "正在保存地图到 map/ …";
+      try {
+        await postSaveMap(name);
+        saveMapNamePreference(name);
+        mapStatus.textContent = `已保存 map/${name}/`;
+        appendLog(`地图已保存: ${name}`);
+        await fetchFloors();
+        addFloorOptions();
+        if (floors.includes(name)) {
+          floorSelect.value = name;
+          await loadFloorMap(name);
+          saveFloorPreference(name);
+        }
+      } catch (err) {
+        mapStatus.textContent = `保存失败: ${err.message || err}`;
+        appendLog(`保存地图失败: ${err.message || err}`);
+      } finally {
+        btnSaveMap.disabled = false;
+      }
+    });
+  }
   resizeCanvasToDisplay();
-  await loadFloorMap(floors[0]);
+  await loadFloorMap(initialFloor);
+  saveFloorPreference(initialFloor);
   await fetchPoseOnce();
   startPoseStream();
 
   floorSelect.addEventListener("change", async (e) => {
-    await loadFloorMap(e.target.value);
-    appendLog(`切换楼层到 ${e.target.value}`);
+    const floor = e.target.value;
+    await loadFloorMap(floor);
+    saveFloorPreference(floor);
+    appendLog(`切换楼层到 ${floor}`);
   });
 
   gridToggle.addEventListener("change", () => {
@@ -1173,6 +1722,7 @@ async function initMonitor() {
 async function bootstrap() {
   initSettings();
   initLogs();
+  initRosNodesPage();
   await initMonitor();
 }
 

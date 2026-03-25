@@ -59,12 +59,13 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import Path
+from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 import ros_command_queue
+import ros_map_store
 import ros_sensor_store
 
 
@@ -211,6 +212,56 @@ class OpenDeliveryTfBridgeNode(Node):
                 )
                 self.get_logger().info(f"subscribing Path on {path_topic}")
 
+        # Live mapping for web: one OccupancyGrid per robot at /<id>/mapping (override via
+        # per-spec "mapping_topic" or env ROS_MAPPING_TOPIC_TEMPLATE default "/{id}/mapping").
+        if os.environ.get("ROS_SUBSCRIBE_ROBOT_MAPPING", "1").strip() not in (
+            "0",
+            "false",
+            "no",
+        ):
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+            qos_map = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
+            tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()
+            for spec in robot_specs:
+                rid = str(spec["id"])
+                topic = str(spec.get("mapping_topic") or tpl.replace("{id}", rid))
+                self.create_subscription(
+                    OccupancyGrid,
+                    topic,
+                    self._make_mapping_grid_cb(rid),
+                    qos_map,
+                )
+                self.get_logger().info(f"subscribing OccupancyGrid (live mapping) on {topic}")
+
+        map_topic = os.environ.get("ROS_OCCUPANCY_MAP_TOPIC", "").strip()
+        if map_topic and os.environ.get("ROS_SUBSCRIBE_GLOBAL_MAP", "0").strip() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+            qos_map = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
+            rid_fallback = str(robot_specs[0]["id"]) if robot_specs else "robot1"
+            self.create_subscription(
+                OccupancyGrid,
+                map_topic,
+                self._make_mapping_grid_cb(rid_fallback),
+                qos_map,
+            )
+            self.get_logger().info(f"subscribing OccupancyGrid (global) on {map_topic}")
+
         rate = float(os.environ.get("ROS_TF_LOOKUP_HZ", "20"))
         self._timer = self.create_timer(1.0 / max(rate, 1.0), self._tick)
 
@@ -293,6 +344,47 @@ class OpenDeliveryTfBridgeNode(Node):
                 f"publish initial pose {rid} map={mf} x={msg.pose.pose.position.x} "
                 f"y={msg.pose.pose.position.y} yaw={yaw}"
             )
+
+    def _make_mapping_grid_cb(self, robot_id: str):
+        def _cb(msg: OccupancyGrid) -> None:
+            if not msg.info:
+                return
+            w = int(msg.info.width)
+            h = int(msg.info.height)
+            if w <= 0 or h <= 0:
+                return
+            need = w * h
+            if len(msg.data) < need:
+                return
+            raw = bytearray(need)
+            for i in range(need):
+                v = int(msg.data[i])
+                if v < 0:
+                    raw[i] = 205
+                else:
+                    raw[i] = min(255, max(0, int(255 - v * 255 // 100)))
+            ox = float(msg.info.origin.position.x)
+            oy = float(msg.info.origin.position.y)
+            oz = float(msg.info.origin.position.z)
+            qx = float(msg.info.origin.orientation.x)
+            qy = float(msg.info.origin.orientation.y)
+            qz = float(msg.info.origin.orientation.z)
+            qw = float(msg.info.origin.orientation.w)
+            yaw = _yaw_from_quat(qx, qy, qz, qw)
+            ros_map_store.set_from_occupancy_grid(
+                robot_id,
+                w,
+                h,
+                float(msg.info.resolution),
+                (ox, oy, oz),
+                yaw,
+                int(msg.header.stamp.sec),
+                int(msg.header.stamp.nanosec),
+                str(msg.header.frame_id or "map"),
+                bytes(raw),
+            )
+
+        return _cb
 
     def _on_tf_message(self, msg: TFMessage) -> None:
         for t in msg.transforms:
@@ -440,28 +532,43 @@ class OpenDeliveryTfBridgeNode(Node):
             self.get_logger().error(f"publish_fn failed: {ex}")
 
 
-def run_ros_tf_bridge(publish_fn: Callable[[List[Dict[str, Any]], float], None]) -> None:
+def run_ros_tf_bridge(
+    publish_fn: Callable[[List[Dict[str, Any]], float], None],
+    stop_event: Optional[threading.Event] = None,
+) -> None:
     specs = _load_robot_specs()
     rclpy.init(args=None)
     node = OpenDeliveryTfBridgeNode(robot_specs=specs, publish_fn=publish_fn)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
-        while rclpy.ok():
+        while rclpy.ok() and not (stop_event and stop_event.is_set()):
             executor.spin_once(timeout_sec=0.05)
     finally:
         ros_command_queue.set_bridge_ready(False)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
-def start_ros_tf_thread(publish_fn: Callable[[List[Dict[str, Any]], float], None]) -> threading.Thread:
+def start_ros_tf_thread(
+    publish_fn: Callable[[List[Dict[str, Any]], float], None],
+    stop_event: Optional[threading.Event] = None,
+) -> threading.Thread:
     def _target() -> None:
         try:
-            run_ros_tf_bridge(publish_fn)
+            run_ros_tf_bridge(publish_fn, stop_event=stop_event)
         except Exception as ex:  # noqa: BLE001
             print(f"[ros_tf_bridge] fatal: {ex}")
 
     t = threading.Thread(target=_target, name="ros_tf_bridge", daemon=True)
     t.start()
     return t
+
+
+def request_ros_shutdown() -> None:
+    try:
+        if rclpy.ok():
+            rclpy.shutdown()
+    except Exception:
+        pass

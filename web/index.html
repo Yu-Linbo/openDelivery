@@ -12,7 +12,7 @@
         <section id="view-monitor" class="view active">
           <header class="view-header">
             <h1>机器人监控</h1>
-            <p>楼层地图与栅格展示</p>
+            <p>楼层地图与栅格展示；选择「robot*_mapping」可订阅对应机器人的 /<robot_name>/mapping 建图流</p>
           </header>
 
           <div class="monitor-layout">
@@ -40,6 +40,23 @@
 
                 <span id="robot-status" class="robot-status">机器人: 未连接</span>
                 <span id="map-status" class="status">等待加载地图...</span>
+              </div>
+
+              <div id="mapping-toolbar-row" class="mapping-toolbar-row" aria-live="polite">
+                <div class="mapping-toolbar-inner">
+                  <label for="map-name-input" class="mapping-label">保存为</label>
+                  <input
+                    id="map-name-input"
+                    type="text"
+                    class="map-name-input"
+                    placeholder="地图目录名，如 floor1"
+                    autocomplete="off"
+                    title="仅建图模式：保存到 map/&lt;名称&gt;/，切图发布 current_map 时也用此名"
+                  />
+                  <button id="btn-save-map" type="button" title="保存到仓库 map/ 目录">
+                    保存地图
+                  </button>
+                </div>
               </div>
 
               <p class="map-hint">
@@ -139,12 +156,74 @@
           </div>
           <ul id="log-list" class="log-list"></ul>
         </section>
+
+        <section id="view-ros" class="view">
+          <header class="view-header">
+            <h1>ROS 节点控制</h1>
+            <p>查看受管 ROS 节点状态，并对单个节点执行暂停、重启。</p>
+          </header>
+
+          <div class="ros-page-toolbar">
+            <span id="ros-nodes-summary" class="status">状态: 未知</span>
+            <button id="btn-ros-nodes-refresh" type="button">刷新</button>
+          </div>
+          <div id="ros-nodes-error" class="message"></div>
+
+          <div class="ros-layout">
+            <div class="ros-left">
+              <div class="ros-section-title">长期节点（示例）</div>
+              <div id="ros-nodes-persistent" class="ros-nodes-list"></div>
+
+              <div class="ros-section-title">已创建节点</div>
+              <div id="ros-nodes-created" class="ros-nodes-list"></div>
+            </div>
+
+            <div class="ros-right">
+              <form id="ros-node-create-form" class="ros-create-form" autocomplete="off">
+                <div class="ros-create-title">新建节点</div>
+                <label class="ros-create-field">
+                  节点类型
+                  <select id="ros-node-create-type" required>
+                    <option value="slam_bringup_mapping">slam_bringup_mapping</option>
+                    <option value="fake_pub">fake_pub</option>
+                  </select>
+                </label>
+
+                <div id="ros-node-fields-fake_pub" class="ros-create-subfields">
+                  <label class="ros-create-field">
+                    robot_name
+                    <input id="ros-node-robot-name" type="text" placeholder="robot2" />
+                  </label>
+                  <label class="ros-create-field">
+                    current_map
+                    <input id="ros-node-current-map" type="text" placeholder="nh_102" />
+                  </label>
+                </div>
+
+                <div id="ros-node-fields-slam_bringup_mapping" class="ros-create-subfields">
+                  <div
+                    class="ros-create-hint"
+                    style="margin-top: -4px; grid-column: 1 / -1;"
+                  >
+                    slam_bringup_mapping 无需额外参数
+                  </div>
+                </div>
+
+                <button id="btn-ros-node-create" type="submit">创建并启动</button>
+                <div class="ros-create-hint">
+                  约定：`fake_pub_<robot_name>`。创建后默认启动；暂停=kill 进程；重启=kill 后拉起。
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
       </main>
 
       <aside class="sidebar">
         <h2>机器人管理</h2>
         <nav>
           <button class="menu-item active" data-view="monitor">监控</button>
+          <button class="menu-item" data-view="ros">ROS 节点</button>
           <button class="menu-item" data-view="settings">参数设置</button>
           <button class="menu-item" data-view="logs">日志</button>
         </nav>

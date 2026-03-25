@@ -1,3 +1,7 @@
 /build/
 /install/
 /log/
+backend/__pycache__
+map/
+# IDE: track agent defs; ignore other .cursor noise
+.cursor/

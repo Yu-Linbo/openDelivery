@@ -14,6 +14,12 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+# Kill old frontend/backend processes to avoid port drift.
+# (We match by script path + web directory to reduce collateral damage.)
+pkill -f "${BACKEND_SCRIPT}" >/dev/null 2>&1 || true
+pkill -f "python3 -m http.server .*${WEB_DIR}" >/dev/null 2>&1 || true
+pkill -f "http.server .*${WEB_DIR}" >/dev/null 2>&1 || true
+
 port_is_busy() {
   local port="$1"
   if lsof -iTCP:"${port}" -sTCP:LISTEN -t >/dev/null 2>&1; then

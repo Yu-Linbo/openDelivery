@@ -1,111 +1,73 @@
-# OpenDelivery Web Stack
+# OpenDelivery Source Workspace
 
-This module is focused on web display and interaction.
-Robot core capabilities such as SLAM and navigation are implemented separately in `src`.
+ROS 2 工作区：源码在 `src/`，构建产物在 `build/`、`install/`（已加入 `.gitignore`）。
 
-## One-Click Start
+## 技术路线
+
+- **建图与定位**：`slam_toolbox`
+- **导航**：`nav2`（Navigation2）
+- **地图加载**：`nav2_map_server`（`map_server`）
+- **不再使用**：RTAB-Map
+
+以**源码方式**组织依赖（如 `slam_toolbox`），便于二次开发与调试。
+
+## `src` 目录说明
+
+功能包列表、构建命令与运行流程见 **`src/README.md`**（替代原 `src/readme.md` 中的历史 catkin/`ud_*` 说明）。
+
+## 源码依赖（可选克隆）
+
+在 `src` 下按需拉取：
 
 ```bash
-cd /home/ubuntu/project_openclaw/openDelivery
+cd /path/to/openDelivery/src
+
+# slam_toolbox：Foxy 使用 foxy-devel（默认 ros2 分支可能不匹配旧发行版）
+git clone https://github.com/SteveMacenski/slam_toolbox.git
+cd slam_toolbox && git checkout foxy-devel && cd ..
+
+# nav2（含 map_server 等）
+git clone https://github.com/ros-navigation/navigation2.git
+```
+
+按发行版切换对应分支或 tag。
+
+## 仿真与 SLAM 联调（简要）
+
+依赖示例（Foxy）：`ros-foxy-gazebo-ros-pkgs`、`ros-foxy-xacro`、`ros-foxy-robot-state-publisher`。
+
+```bash
+cd /path/to/openDelivery
+source /opt/ros/$ROS_DISTRO/setup.bash
+colcon build --symlink-install --packages-up-to simulate slam_bringup
+source install/setup.bash
+ros2 launch simulate headless_sim.launch.py
+```
+
+另一终端（已 `source install/setup.bash`）：
+
+```bash
+ros2 launch slam_bringup mapping.launch.py
+```
+
+详见 `src/simulate/README.md`（目录说明）与 `src/simulate/simulate/README.md`（仿真包文档）。
+
+## Web 栈
+
+```bash
+cd /path/to/openDelivery
 ./start_web_stack.sh
 ```
 
-After startup:
+前端与 API 见 `web/`、`backend/`。
 
-- Frontend: `http://localhost:8000`
-- Backend API: `http://localhost:8001`
+- **`GET /api/floors`**：返回已保存的地图目录名，并与配置中的机器人条目合并出 synthetic 楼层 **`{robot_id}_mapping`**（用于建图视图）。
+- **建图视图**：在监控页选择 **`robot1_mapping`** 这类楼层时，前端轮询 **`GET /api/mapping/live?robot_id=<id>`**，数据来自 ROS **`/<robot_name>/mapping`** 上的 `OccupancyGrid`（由 `backend/ros_tf_bridge.py` 订阅；可用环境变量 **`ROS_MAPPING_TOPIC_TEMPLATE`** 改写，默认 `"/{id}/mapping"`）。可选订阅全局 `/map`：设 **`ROS_SUBSCRIBE_GLOBAL_MAP=1`** 且配置 **`ROS_OCCUPANCY_MAP_TOPIC`**。
+- **保存地图**：仅在建图楼层时显示「保存为 / 保存地图」工具条；写入 `map/<名称>/`（`nav2_map_server` 的 `map_saver_cli`）。**切图** 时：在已保存楼层用该楼层名作为 `current_map`；在建图楼层则用「保存为」输入框中的名称。
 
-Press `Ctrl+C` in the same terminal to stop both services.
+保存依赖与仿真包说明见 `src/simulate/simulate/README.md`。
+</think>
 
-If ports are occupied, the script automatically picks the next available ports and prints them.
 
-## Backend APIs
-
-- `GET /api/floors`
-- `GET /api/maps/{floor}`
-- `GET /api/robot/pose`
-- `GET /api/robot/status`
-- `GET /api/robot/pose/stream` (Server-Sent Events)
-- `GET /api/robot/{robot_id}/scan_2d` — map-frame laser hits (`origin`, `hits`) from `/{id}/scan_2d`
-- `GET /api/robot/{robot_id}/planned_path` — `points` `[[x,y],...]` in `map` from `/{id}/planned_path`
-- `POST /api/robot/command` — enqueue **switch map** and/or **initial pose** (requires `ROBOT_POSE_MODE=ros2_tf` and a running TF bridge). JSON body:
-  - `robot_id` (string, e.g. `robot1`)
-  - `mode`: `map_only` | `pose_only` | `both`
-  - `map_name` (string, floor id under `map/`) — required for `map_only` and `both`
-  - `x`, `y`, `yaw` (numbers, meters and radians) — required for `pose_only` and `both`
-
-ROS publishes from the bridge:
-
-- `std_msgs/String` on `/{robot_id}/current_map` with the floor id (same topic as subscribed for display).
-- `geometry_msgs/PoseWithCovarianceStamped` on `/{robot_id}/initial` (override template with `ROS_INITIAL_POSE_TOPIC_TEMPLATE`, default `/{id}/initial`). Header `frame_id` is the robot’s `map_frame` from spec.
-
-**Demo stack (`src/fake/scripts/fake_pub.py`)** subscribes to the same `/{name}/current_map` and `/{name}/initial` topics: Web 切图会更新楼层并重算演示圆心；Web 重定位会把机体 **接回** 与该圆一致的轨迹并继续绕圈运动。
-
-Disable ROS subscriptions if needed: `ROS_SUBSCRIBE_SCAN_2D=0`, `ROS_SUBSCRIBE_PLANNED_PATH=0`.  
-Topic suffixes: `ROS_SCAN_2D_TOPIC_SUFFIX=/scan_2d`, `ROS_PLANNED_PATH_TOPIC_SUFFIX=/planned_path`.  
-Downsample: `ROS_SCAN_STRIDE`, `ROS_SCAN_MAX_HITS`.
-
-## Robot pose: ROS2 TF (default)
-
-Default: **`ROBOT_POSE_MODE=ros2_tf`** — poses come from TF only; **no fake trajectories**.
-
-If ROS2 / `rclpy` / `tf2_ros` is not available, the API returns an **empty `robots` list** until TF works.  
-For **local demo only** (fake moving robots): `export ROBOT_POSE_MODE=mock`.
-
-Subscribes to **`/tf`** (and by default **`/tf_static`**) — standard `tf2_msgs/msg/TFMessage`.
-
-Expected TF tree (example):
-
-```text
-map
- ├── robot1/odom → robot1/base_link
- └── robot2/odom → robot2/base_link
-```
-
-Lookup is **`map` → `robot1/base_link`** (chains through `robot1/odom` in the buffer).
-
-**Default two robots (no `ROS_ROBOTS_TF_JSON`):** the bridge also tracks **`robot2`** → `robot2/base_link`, subscribes **`/robot2/current_map`**, etc., matching dual `fake_pub`.  
-Only one real robot? `export ROS_TF_DISABLE_SECOND_ROBOT=1`.  
-Optional: `ROS_SECOND_ROBOT_ID`, `ROS_ROBOT_NAME_2`, `ROS_CURRENT_MAP_2`.
-
-**Current map (floor id for the web UI):** bridge subscribes to **`/{id}/current_map`** per robot (`std_msgs/String`).  
-Until the first message, `ROS_CURRENT_MAP` / `ROS_CURRENT_MAP_2` apply. Disable with `ROS_SUBSCRIBE_CURRENT_MAP_TOPIC=0`.
-
-```bash
-export ROBOT_POSE_MODE=ros2_tf
-export ROS_TF_TOPIC=/tf
-export ROS_TF_STATIC_TOPIC=/tf_static   # export ROS_TF_STATIC_TOPIC= to disable
-export ROS_FRAME_MAP=map
-export ROS_FRAME_BASE=robot1/base_link
-export ROS_ROBOT_ID=robot1
-export ROS_ROBOT_NAME=robot1
-export ROS_CURRENT_MAP=nh_102   # must match a floor id under map/ for the web filter
-./start_web_stack.sh
-```
-
-When lookup fails: `localization` is `lost`. Pose is **last good** value by default, or **zeros** if:
-
-```bash
-export ROS_TF_LOST_POSE=zero   # default is hold (keep last)
-```
-
-Multi-robot (JSON overrides the single-robot env vars above):
-
-```bash
-export ROS_ROBOTS_TF_JSON='[
-  {"id":"robot1","name":"送餐-01","map_frame":"map","base_frame":"robot1/base_link","current_map":"nh_102"},
-  {"id":"robot2","name":"送餐-02","map_frame":"map","base_frame":"robot2/base_link","current_map":"nh_103"}
-]'
-```
-
-(`tf_topic` per robot is optional; defaults to `ROS_TF_TOPIC` or `/tf`.)
-
-Optional tuning: `ROS_TF_LOOKUP_HZ` (default 20), `ROS_TF_CACHE_SEC` (default 30).
-
-Requires ROS2 Python: `rclpy`, `tf2_ros`, `tf2_msgs` (same environment as your robot stack).
-
-If `ros2_tf` fails to start, the server keeps **empty robots** (no mock) and prints a hint. Use `ROBOT_POSE_MODE=mock` only if you explicitly want demo data.
-
-## Notes
-
-- Web UI shows `localization: lost` with dimmed icon and an amber label; status line shows `[丢失]`.
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+Shell
