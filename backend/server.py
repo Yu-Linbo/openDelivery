@@ -248,7 +248,7 @@ class RosNodeManager:
                 ["bash", "-lc", cmd],
                 capture_output=True,
                 text=True,
-                timeout=3.0,
+                timeout=0.8,
                 env=os.environ.copy(),
             )
             if proc.returncode != 0:
@@ -266,12 +266,44 @@ class RosNodeManager:
         managed = [self._node_status(spec) for spec in self._managed_nodes]
         with self._lock:
             last_error = self._last_error
+        try:
+            discovered = self.list_ros_nodes()
+        except Exception:
+            discovered = []
         return {
             "managed_nodes": managed,
-            "discovered_nodes": self.list_ros_nodes(),
+            # ros2 node list can block due to DDS discovery; keep it best-effort.
+            "discovered_nodes": discovered,
             "last_error": last_error,
             "timestamp": time.time(),
         }
+
+    def kill_discovered_node(self, node_name: str):
+        name = (node_name or "").strip()
+        if not name.startswith("/"):
+            raise ValueError("node_name must start with /")
+        token = name.lstrip("/")
+        if not token:
+            raise ValueError("invalid node_name")
+
+        # Best-effort: match by common ROS2 CLI node remap args or node name token.
+        patterns = [f"__node:={token}", f"__node:=/{token}", f"/{token}", token]
+        pids = []
+        seen = set()
+        for pat in patterns:
+            for pid in self._find_pids(pat):
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                pids.append(pid)
+        killed = 0
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except Exception:
+                continue
+        return {"node_name": name, "matched_pids": pids, "killed_count": killed}
 
     def control(self, node_id: str, action: str):
         spec = self._spec_by_id(node_id)
@@ -324,12 +356,20 @@ def list_floors():
 
 def _list_mapping_floor_labels() -> list:
     try:
-        from ros_tf_bridge import _load_robot_specs
+        from ros_tf_bridge import _load_robot_specs, list_mapping_robot_ids_from_status_store
 
-        return [f"{str(s['id'])}_mapping" for s in _load_robot_specs()]
+        ids = [str(s["id"]) for s in _load_robot_specs()]
+        # Mapping floors are shown only for robots whose latest robot_status is "mapping".
+        mapping_ids = set(list_mapping_robot_ids_from_status_store())
+        if mapping_ids:
+            ids = [rid for rid in ids if rid in mapping_ids] + [
+                rid for rid in mapping_ids if rid not in ids
+            ]
+        else:
+            ids = []
+        return [f"{rid}_mapping" for rid in ids]
     except Exception:
-        rid = (os.environ.get("ROS_ROBOT_ID") or "robot1").strip() or "robot1"
-        return [f"{rid}_mapping"]
+        return []
 
 
 def list_floors_for_api() -> list:
@@ -646,7 +686,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except BrokenPipeError:
+            # Client disconnected (browser aborted request). Ignore to avoid log spam.
+            return
 
     def _not_found(self, message):
         self._send_json({"error": message}, status=404)
@@ -745,6 +789,54 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 500)
                 return
             self._send_json({"ok": True, "node_id": node_id, "action": action, "status": status})
+            return
+
+        if path == "/api/ros/nodes/discovered/kill":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            node_name = str(data.get("node_name") or "").strip()
+            if not node_name:
+                self._send_json({"error": "node_name is required"}, 400)
+                return
+            try:
+                # Known node in backend process: stop ROS TF thread instead of killing backend.
+                if node_name == "/open_delivery_web_tf_bridge":
+                    thread_status = POSE_PROVIDER.stop_ros_threads()
+                    out = {
+                        "node_name": node_name,
+                        "handled_by": "ros_threads_control",
+                        "threads_status": thread_status,
+                    }
+                # Common fake publisher node in this workspace.
+                elif node_name == "/fake_robots_tf":
+                    proc = ROS_NODE_MANAGER._run_shell("pkill -f 'python3 fake_pub.py' || true")
+                    out = {
+                        "node_name": node_name,
+                        "handled_by": "pkill_fake_pub",
+                        "returncode": proc.returncode,
+                    }
+                else:
+                    out = ROS_NODE_MANAGER.kill_discovered_node(node_name)
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json({"ok": True, **out, "status": ROS_NODE_MANAGER.status()})
             return
 
         if path == "/api/ros/threads/control":
@@ -1064,6 +1156,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "source": snap.get("source"),
                     }
                 )
+            return
+
+        if path == "/api/robot/status/cache":
+            try:
+                import ros_robot_status_store
+            except ImportError:
+                self._send_json({"items": []})
+                return
+            self._send_json(
+                {
+                    "items": ros_robot_status_store.list_all_last_status(),
+                    "timestamp": time.time(),
+                }
+            )
             return
 
         if path == "/api/robot/pose/stream":

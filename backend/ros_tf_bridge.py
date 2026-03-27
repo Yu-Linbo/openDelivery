@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -64,8 +65,15 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
+try:
+    # custom_msgs_srvs/RobotStatus: std_msgs/Header header + string robot_name
+    from custom_msgs_srvs.msg import RobotStatus
+except Exception:  # noqa: BLE001
+    RobotStatus = None
+
 import ros_command_queue
 import ros_map_store
+import ros_robot_status_store
 import ros_sensor_store
 
 
@@ -94,45 +102,9 @@ def _load_robot_specs() -> List[Dict[str, Any]]:
             normalized.append({**spec, "tf_topic": str(topic)})
         return normalized
 
-    first_id = os.environ.get("ROS_ROBOT_ID", "robot1")
-    tf_topic = os.environ.get("ROS_TF_TOPIC", "/tf")
-    map_frame = os.environ.get("ROS_FRAME_MAP", "map")
-    base_default = os.environ.get("ROS_FRAME_BASE", f"{first_id}/base_link")
-    current_map = os.environ.get("ROS_CURRENT_MAP", "nh_102")
-
-    first: Dict[str, Any] = {
-        "id": first_id,
-        "name": os.environ.get("ROS_ROBOT_NAME", first_id),
-        "tf_topic": tf_topic,
-        "map_frame": map_frame,
-        "base_frame": base_default,
-        "current_map": current_map,
-    }
-    out: List[Dict[str, Any]] = [first]
-
-    disable_second = os.environ.get("ROS_TF_DISABLE_SECOND_ROBOT", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    second_raw = os.environ.get("ROS_SECOND_ROBOT_ID")
-    if second_raw is None:
-        second_id = "robot2"
-    else:
-        second_id = second_raw.strip()
-    if not disable_second and second_id and second_id != first_id:
-        cm2 = os.environ.get("ROS_CURRENT_MAP_2", current_map)
-        out.append(
-            {
-                "id": second_id,
-                "name": os.environ.get("ROS_ROBOT_NAME_2", second_id),
-                "tf_topic": tf_topic,
-                "map_frame": map_frame,
-                "base_frame": f"{second_id}/base_link",
-                "current_map": cm2,
-            }
-        )
-    return out
+    # Default mode: no hardcoded robots. Robot identities are discovered from
+    # /<id>/robot_status at runtime, then robot-specific subscriptions are created.
+    return []
 
 
 class OpenDeliveryTfBridgeNode(Node):
@@ -150,12 +122,36 @@ class OpenDeliveryTfBridgeNode(Node):
         self._initial_pubs: Dict[str, Any] = {}
         self._map_cmd_pubs: Dict[str, Any] = {}
 
+        # Heartbeat-based liveness detection via /<robot_name>/robot_status.
+        # When enabled, web-side identity is derived from discovered robot_status topics.
+        self._robot_status_enabled = RobotStatus is not None
+        self._require_robot_status = os.environ.get("ROS_REQUIRE_ROBOT_STATUS", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._robot_status_timeout_sec = float(os.environ.get("ROS_ROBOT_STATUS_TIMEOUT_SEC", "2.5"))
+        self._robot_status_timeout_ns = int(self._robot_status_timeout_sec * 1_000_000_000)
+        self._robot_status_topic_rx = re.compile(r"^/(.+)/robot_status$")
+        self._robot_status_last_ns: Dict[str, int] = {}
+        self._robot_status_topic_by_id: Dict[str, str] = {}
+        self._robot_status_subs: Dict[str, Any] = {}
+        self._robot_status_payload_by_id: Dict[str, Dict[str, Any]] = {}
+        self._robot_specific_subs_enabled = False
+        self._wait_enable_robot_specific_timer = None
+        self._sub_current_map: Dict[str, Any] = {}
+        self._sub_scan: Dict[str, Any] = {}
+        self._sub_path: Dict[str, Any] = {}
+        self._sub_mapping: Dict[str, Any] = {}
+
         from tf2_ros import Buffer
 
         cache_sec = float(os.environ.get("ROS_TF_CACHE_SEC", "30"))
         self._buffer = Buffer(cache_time=Duration(seconds=cache_sec))
 
         topics = sorted({str(s["tf_topic"]) for s in robot_specs})
+        if not topics:
+            topics = [os.environ.get("ROS_TF_TOPIC", "/tf")]
         for tp in topics:
             self.create_subscription(TFMessage, tp, self._on_tf_message, 10)
             self.get_logger().info(f"subscribing TFMessage on {tp}")
@@ -165,80 +161,76 @@ class OpenDeliveryTfBridgeNode(Node):
             self.create_subscription(TFMessage, static_topic, self._on_tf_message, 10)
             self.get_logger().info(f"subscribing TFMessage on {static_topic} (static)")
 
-        if os.environ.get("ROS_SUBSCRIBE_CURRENT_MAP_TOPIC", "1").strip() not in (
-            "0",
-            "false",
-            "no",
-        ):
-            for spec in robot_specs:
-                rid = str(spec["id"])
-                map_topic = str(spec.get("current_map_topic") or f"/{rid}/current_map")
-                self.create_subscription(
-                    String,
-                    map_topic,
-                    self._make_current_map_cb(rid),
-                    10,
-                )
-                self.get_logger().info(f"subscribing String (current_map) on {map_topic}")
-
         scan_suffix = os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d")
         path_suffix = os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path")
-        if os.environ.get("ROS_SUBSCRIBE_SCAN_2D", "1").strip() not in ("0", "false", "no"):
-            for spec in robot_specs:
-                rid = str(spec["id"])
-                mf = str(spec["map_frame"])
-                scan_topic = str(spec.get("scan_2d_topic") or f"/{rid}{scan_suffix}")
-                self.create_subscription(
-                    LaserScan,
-                    scan_topic,
-                    self._make_scan_cb(rid, mf),
-                    10,
-                )
-                self.get_logger().info(f"subscribing LaserScan on {scan_topic}")
-        if os.environ.get("ROS_SUBSCRIBE_PLANNED_PATH", "1").strip() not in (
-            "0",
-            "false",
-            "no",
-        ):
-            for spec in robot_specs:
-                rid = str(spec["id"])
-                mf = str(spec["map_frame"])
-                path_topic = str(spec.get("planned_path_topic") or f"/{rid}{path_suffix}")
-                self.create_subscription(
-                    Path,
-                    path_topic,
-                    self._make_path_cb(rid, mf),
-                    10,
-                )
-                self.get_logger().info(f"subscribing Path on {path_topic}")
 
-        # Live mapping for web: one OccupancyGrid per robot at /<id>/mapping (override via
-        # per-spec "mapping_topic" or env ROS_MAPPING_TOPIC_TEMPLATE default "/{id}/mapping").
-        if os.environ.get("ROS_SUBSCRIBE_ROBOT_MAPPING", "1").strip() not in (
-            "0",
-            "false",
-            "no",
-        ):
-            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+        rate = float(os.environ.get("ROS_TF_LOOKUP_HZ", "20"))
+        self._timer = self.create_timer(1.0 / max(rate, 1.0), self._tick)
 
-            qos_map = QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
-                history=HistoryPolicy.KEEP_LAST,
+        cmd_hz = float(os.environ.get("ROS_COMMAND_TIMER_HZ", "20"))
+        self._cmd_timer = self.create_timer(1.0 / max(cmd_hz, 1.0), self._process_commands)
+
+        ros_command_queue.set_bridge_ready(True)
+        self.get_logger().info("web command queue ready (initial pose + current_map publishers)")
+
+        # Discover and subscribe to /<robot_name>/robot_status topics dynamically when
+        # the custom message type is available. But for the "no robot_status topics,
+        # don't subscribe to robot-specific topics" requirement, we only need to check
+        # topic names, not the message type.
+        if self._robot_status_enabled:
+            self.create_timer(1.0, self._discover_robot_status_topics)
+            self.get_logger().info("enabled heartbeat topic discovery (/robot_status)")
+
+        # If there is *no* robot_status topic at all, do not create robot-specific
+        # subscriptions (current_map/scan_2d/planned_path/mapping). Enable them once
+        # we observe at least one /*/robot_status topic.
+        if not self._has_any_robot_status_topics():
+            self.get_logger().info(
+                "no /*/robot_status topics found yet; delaying robot-specific subscriptions"
             )
-            tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()
-            for spec in robot_specs:
-                rid = str(spec["id"])
-                topic = str(spec.get("mapping_topic") or tpl.replace("{id}", rid))
-                self.create_subscription(
-                    OccupancyGrid,
-                    topic,
-                    self._make_mapping_grid_cb(rid),
-                    qos_map,
-                )
-                self.get_logger().info(f"subscribing OccupancyGrid (live mapping) on {topic}")
+            self._wait_enable_robot_specific_timer = self.create_timer(
+                1.0, self._wait_and_enable_robot_specific_subs
+            )
+        else:
+            self._enable_robot_specific_subs(robot_specs, scan_suffix, path_suffix)
 
+    def _has_any_robot_status_topics(self) -> bool:
+        try:
+            names_and_types = self.get_topic_names_and_types()
+        except Exception:  # noqa: BLE001
+            return False
+        for name, _types in names_and_types:
+            if self._robot_status_topic_rx.match(str(name)):
+                return True
+        return False
+
+    def _wait_and_enable_robot_specific_subs(self) -> None:
+        if self._robot_specific_subs_enabled:
+            return
+        if self._has_any_robot_status_topics():
+            try:
+                # Cancel the wait timer by destroying it.
+                if self._wait_enable_robot_specific_timer is not None:
+                    self.destroy_timer(self._wait_enable_robot_specific_timer)
+            except Exception:  # noqa: BLE001
+                pass
+            self._wait_enable_robot_specific_timer = None
+            self._enable_robot_specific_subs(self._specs, os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"), os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"))
+
+    def _enable_robot_specific_subs(
+        self,
+        robot_specs: List[Dict[str, Any]],
+        scan_suffix: str,
+        path_suffix: str,
+    ) -> None:
+        if self._robot_specific_subs_enabled:
+            return
+        self._robot_specific_subs_enabled = True
+
+        for spec in robot_specs:
+            self._ensure_robot_specific_subs_for_spec(spec, scan_suffix, path_suffix)
+
+        # Global mapping for web.
         map_topic = os.environ.get("ROS_OCCUPANCY_MAP_TOPIC", "").strip()
         if map_topic and os.environ.get("ROS_SUBSCRIBE_GLOBAL_MAP", "0").strip() in (
             "1",
@@ -262,16 +254,188 @@ class OpenDeliveryTfBridgeNode(Node):
             )
             self.get_logger().info(f"subscribing OccupancyGrid (global) on {map_topic}")
 
-        rate = float(os.environ.get("ROS_TF_LOOKUP_HZ", "20"))
-        self._timer = self.create_timer(1.0 / max(rate, 1.0), self._tick)
+    def _ensure_robot_specific_subs_for_spec(
+        self,
+        spec: Dict[str, Any],
+        scan_suffix: str,
+        path_suffix: str,
+    ) -> None:
+        rid = str(spec["id"])
+        mf = str(spec["map_frame"])
 
-        for spec in robot_specs:
-            self._ensure_cmd_pubs(str(spec["id"]))
-        cmd_hz = float(os.environ.get("ROS_COMMAND_TIMER_HZ", "20"))
-        self._cmd_timer = self.create_timer(1.0 / max(cmd_hz, 1.0), self._process_commands)
+        if (
+            rid not in self._sub_current_map
+            and os.environ.get("ROS_SUBSCRIBE_CURRENT_MAP_TOPIC", "1").strip()
+            not in ("0", "false", "no")
+        ):
+            map_topic = str(spec.get("current_map_topic") or f"/{rid}/current_map")
+            self._sub_current_map[rid] = self.create_subscription(
+                String,
+                map_topic,
+                self._make_current_map_cb(rid),
+                10,
+            )
+            self.get_logger().info(f"subscribing String (current_map) on {map_topic}")
 
-        ros_command_queue.set_bridge_ready(True)
-        self.get_logger().info("web command queue ready (initial pose + current_map publishers)")
+        if (
+            rid not in self._sub_scan
+            and os.environ.get("ROS_SUBSCRIBE_SCAN_2D", "1").strip()
+            not in ("0", "false", "no")
+        ):
+            scan_topic = str(spec.get("scan_2d_topic") or f"/{rid}{scan_suffix}")
+            self._sub_scan[rid] = self.create_subscription(
+                LaserScan,
+                scan_topic,
+                self._make_scan_cb(rid, mf),
+                10,
+            )
+            self.get_logger().info(f"subscribing LaserScan on {scan_topic}")
+
+        if (
+            rid not in self._sub_path
+            and os.environ.get("ROS_SUBSCRIBE_PLANNED_PATH", "1").strip()
+            not in ("0", "false", "no")
+        ):
+            path_topic = str(spec.get("planned_path_topic") or f"/{rid}{path_suffix}")
+            self._sub_path[rid] = self.create_subscription(
+                Path,
+                path_topic,
+                self._make_path_cb(rid, mf),
+                10,
+            )
+            self.get_logger().info(f"subscribing Path on {path_topic}")
+
+        if (
+            rid not in self._sub_mapping
+            and os.environ.get("ROS_SUBSCRIBE_ROBOT_MAPPING", "1").strip()
+            not in ("0", "false", "no")
+        ):
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+            qos_map = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
+            tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()
+            topic = str(spec.get("mapping_topic") or tpl.replace("{id}", rid))
+            self._sub_mapping[rid] = self.create_subscription(
+                OccupancyGrid,
+                topic,
+                self._make_mapping_grid_cb(rid),
+                qos_map,
+            )
+            self.get_logger().info(f"subscribing OccupancyGrid (live mapping) on {topic}")
+
+    def _make_robot_status_cb(self, rid: str, topic_name: str):
+        def _cb(msg: RobotStatus) -> None:
+            try:
+                sec = int(getattr(msg.header.stamp, "sec", 0))
+                nanosec = int(getattr(msg.header.stamp, "nanosec", 0))
+                last_ns = sec * 1_000_000_000 + nanosec
+                self._robot_status_last_ns[rid] = last_ns
+                self._robot_status_topic_by_id[rid] = topic_name
+                robot_name = str(getattr(msg, "robot_name", "") or rid).strip() or rid
+                current_map = str(getattr(msg, "current_map", "") or "").strip()
+                robot_status = str(getattr(msg, "robot_status", "") or "").strip()
+                payload = {
+                    "robot_name": robot_name,
+                    "current_map": current_map,
+                    "robot_status": robot_status,
+                }
+                self._robot_status_payload_by_id[rid] = payload
+                ros_robot_status_store.set_last_status(
+                    rid,
+                    robot_name=robot_name,
+                    current_map=current_map,
+                    robot_status=robot_status,
+                    topic=topic_name,
+                    stamp_ns=last_ns,
+                )
+            except Exception:  # noqa: BLE001
+                return
+
+        return _cb
+
+    def _ensure_robot_from_status_topic(self, rid: str, topic_name: str) -> None:
+        # Create subscriptions for the discovered robot identity.
+        if topic_name not in self._robot_status_subs:
+            self._robot_status_subs[topic_name] = self.create_subscription(
+                RobotStatus,
+                topic_name,
+                self._make_robot_status_cb(rid, topic_name),
+                10,
+            )
+        self._robot_status_topic_by_id[rid] = topic_name
+
+        # If this robot is not in self._specs yet, add a minimal spec so that /api/robot/pose
+        # can include it (TF lookup + current_map subscription).
+        if not any(str(s.get("id")) == rid for s in self._specs):
+            map_frame = os.environ.get("ROS_FRAME_MAP", "map")
+            current_map_default = os.environ.get("ROS_CURRENT_MAP", "nh_102")
+            spec = {
+                "id": rid,
+                "name": rid,
+                "tf_topic": os.environ.get("ROS_TF_TOPIC", "/tf"),
+                "map_frame": map_frame,
+                "base_frame": f"{rid}/base_link",
+                "current_map": current_map_default,
+            }
+            self._specs.append(spec)
+
+            # Subscribe current_map so web floor filtering works.
+            map_topic = f"/{rid}/current_map"
+            self.create_subscription(
+                String,
+                map_topic,
+                self._make_current_map_cb(rid),
+                10,
+            )
+            self.get_logger().info(f"discovered robot {rid} from {topic_name}; subscribing {map_topic}")
+            self._ensure_cmd_pubs(rid)
+            if self._robot_specific_subs_enabled:
+                self._ensure_robot_specific_subs_for_spec(
+                    spec,
+                    os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"),
+                    os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"),
+                )
+
+            # Preload last-known status if this robot existed before restart.
+            last = ros_robot_status_store.get_last_status(rid)
+            if last:
+                self._robot_status_payload_by_id[rid] = {
+                    "robot_name": str(last.get("robot_name") or rid),
+                    "current_map": str(last.get("current_map") or ""),
+                    "robot_status": str(last.get("robot_status") or ""),
+                }
+
+    def _discover_robot_status_topics(self) -> None:
+        if not self._robot_status_enabled:
+            return
+        try:
+            topic_names_and_types = self.get_topic_names_and_types()
+        except Exception:  # noqa: BLE001
+            return
+
+        # Expected type string for interface discovery.
+        # (Exact type depends on build; keep the check permissive.)
+        expected_suffix = "/robot_status"
+        for name, types in topic_names_and_types:
+            if not name.endswith(expected_suffix):
+                continue
+            m = self._robot_status_topic_rx.match(name)
+            if not m:
+                continue
+            rid = str(m.group(1))
+            # If types is available, prefer verifying it is our RobotStatus.
+            if types:
+                if not any(
+                    (t == "custom_msgs_srvs/msg/RobotStatus") or str(t).endswith("/RobotStatus")
+                    for t in types
+                ):
+                    continue
+            self._ensure_robot_from_status_topic(rid, name)
 
     def _current_map_pub_topic(self, rid: str) -> str:
         for s in self._specs:
@@ -474,14 +638,39 @@ class OpenDeliveryTfBridgeNode(Node):
     def _tick(self) -> None:
         stamp = time.time()
         out: List[Dict[str, Any]] = []
-        for spec in self._specs:
+        now_ns = self.get_clock().now().nanoseconds
+        for spec in list(self._specs):
             rid = str(spec["id"])
             name = str(spec.get("name") or rid)
             mf = str(spec["map_frame"])
             bf = str(spec["base_frame"])
+
+            # Heartbeat liveness (if enabled).
+            hb_known = (
+                rid in self._robot_status_topic_by_id
+                or rid in self._robot_status_last_ns
+            )
+            if self._require_robot_status and self._robot_status_enabled and not hb_known:
+                continue
+            hb_ns = self._robot_status_last_ns.get(rid)
+            hb_online = hb_ns is not None and (now_ns - hb_ns) <= self._robot_status_timeout_ns
+            robot_status_topic = self._robot_status_topic_by_id.get(rid)
+
+            # If we've identified this robot via heartbeat topic discovery and its heartbeat
+            # has gone stale, do not include it in web output at all.
+            if self._robot_status_enabled and hb_known and not hb_online:
+                continue
+
             current_map = self._current_map_from_topic.get(rid) or str(
                 spec.get("current_map") or "nh_102"
             )
+            status_payload = self._robot_status_payload_by_id.get(rid) or {}
+            status_current_map = str(status_payload.get("current_map") or "").strip()
+            if status_current_map:
+                current_map = status_current_map
+            robot_name = str(status_payload.get("robot_name") or name or rid)
+            robot_status = str(status_payload.get("robot_status") or "").strip()
+            task_status = robot_status if robot_status else str(spec.get("task_status") or "Running")
             try:
                 tr = self._buffer.lookup_transform(mf, bf, Time(), timeout=Duration(seconds=0.05))
                 x = float(tr.transform.translation.x)
@@ -495,13 +684,16 @@ class OpenDeliveryTfBridgeNode(Node):
                 out.append(
                     {
                         "id": rid,
-                        "name": name,
+                        "name": robot_name,
                         "frame_id": mf,
                         "current_map": current_map,
                         "pose": pose,
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "ok",
-                        "task_status": str(spec.get("task_status") or "Running"),
+                        "task_status": task_status,
+                        "robot_status": robot_status,
+                        "robot_status_topic": robot_status_topic,
+                        "heartbeat_online": hb_online,
                     }
                 )
             except Exception as ex:  # noqa: BLE001
@@ -517,13 +709,16 @@ class OpenDeliveryTfBridgeNode(Node):
                 out.append(
                     {
                         "id": rid,
-                        "name": name,
+                        "name": robot_name,
                         "frame_id": mf,
                         "current_map": current_map,
                         "pose": pose,
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "lost",
-                        "task_status": str(spec.get("task_status") or "Running"),
+                        "task_status": task_status,
+                        "robot_status": robot_status,
+                        "robot_status_topic": robot_status_topic,
+                        "heartbeat_online": hb_online,
                     }
                 )
         try:
@@ -572,3 +767,16 @@ def request_ros_shutdown() -> None:
             rclpy.shutdown()
     except Exception:
         pass
+
+
+def list_mapping_robot_ids_from_status_store() -> List[str]:
+    """Robots whose latest RobotStatus indicates mapping mode."""
+    out: List[str] = []
+    for item in ros_robot_status_store.list_all_last_status():
+        rid = str(item.get("robot_id") or "").strip()
+        st = str(item.get("robot_status") or "").strip().lower()
+        if not rid:
+            continue
+        if st == "mapping":
+            out.append(rid)
+    return out

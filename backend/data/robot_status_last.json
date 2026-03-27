@@ -1,0 +1,20 @@
+{
+  "robot1": {
+    "current_map": "",
+    "robot_id": "robot1",
+    "robot_name": "robot1",
+    "robot_status": "",
+    "stamp_ns": 1774601697975850469,
+    "topic": "/robot1/robot_status",
+    "updated_at": 1774601697.9775891
+  },
+  "robot4": {
+    "current_map": "",
+    "robot_id": "robot4",
+    "robot_name": "robot4",
+    "robot_status": "",
+    "stamp_ns": 1774602253027925040,
+    "topic": "/robot4/robot_status",
+    "updated_at": 1774602253.0328443
+  }
+}

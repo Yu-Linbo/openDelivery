@@ -14,6 +14,28 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+# Ensure custom message package is available for web/ROS bridge.
+if [ -f "${ROOT_DIR}/install/setup.bash" ]; then
+  # shellcheck disable=SC1090
+  # `install/setup.bash` may reference optional env vars that are not set.
+  # Since this script runs with `set -u`, temporarily disable it while sourcing.
+  set +u
+  source "${ROOT_DIR}/install/setup.bash"
+  set -u
+  if ! python3 -c "from custom_msgs_srvs.msg import RobotStatus" >/dev/null 2>&1; then
+    if command -v colcon >/dev/null 2>&1; then
+      echo "[open-delivery] building custom_msgs_srvs ..."
+      (cd "${ROOT_DIR}" && colcon build --packages-select custom_msgs_srvs --event-handlers console_direct+ || true)
+      # shellcheck disable=SC1090
+      set +u
+      source "${ROOT_DIR}/install/setup.bash"
+      set -u
+    else
+      echo "[open-delivery] colcon not found; custom_msgs_srvs may be unavailable."
+    fi
+  fi
+fi
+
 # Kill old frontend/backend processes to avoid port drift.
 # (We match by script path + web directory to reduce collateral damage.)
 pkill -f "${BACKEND_SCRIPT}" >/dev/null 2>&1 || true

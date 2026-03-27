@@ -8,6 +8,20 @@
   </head>
   <body>
     <div class="layout">
+      <button
+        id="btn-sidebar-toggle"
+        class="sidebar-toggle"
+        type="button"
+        title="隐藏/显示侧边栏"
+        aria-label="隐藏/显示侧边栏"
+      >
+        <img
+          src="./icons/robot.svg"
+          alt="toggle"
+          width="22"
+          height="22"
+        />
+      </button>
       <main class="content">
         <section id="view-monitor" class="view active">
           <header class="view-header">
@@ -176,6 +190,9 @@
 
               <div class="ros-section-title">已创建节点</div>
               <div id="ros-nodes-created" class="ros-nodes-list"></div>
+
+              <div class="ros-section-title">ROS 发现节点（只读）</div>
+              <div id="ros-nodes-discovered" class="ros-nodes-list"></div>
             </div>
 
             <div class="ros-right">

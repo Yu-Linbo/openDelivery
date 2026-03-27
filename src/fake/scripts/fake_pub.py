@@ -41,6 +41,11 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
+try:
+    from custom_msgs_srvs.msg import RobotStatus
+except Exception:  # noqa: BLE001
+    RobotStatus = None
+
 
 def _sanitize_robot_prefix(name: str, fallback: str) -> str:
     s = (name or "").strip()
@@ -136,20 +141,12 @@ class FakeRobotNode(Node):
         super().__init__("fake_robots_tf")
 
         self.declare_parameter("robot_name", "robot1")
-        self.declare_parameter("second_robot_name", "robot2")
-        self.declare_parameter("publish_second_robot", True)
         self.declare_parameter("current_map", "nh_102")
-        self.declare_parameter("second_current_map", "")
 
         self.declare_parameter("path_radius", 2.0)
         self.declare_parameter("path_center_x", 3.0)
         self.declare_parameter("path_center_y", 3.0)
         self.declare_parameter("path_speed", 0.35)
-
-        self.declare_parameter("path_radius_2", 1.2)
-        self.declare_parameter("path_center_x_2", 5.5)
-        self.declare_parameter("path_center_y_2", 3.5)
-        self.declare_parameter("path_speed_2", 0.28)
 
         self.declare_parameter("scan_x_offset", 0.2)
         self.declare_parameter("scan_y_offset", 0.0)
@@ -158,39 +155,20 @@ class FakeRobotNode(Node):
         self.robot_name = _sanitize_robot_prefix(
             str(self.get_parameter("robot_name").value), "robot1"
         )
-        second_raw = self.get_parameter("second_robot_name").value
-        second_str = str(second_raw).strip() if second_raw is not None else "robot2"
-        self.second_robot_name = (
-            _sanitize_robot_prefix(second_str, "robot2") if second_str else ""
-        )
-        self.publish_second_robot = bool(
-            self.get_parameter("publish_second_robot").value
-        )
         self.current_map = str(self.get_parameter("current_map").value)
-        second_map_raw = self.get_parameter("second_current_map").value
-        second_map_str = str(second_map_raw).strip() if second_map_raw else ""
-        self.second_current_map = second_map_str if second_map_str else self.current_map
 
         self._r1 = float(self.get_parameter("path_radius").value)
         self._default_cx1 = float(self.get_parameter("path_center_x").value)
         self._default_cy1 = float(self.get_parameter("path_center_y").value)
         self._sp1 = float(self.get_parameter("path_speed").value)
-        self._r2 = float(self.get_parameter("path_radius_2").value)
-        self._default_cx2 = float(self.get_parameter("path_center_x_2").value)
-        self._default_cy2 = float(self.get_parameter("path_center_y_2").value)
-        self._sp2 = float(self.get_parameter("path_speed_2").value)
         self._cx1, self._cy1 = _center_from_map_id(
             self.current_map, self._default_cx1, self._default_cy1, self._r1
-        )
-        self._cx2, self._cy2 = _center_from_map_id(
-            self.second_current_map, self._default_cx2, self._default_cy2, self._r2
         )
         self._scan_x = float(self.get_parameter("scan_x_offset").value)
         self._scan_y = float(self.get_parameter("scan_y_offset").value)
         self._imu_z = float(self.get_parameter("imu_z_offset").value)
 
         self._arc1 = 0.0
-        self._arc2 = 0.0
 
         self.br = TransformBroadcaster(self)
         scan_topic = f"/{self.robot_name}/scan_2d"
@@ -199,39 +177,17 @@ class FakeRobotNode(Node):
 
         self.current_map_topic = f"/{self.robot_name}/current_map"
         self.map_pub = self.create_publisher(String, self.current_map_topic, 10)
-        self.map_pub_second = None
-        self.second_map_topic = None
-        self.path_pub_second = None
-
-        if (
-            self.publish_second_robot
-            and self.second_robot_name
-            and self.second_robot_name != self.robot_name
-        ):
-            self.second_map_topic = f"/{self.second_robot_name}/current_map"
-            self.map_pub_second = self.create_publisher(String, self.second_map_topic, 10)
-            self.scan_pub_2 = self.create_publisher(
-                LaserScan, f"/{self.second_robot_name}/scan_2d", 10
+        self.robot_status_pub = None
+        if RobotStatus is not None:
+            self.robot_status_pub = self.create_publisher(
+                RobotStatus, f"/{self.robot_name}/robot_status", 10
             )
-            self.path_pub_second = self.create_publisher(
-                Path, f"/{self.second_robot_name}/planned_path", 10
-            )
-        else:
-            self.scan_pub_2 = None
 
         self._rebuild_path_robot1()
-        self._path_msg_2 = None
-        if self.path_pub_second:
-            self._rebuild_path_robot2()
 
         self.get_logger().info(
             f"robot_name={self.robot_name!r}, scan=/{self.robot_name}/scan_2d, "
             f"path=/{self.robot_name}/planned_path, current_map={self.current_map_topic!r}"
-            + (
-                f" | second={self.second_robot_name!r}"
-                if self.path_pub_second
-                else ""
-            )
         )
 
         self.create_subscription(
@@ -249,34 +205,11 @@ class FakeRobotNode(Node):
         )
         self.get_logger().info(f"subscribing String {self.current_map_topic!r} + initial {initial_topic_1!r}")
 
-        if self.second_map_topic:
-            self.create_subscription(
-                String,
-                self.second_map_topic,
-                self._on_current_map_robot2,
-                10,
-            )
-            initial_topic_2 = f"/{self.second_robot_name}/initial"
-            self.create_subscription(
-                PoseWithCovarianceStamped,
-                initial_topic_2,
-                self._on_initial_pose_robot2,
-                10,
-            )
-            self.get_logger().info(
-                f"subscribing String {self.second_map_topic!r} + initial {initial_topic_2!r}"
-            )
-
         self.t = 0.0
         self.timer = self.create_timer(0.1, self.update)
 
     def _rebuild_path_robot1(self) -> None:
         self._path_msg_1 = _build_loop_path("map", self._cx1, self._cy1, self._r1)
-
-    def _rebuild_path_robot2(self) -> None:
-        if self.path_pub_second is None:
-            return
-        self._path_msg_2 = _build_loop_path("map", self._cx2, self._cy2, self._r2)
 
     def _apply_map_change_robot1(self, map_id: str) -> None:
         self.current_map = map_id
@@ -286,27 +219,12 @@ class FakeRobotNode(Node):
         self._arc1 = 0.0
         self._rebuild_path_robot1()
 
-    def _apply_map_change_robot2(self, map_id: str) -> None:
-        self.second_current_map = map_id
-        self._cx2, self._cy2 = _center_from_map_id(
-            map_id, self._default_cx2, self._default_cy2, self._r2
-        )
-        self._arc2 = 0.0
-        self._rebuild_path_robot2()
-
     def _on_current_map_robot1(self, msg: String) -> None:
         d = (msg.data or "").strip()
         if not d or d == self.current_map:
             return
         self._apply_map_change_robot1(d)
         self.get_logger().info(f"robot1 current_map (sub) -> {d!r}")
-
-    def _on_current_map_robot2(self, msg: String) -> None:
-        d = (msg.data or "").strip()
-        if not d or d == self.second_current_map:
-            return
-        self._apply_map_change_robot2(d)
-        self.get_logger().info(f"robot2 current_map (sub) -> {d!r}")
 
     def _on_initial_pose_robot1(self, msg: PoseWithCovarianceStamped) -> None:
         p = msg.pose.pose.position
@@ -319,19 +237,6 @@ class FakeRobotNode(Node):
         self.get_logger().info(
             f"robot1 initial -> seed motion at x={p.x:.3f} y={p.y:.3f} yaw={yaw:.3f}, "
             f"center=({self._cx1:.3f},{self._cy1:.3f})"
-        )
-
-    def _on_initial_pose_robot2(self, msg: PoseWithCovarianceStamped) -> None:
-        p = msg.pose.pose.position
-        q = msg.pose.pose.orientation
-        yaw = _yaw_from_quaternion(q)
-        self._cx2, self._cy2, self._arc2 = _circle_motion_from_seed(
-            float(p.x), float(p.y), yaw, self._r2
-        )
-        self._rebuild_path_robot2()
-        self.get_logger().info(
-            f"robot2 initial -> seed motion at x={p.x:.3f} y={p.y:.3f} yaw={yaw:.3f}, "
-            f"center=({self._cx2:.3f},{self._cy2:.3f})"
         )
 
     def _static_tf_base_to_sensor(
@@ -391,28 +296,11 @@ class FakeRobotNode(Node):
         self._arc1 += self._sp1 * dt
         x1, y1, yaw1 = _pose_on_circle(self._cx1, self._cy1, self._r1, self._arc1)
 
-        msgs: List[TransformStamped] = self._robot_chain(
-            now, self.robot_name, x1, y1, yaw1, (0.0, 0.0)
-        )
-
-        if self.path_pub_second and self.second_robot_name:
-            self._arc2 += self._sp2 * dt
-            x2, y2, yaw2 = _pose_on_circle(
-                self._cx2, self._cy2, self._r2, self._arc2 + 1.0
-            )
-            msgs.extend(
-                self._robot_chain(
-                    now, self.second_robot_name, x2, y2, yaw2, (0.0, 0.0)
-                )
-            )
-
+        msgs: List[TransformStamped] = self._robot_chain(now, self.robot_name, x1, y1, yaw1, (0.0, 0.0))
         self.br.sendTransform(msgs)
 
         self._path_msg_1.header.stamp = now
         self.path_pub.publish(self._path_msg_1)
-        if self._path_msg_2 is not None and self.path_pub_second is not None:
-            self._path_msg_2.header.stamp = now
-            self.path_pub_second.publish(self._path_msg_2)
 
         scan = LaserScan()
         scan.header.stamp = now
@@ -436,34 +324,22 @@ class FakeRobotNode(Node):
         ]
         self.scan_pub.publish(scan)
 
-        if self.scan_pub_2 is not None:
-            scan2 = LaserScan()
-            scan2.header.stamp = now
-            scan2.header.frame_id = f"{self.second_robot_name}/scan_2d"
-            scan2.angle_min = scan.angle_min
-            scan2.angle_max = scan.angle_max
-            scan2.angle_increment = scan.angle_increment
-            scan2.range_min = scan.range_min
-            scan2.range_max = scan.range_max
-            scan2.ranges = [
-                min(
-                    scan.range_max,
-                    3.5
-                    + math.sin(self.t * 1.3 + i * 0.04)
-                    + random.uniform(-0.1, 0.1),
-                )
-                for i in range(num_points)
-            ]
-            self.scan_pub_2.publish(scan2)
-
         map_msg = String()
         map_msg.data = self.current_map
         self.map_pub.publish(map_msg)
 
-        if self.map_pub_second is not None:
-            map2 = String()
-            map2.data = self.second_current_map
-            self.map_pub_second.publish(map2)
+        if self.robot_status_pub is not None:
+            st = RobotStatus()
+            st.header.stamp = now
+            st.header.frame_id = "map"
+            st.robot_name = self.robot_name
+            # Backward-compatible with old generated RobotStatus (only robot_name).
+            if hasattr(st, "current_map"):
+                st.current_map = self.current_map
+            if hasattr(st, "robot_status"):
+                # Fake robot defaults to mapping mode for web mapping-floor interaction.
+                st.robot_status = "mapping"
+            self.robot_status_pub.publish(st)
 
 
 def main():

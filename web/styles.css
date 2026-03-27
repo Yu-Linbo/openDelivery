@@ -25,6 +25,40 @@ body {
   grid-template-columns: 248px minmax(0, 1fr);
   grid-template-areas: "sidebar content";
   min-height: 100vh;
+  position: relative;
+}
+
+.layout.sidebar-hidden {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "content";
+}
+
+.layout.sidebar-hidden .sidebar {
+  display: none;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.75);
+}
+
+.layout.sidebar-hidden .sidebar-toggle {
+  right: 10px;
+}
+
+.sidebar-toggle img {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 
 .monitor-layout {

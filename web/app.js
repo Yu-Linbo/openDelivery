@@ -2,12 +2,29 @@ let API_BASE_URL =
   window.API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8001`;
 
 const menuButtons = Array.from(document.querySelectorAll(".menu-item"));
+const layoutEl = document.querySelector(".layout");
+const btnSidebarToggle = document.getElementById("btn-sidebar-toggle");
 const views = {
   monitor: document.getElementById("view-monitor"),
   ros: document.getElementById("view-ros"),
   settings: document.getElementById("view-settings"),
   logs: document.getElementById("view-logs"),
 };
+
+if (btnSidebarToggle && layoutEl) {
+  // Persist user preference.
+  const saved = localStorage.getItem("openDelivery_sidebar_hidden_v1") === "1";
+  layoutEl.classList.toggle("sidebar-hidden", saved);
+  btnSidebarToggle.addEventListener("click", () => {
+    const nextHidden = !layoutEl.classList.contains("sidebar-hidden");
+    layoutEl.classList.toggle("sidebar-hidden", nextHidden);
+    try {
+      localStorage.setItem("openDelivery_sidebar_hidden_v1", nextHidden ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  });
+}
 
 const floorSelect = document.getElementById("floor-select");
 const gridToggle = document.getElementById("grid-toggle");
@@ -44,6 +61,7 @@ const rosNodesSummary = document.getElementById("ros-nodes-summary");
 const rosNodesError = document.getElementById("ros-nodes-error");
 const rosNodesPersistentList = document.getElementById("ros-nodes-persistent");
 const rosNodesCreatedList = document.getElementById("ros-nodes-created");
+const rosNodesDiscoveredList = document.getElementById("ros-nodes-discovered");
 const btnRosNodesRefresh = document.getElementById("btn-ros-nodes-refresh");
 const rosNodeCreateForm = document.getElementById("ros-node-create-form");
 const rosNodeCreateTypeSelect = document.getElementById("ros-node-create-type");
@@ -548,7 +566,23 @@ function saveMapNamePreference(v) {
 }
 
 async function fetchRosNodesStatus() {
-  return fetchJsonOptional(`${API_BASE_URL}/api/ros/nodes/status`);
+  // Avoid hanging fetch when ROS discovery blocks.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 900);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/ros/nodes/status`, { signal: ctrl.signal });
+    if (res.status === 404) {
+      return null;
+    }
+    if (!res.ok) {
+      return null;
+    }
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function controlRosNode(nodeId, action) {
@@ -587,8 +621,26 @@ async function createRosNode(nodeType, params) {
   return payload;
 }
 
+async function killDiscoveredRosNode(nodeName) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/nodes/discovered/kill`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node_name: nodeName }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `请求失败 (${res.status})`);
+  }
+  return payload;
+}
+
 function renderRosNodesStatus(data) {
-  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesSummary) {
+  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesDiscoveredList || !rosNodesSummary) {
     return;
   }
 
@@ -596,6 +648,7 @@ function renderRosNodesStatus(data) {
     rosNodesSummary.textContent = "状态: 无法连接后端";
     rosNodesPersistentList.innerHTML = "";
     rosNodesCreatedList.innerHTML = "";
+    rosNodesDiscoveredList.innerHTML = "";
     return;
   }
 
@@ -640,6 +693,38 @@ function renderRosNodesStatus(data) {
 
   renderInto(rosNodesPersistentList, persistentNodes);
   renderInto(rosNodesCreatedList, createdNodes);
+
+  rosNodesDiscoveredList.innerHTML = "";
+  discovered
+    .map((node) => {
+      if (typeof node === "string") {
+        return { name: node, running: true };
+      }
+      return node || {};
+    })
+    .forEach((node) => {
+    const card = document.createElement("article");
+    card.className = "ros-node-card";
+    const nodeName = String(node && node.name ? node.name : "");
+    const running = node && node.running !== false;
+    const statusClass = running ? "running" : "stopped";
+    card.innerHTML = `
+      <div class="ros-node-head">
+        <strong>${nodeName || "(unknown)"}</strong>
+        <span class="ros-node-badge ${statusClass}">${running ? "发现中" : "离线"}</span>
+      </div>
+      <div class="ros-node-meta">来源: ros2 node list（只读，非受管）</div>
+      <div class="ros-node-actions">
+        <button
+          type="button"
+          data-discovered-kill="1"
+          data-node-name="${nodeName}"
+          ${nodeName ? "" : "disabled"}
+        >Kill</button>
+      </div>
+    `;
+    rosNodesDiscoveredList.appendChild(card);
+    });
 }
 
 function setRosNodeButtonsDisabled(disabled) {
@@ -649,6 +734,11 @@ function setRosNodeButtonsDisabled(disabled) {
       b.disabled = disabled;
     });
   });
+  if (rosNodesDiscoveredList) {
+    rosNodesDiscoveredList.querySelectorAll("button[data-discovered-kill]").forEach((b) => {
+      b.disabled = disabled;
+    });
+  }
   if (btnRosNodesRefresh) {
     btnRosNodesRefresh.disabled = disabled;
   }
@@ -663,7 +753,7 @@ async function refreshRosNodesStatus() {
 }
 
 function initRosNodesPage() {
-  if (!rosNodesPersistentList || !rosNodesCreatedList) {
+  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesDiscoveredList) {
     return;
   }
   if (btnRosNodesRefresh) {
@@ -710,6 +800,36 @@ function initRosNodesPage() {
   };
   bindNodeActions(rosNodesPersistentList);
   bindNodeActions(rosNodesCreatedList);
+  rosNodesDiscoveredList.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-discovered-kill]");
+    if (!btn) {
+      return;
+    }
+    const nodeName = String(btn.dataset.nodeName || "").trim();
+    if (!nodeName) {
+      return;
+    }
+    const yes = window.confirm(`确认 Kill 节点 ${nodeName} ?`);
+    if (!yes) {
+      return;
+    }
+    setRosNodeButtonsDisabled(true);
+    if (rosNodesError) {
+      rosNodesError.textContent = "";
+    }
+    try {
+      await killDiscoveredRosNode(nodeName);
+      appendLog(`Kill discovered 节点 ${nodeName} 请求已发送`);
+    } catch (err) {
+      if (rosNodesError) {
+        rosNodesError.textContent = err.message || String(err);
+      }
+      appendLog(`Kill discovered 节点失败: ${err.message || err}`);
+    } finally {
+      setRosNodeButtonsDisabled(false);
+      refreshRosNodesStatus().catch(() => {});
+    }
+  });
 
   refreshRosNodesStatus().catch(() => {});
   if (rosNodeCreateForm) {
