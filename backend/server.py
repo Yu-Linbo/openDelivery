@@ -359,11 +359,23 @@ def _list_mapping_floor_labels() -> list:
         from ros_tf_bridge import _load_robot_specs, list_mapping_robot_ids_from_status_store
 
         ids = [str(s["id"]) for s in _load_robot_specs()]
-        # Mapping floors are shown only for robots whose latest robot_status is "mapping".
+        # Mapping floors: robot_status store says "mapping", entry is fresh, and (when
+        # pose snapshot lists robots) the id is still present on the ROS bridge output.
         mapping_ids = set(list_mapping_robot_ids_from_status_store())
+        try:
+            snap = POSE_PROVIDER.get_pose()
+            if snap.get("source") == "ros2_tf":
+                live_ids = set()
+                for r in snap.get("robots") or []:
+                    if isinstance(r, dict) and r.get("id"):
+                        live_ids.add(str(r["id"]).strip())
+                if live_ids:
+                    mapping_ids &= live_ids
+        except Exception:
+            pass
         if mapping_ids:
             ids = [rid for rid in ids if rid in mapping_ids] + [
-                rid for rid in mapping_ids if rid not in ids
+                rid for rid in sorted(mapping_ids) if rid not in ids
             ]
         else:
             ids = []
@@ -468,7 +480,7 @@ def read_floor_map(floor):
 
 
 class RobotPoseProvider:
-    """Multi-robot snapshot for web display. Each robot has id, name, current_map, pose."""
+    """Multi-robot snapshot for web display. Each robot has id, name, active_floor, pose."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -524,7 +536,7 @@ class RobotPoseProvider:
                 "id": "robot-1",
                 "name": "送餐-01",
                 "frame_id": "map",
-                "current_map": "nh_102",
+                "active_floor": "nh_102",
                 "pose": {"x": 3.0, "y": 3.0, "yaw": 0.0},
                 "velocity": {"linear": 0.0, "angular": 0.0},
                 "localization": "ok",
@@ -534,7 +546,7 @@ class RobotPoseProvider:
                 "id": "robot-2",
                 "name": "送餐-02",
                 "frame_id": "map",
-                "current_map": "nh_103",
+                "active_floor": "nh_103",
                 "pose": {"x": 4.0, "y": 4.0, "yaw": 0.0},
                 "velocity": {"linear": 0.0, "angular": 0.0},
                 "localization": "ok",
@@ -726,15 +738,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             try:
                 if node_type == "fake_pub":
                     robot_name = str(data.get("robot_name") or "").strip()
-                    current_map = str(data.get("current_map") or "").strip()
-                    if not robot_name or not current_map:
+                    initial_floor = str(
+                        data.get("initial_floor") or data.get("current_map") or ""
+                    ).strip()
+                    if not robot_name or not initial_floor:
                         self._send_json(
-                            {"error": "robot_name and current_map are required"},
+                            {"error": "robot_name and initial_floor are required"},
                             400,
                         )
                         return
                     payload = ROS_NODE_MANAGER.create_fake_pub_node_and_start(
-                        robot_name, current_map
+                        robot_name, initial_floor
                     )
                 elif node_type == "slam_bringup_mapping":
                     payload = ROS_NODE_MANAGER.create_slam_mapping_node_and_start()
@@ -1142,7 +1156,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "timestamp": snap["timestamp"],
                         "localization": primary.get("localization"),
                         "task_status": primary.get("task_status"),
-                        "current_map": primary.get("current_map"),
+                        "active_floor": primary.get("active_floor"),
                         "robot_id": primary.get("id"),
                         "robot_name": primary.get("name"),
                         "source": snap.get("source"),

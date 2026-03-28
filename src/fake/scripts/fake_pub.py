@@ -1,5 +1,5 @@
 """
-Fake TF + /{robot}/scan_2d + /{robot}/planned_path + /{robot}/current_map.
+Fake TF + /{robot}/scan_2d + /{robot}/planned_path + /{robot}/robot_status.
 
 TF 树（单机示例 robot1）::
 
@@ -8,9 +8,10 @@ TF 树（单机示例 robot1）::
 
 虚拟规划路径为 map 系下闭合圆轨迹，机体沿路径行驶。
 
-与 Web 切图/重定位联动（与 ``openDelivery`` 后端发布的话题一致）：
+与 Web 切图/重定位联动（与 ``openDelivery`` 后端 ``robot_status`` 驱动发现一致）：
 
-- 订阅 ``std_msgs/String`` ``/{robot_name}/current_map``：更新内部楼层 id（与 Web「仅切图」一致）。
+- 发布 ``custom_msgs_srvs/RobotStatus`` ``/{robot_name}/robot_status``（含 ``current_map``、``robot_status``），供后端发现与其它模块读状态。
+- 订阅同话题：当外部更新 ``current_map`` 字段时重算圆心并重建路径。
 - 订阅 ``geometry_msgs/PoseWithCovarianceStamped`` ``/{robot_name}/initial``：按该位姿 **接回** 圆周演示——
   将圆心与弧长对齐到 ``(x,y,yaw)`` 后 **继续沿轨迹运动**（不再长期停住）。
 
@@ -38,13 +39,9 @@ from geometry_msgs.msg import (
 from nav_msgs.msg import Path
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
-try:
-    from custom_msgs_srvs.msg import RobotStatus
-except Exception:  # noqa: BLE001
-    RobotStatus = None
+from custom_msgs_srvs.msg import RobotStatus
 
 
 def _sanitize_robot_prefix(name: str, fallback: str) -> str:
@@ -175,25 +172,20 @@ class FakeRobotNode(Node):
         self.scan_pub = self.create_publisher(LaserScan, scan_topic, 10)
         self.path_pub = self.create_publisher(Path, f"/{self.robot_name}/planned_path", 10)
 
-        self.current_map_topic = f"/{self.robot_name}/current_map"
-        self.map_pub = self.create_publisher(String, self.current_map_topic, 10)
-        self.robot_status_pub = None
-        if RobotStatus is not None:
-            self.robot_status_pub = self.create_publisher(
-                RobotStatus, f"/{self.robot_name}/robot_status", 10
-            )
+        self.robot_status_topic = f"/{self.robot_name}/robot_status"
+        self.robot_status_pub = self.create_publisher(RobotStatus, self.robot_status_topic, 10)
 
         self._rebuild_path_robot1()
 
         self.get_logger().info(
             f"robot_name={self.robot_name!r}, scan=/{self.robot_name}/scan_2d, "
-            f"path=/{self.robot_name}/planned_path, current_map={self.current_map_topic!r}"
+            f"path=/{self.robot_name}/planned_path, robot_status={self.robot_status_topic!r}"
         )
 
         self.create_subscription(
-            String,
-            self.current_map_topic,
-            self._on_current_map_robot1,
+            RobotStatus,
+            self.robot_status_topic,
+            self._on_robot_status_robot1,
             10,
         )
         initial_topic_1 = f"/{self.robot_name}/initial"
@@ -203,7 +195,9 @@ class FakeRobotNode(Node):
             self._on_initial_pose_robot1,
             10,
         )
-        self.get_logger().info(f"subscribing String {self.current_map_topic!r} + initial {initial_topic_1!r}")
+        self.get_logger().info(
+            f"subscribing RobotStatus {self.robot_status_topic!r} + initial {initial_topic_1!r}"
+        )
 
         self.t = 0.0
         self.timer = self.create_timer(0.1, self.update)
@@ -219,12 +213,12 @@ class FakeRobotNode(Node):
         self._arc1 = 0.0
         self._rebuild_path_robot1()
 
-    def _on_current_map_robot1(self, msg: String) -> None:
-        d = (msg.data or "").strip()
+    def _on_robot_status_robot1(self, msg: RobotStatus) -> None:
+        d = str(getattr(msg, "current_map", "") or "").strip()
         if not d or d == self.current_map:
             return
         self._apply_map_change_robot1(d)
-        self.get_logger().info(f"robot1 current_map (sub) -> {d!r}")
+        self.get_logger().info(f"robot1 robot_status.current_map (sub) -> {d!r}")
 
     def _on_initial_pose_robot1(self, msg: PoseWithCovarianceStamped) -> None:
         p = msg.pose.pose.position
@@ -324,22 +318,13 @@ class FakeRobotNode(Node):
         ]
         self.scan_pub.publish(scan)
 
-        map_msg = String()
-        map_msg.data = self.current_map
-        self.map_pub.publish(map_msg)
-
-        if self.robot_status_pub is not None:
-            st = RobotStatus()
-            st.header.stamp = now
-            st.header.frame_id = "map"
-            st.robot_name = self.robot_name
-            # Backward-compatible with old generated RobotStatus (only robot_name).
-            if hasattr(st, "current_map"):
-                st.current_map = self.current_map
-            if hasattr(st, "robot_status"):
-                # Fake robot defaults to mapping mode for web mapping-floor interaction.
-                st.robot_status = "mapping"
-            self.robot_status_pub.publish(st)
+        st = RobotStatus()
+        st.header.stamp = now
+        st.header.frame_id = "map"
+        st.robot_name = self.robot_name
+        st.current_map = self.current_map
+        st.robot_status = "normal"
+        self.robot_status_pub.publish(st)
 
 
 def main():

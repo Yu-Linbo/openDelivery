@@ -3,7 +3,14 @@ let API_BASE_URL =
 
 const menuButtons = Array.from(document.querySelectorAll(".menu-item"));
 const layoutEl = document.querySelector(".layout");
-const btnSidebarToggle = document.getElementById("btn-sidebar-toggle");
+const btnSidebarCollapse = document.getElementById("btn-sidebar-collapse");
+const btnSidebarReveal = document.getElementById("btn-sidebar-reveal");
+const robotPresenceAnchor = document.getElementById("robot-presence-anchor");
+const btnRobotPresence = document.getElementById("btn-robot-presence");
+const robotPresencePanel = document.getElementById("robot-presence-panel");
+const robotPresenceList = document.getElementById("robot-presence-list");
+const robotPresenceEmpty = document.getElementById("robot-presence-empty");
+const robotPresenceSummary = document.getElementById("robot-presence-summary");
 const views = {
   monitor: document.getElementById("view-monitor"),
   ros: document.getElementById("view-ros"),
@@ -11,19 +18,28 @@ const views = {
   logs: document.getElementById("view-logs"),
 };
 
-if (btnSidebarToggle && layoutEl) {
-  // Persist user preference.
+function setSidebarHidden(hidden) {
+  if (!layoutEl) {
+    return;
+  }
+  layoutEl.classList.toggle("sidebar-hidden", hidden);
+  try {
+    localStorage.setItem("openDelivery_sidebar_hidden_v1", hidden ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+if (layoutEl) {
   const saved = localStorage.getItem("openDelivery_sidebar_hidden_v1") === "1";
   layoutEl.classList.toggle("sidebar-hidden", saved);
-  btnSidebarToggle.addEventListener("click", () => {
-    const nextHidden = !layoutEl.classList.contains("sidebar-hidden");
-    layoutEl.classList.toggle("sidebar-hidden", nextHidden);
-    try {
-      localStorage.setItem("openDelivery_sidebar_hidden_v1", nextHidden ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-  });
+}
+
+if (btnSidebarCollapse) {
+  btnSidebarCollapse.addEventListener("click", () => setSidebarHidden(true));
+}
+if (btnSidebarReveal) {
+  btnSidebarReveal.addEventListener("click", () => setSidebarHidden(false));
 }
 
 const floorSelect = document.getElementById("floor-select");
@@ -93,6 +109,11 @@ let mapBitmap = null;
 
 /** Latest snapshot from backend: { timestamp, source, robots: [...] } */
 let latestSnapshot = null;
+
+/** Rows from `GET /api/robot/status/cache` (merged with pose for 离线 robots). */
+let robotStatusCacheItems = [];
+let robotPresencePanelOpen = false;
+let robotPresenceCacheTimer = null;
 
 /** Per-robot overlays from REST (map frame) */
 const latestScanByRobot = {};
@@ -852,11 +873,11 @@ function initRosNodesPage() {
           .trim();
         if (!rn || !cm) {
           if (rosNodesError) {
-            rosNodesError.textContent = "请填写 robot_name 与 current_map";
+            rosNodesError.textContent = "请填写 robot_name 与初始楼层 id";
           }
           return;
         }
-        params = { robot_name: rn, current_map: cm };
+        params = { robot_name: rn, initial_floor: cm };
       }
 
       if (btnRosNodeCreate) {
@@ -1098,6 +1119,167 @@ function drawScan2dOnMap(data) {
   ctx.restore();
 }
 
+/** Floor id from pose snapshot (`active_floor`); bridge merges RobotStatus topics like /robot1/robot_status. */
+function snapshotRobotFloor(r) {
+  if (!r) return "";
+  const a = r.active_floor;
+  if (a != null && String(a).trim() !== "") return String(a).trim();
+  const legacy = r.current_map;
+  if (legacy != null && String(legacy).trim() !== "") return String(legacy).trim();
+  return "";
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function fetchRobotStatusCache() {
+  try {
+    const data = await fetchJson(`${API_BASE_URL}/api/robot/status/cache`);
+    const items = data && Array.isArray(data.items) ? data.items : [];
+    robotStatusCacheItems = items;
+  } catch {
+    robotStatusCacheItems = [];
+  }
+}
+
+function mergePresenceRows() {
+  const live =
+    latestSnapshot && Array.isArray(latestSnapshot.robots) ? latestSnapshot.robots : [];
+  const liveById = new Map(live.map((r) => [String(r.id), r]));
+  const ids = new Set(liveById.keys());
+  robotStatusCacheItems.forEach((it) => {
+    const id = String(it.robot_id || "").trim();
+    if (id) ids.add(id);
+  });
+  const rows = [];
+  ids.forEach((id) => {
+    const liveR = liveById.get(id);
+    const cache = robotStatusCacheItems.find((x) => String(x.robot_id) === id);
+    let online = false;
+    if (liveR) {
+      online = liveR.heartbeat_online !== false;
+    }
+    const name = (liveR && (liveR.name || liveR.id)) || (cache && cache.robot_name) || id;
+    const floor =
+      (liveR && snapshotRobotFloor(liveR)) ||
+      (cache && String(cache.current_map || "").trim()) ||
+      "";
+    rows.push({ id, name, floor, online });
+  });
+  rows.sort((a, b) => a.id.localeCompare(b.id));
+  return rows;
+}
+
+function updateRobotPresenceTriggerSummary() {
+  if (!robotPresenceSummary) {
+    return;
+  }
+  const rows = mergePresenceRows();
+  const onlineN = rows.filter((r) => r.online).length;
+  const total = rows.length;
+  if (total === 0) {
+    robotPresenceSummary.textContent = "暂无数据 · 点击展开";
+    return;
+  }
+  robotPresenceSummary.textContent = `${onlineN} 在线 · ${total - onlineN} 离线`;
+}
+
+function renderRobotPresencePanel() {
+  if (!robotPresenceList || !robotPresenceEmpty) {
+    return;
+  }
+  const rows = mergePresenceRows();
+  const onlineN = rows.filter((r) => r.online).length;
+  const total = rows.length;
+  if (robotPresenceSummary) {
+    robotPresenceSummary.textContent =
+      total === 0 ? "无数据" : `${onlineN} 在线 · ${total - onlineN} 离线`;
+  }
+
+  if (rows.length === 0) {
+    robotPresenceList.innerHTML = "";
+    robotPresenceEmpty.hidden = false;
+    return;
+  }
+  robotPresenceEmpty.hidden = true;
+  robotPresenceList.innerHTML = rows
+    .map((r) => {
+      const badge = r.online
+        ? '<span class="robot-presence-badge robot-presence-badge--online">在线</span>'
+        : '<span class="robot-presence-badge robot-presence-badge--offline">离线</span>';
+      const floorLine = r.floor
+        ? `<div class="robot-presence-list__meta">${escapeHtml(r.floor)}</div>`
+        : "";
+      return `<li>
+        <div>
+          <div class="robot-presence-list__id">${escapeHtml(r.name)}</div>
+          <div class="robot-presence-list__meta">${escapeHtml(r.id)}</div>
+          ${floorLine}
+        </div>
+        ${badge}
+      </li>`;
+    })
+    .join("");
+}
+
+function setRobotPresenceOpen(open) {
+  robotPresencePanelOpen = open;
+  if (!robotPresencePanel || !btnRobotPresence) {
+    return;
+  }
+  robotPresencePanel.hidden = !open;
+  btnRobotPresence.setAttribute("aria-expanded", open ? "true" : "false");
+  if (robotPresenceCacheTimer) {
+    clearInterval(robotPresenceCacheTimer);
+    robotPresenceCacheTimer = null;
+  }
+  if (open) {
+    fetchRobotStatusCache()
+      .then(() => {
+        renderRobotPresencePanel();
+      })
+      .catch(() => {
+        renderRobotPresencePanel();
+      });
+    robotPresenceCacheTimer = setInterval(() => {
+      fetchRobotStatusCache()
+        .then(renderRobotPresencePanel)
+        .catch(() => {});
+    }, 4000);
+  } else {
+    updateRobotPresenceTriggerSummary();
+  }
+}
+
+function initRobotPresenceUi() {
+  if (btnRobotPresence && robotPresencePanel) {
+    btnRobotPresence.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      setRobotPresenceOpen(!robotPresencePanelOpen);
+    });
+  }
+  document.addEventListener("click", (ev) => {
+    if (!robotPresencePanelOpen || !robotPresenceAnchor) {
+      return;
+    }
+    if (robotPresenceAnchor.contains(ev.target)) {
+      return;
+    }
+    setRobotPresenceOpen(false);
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && robotPresencePanelOpen) {
+      setRobotPresenceOpen(false);
+    }
+  });
+  updateRobotPresenceTriggerSummary();
+}
+
 function getRobotsOnCurrentMap() {
   if (!latestSnapshot || !Array.isArray(latestSnapshot.robots) || !activeFloor) {
     return [];
@@ -1109,7 +1291,7 @@ function getRobotsOnCurrentMap() {
     }
     return latestSnapshot.robots.filter((r) => r && r.id === rid);
   }
-  return latestSnapshot.robots.filter((r) => r && r.current_map === activeFloor);
+  return latestSnapshot.robots.filter((r) => snapshotRobotFloor(r) === activeFloor);
 }
 
 function renderScene() {
@@ -1170,49 +1352,56 @@ function renderScene() {
 }
 
 function updateRobotStatus() {
-  if (!robotStatus) {
-    return;
-  }
-  const here = getRobotsOnCurrentMap();
-  if (!activeFloor) {
-    robotStatus.textContent = "定位: 未选择地图";
-    return;
-  }
-  if (isMappingFloor(activeFloor)) {
-    const rid = robotIdFromMappingFloor(activeFloor);
-    const topic = rid ? `/${rid}/mapping` : "";
-    if (here.length === 0) {
-      robotStatus.textContent = `建图 ${activeFloor} · ${topic} · 无该机器人位姿`;
-    } else {
-      const parts = here.map((r) => {
-        const p = r.pose || {};
-        const nm = r.name || r.id;
-        const loc = r.localization === "lost" ? "丢失" : "OK";
-        return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
-      });
-      robotStatus.textContent = `建图 (${here.length}): ${parts.join(" · ")}`;
+  try {
+    if (!robotStatus) {
+      return;
     }
-    return;
-  }
-  if (!latestSnapshot) {
-    robotStatus.textContent = `地图 ${activeFloor} · 无实时数据`;
-    return;
-  }
-  if (here.length === 0) {
-    robotStatus.textContent = `地图 ${activeFloor} · 当前无机器人定位`;
-    return;
-  }
-  const parts = here.map((r) => {
-    const p = r.pose || {};
-    const nm = r.name || r.id;
-    const loc = r.localization === "lost" ? "丢失" : "OK";
-    return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
-  });
-  robotStatus.textContent = `本图定位 (${here.length}): ${parts.join(" · ")}`;
-  if (relocRobotId && relocRobotId.dataset.userEdited !== "1") {
-    const pick = here[0] || (latestSnapshot?.robots || [])[0];
-    if (pick?.id) {
-      relocRobotId.value = pick.id;
+    const here = getRobotsOnCurrentMap();
+    if (!activeFloor) {
+      robotStatus.textContent = "定位: 未选择地图";
+      return;
+    }
+    if (isMappingFloor(activeFloor)) {
+      const rid = robotIdFromMappingFloor(activeFloor);
+      const topic = rid ? `/${rid}/mapping` : "";
+      if (here.length === 0) {
+        robotStatus.textContent = `建图 ${activeFloor} · ${topic} · 无该机器人位姿`;
+      } else {
+        const parts = here.map((r) => {
+          const p = r.pose || {};
+          const nm = r.name || r.id;
+          const loc = r.localization === "lost" ? "丢失" : "OK";
+          return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
+        });
+        robotStatus.textContent = `建图 (${here.length}): ${parts.join(" · ")}`;
+      }
+      return;
+    }
+    if (!latestSnapshot) {
+      robotStatus.textContent = `地图 ${activeFloor} · 无实时数据`;
+      return;
+    }
+    if (here.length === 0) {
+      robotStatus.textContent = `地图 ${activeFloor} · 当前无机器人定位`;
+      return;
+    }
+    const parts = here.map((r) => {
+      const p = r.pose || {};
+      const nm = r.name || r.id;
+      const loc = r.localization === "lost" ? "丢失" : "OK";
+      return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
+    });
+    robotStatus.textContent = `本图定位 (${here.length}): ${parts.join(" · ")}`;
+    if (relocRobotId && relocRobotId.dataset.userEdited !== "1") {
+      const pick = here[0] || (latestSnapshot?.robots || [])[0];
+      if (pick?.id) {
+        relocRobotId.value = pick.id;
+      }
+    }
+  } finally {
+    updateRobotPresenceTriggerSummary();
+    if (robotPresencePanelOpen) {
+      renderRobotPresencePanel();
     }
   }
 }
@@ -1699,7 +1888,7 @@ async function initMonitor() {
       if (!mn) {
         relocMessage.textContent =
           isMappingFloor(floorSelect && floorSelect.value)
-            ? "建图模式下请填写「保存为」地图名（用于切图发布 current_map）"
+            ? "建图模式下请填写「保存为」地图名（切图经 robot_status 的 current_map 字段下发）"
             : "请填写「保存为」地图名或选择已保存楼层";
         return;
       }
@@ -1843,6 +2032,10 @@ async function bootstrap() {
   initSettings();
   initLogs();
   initRosNodesPage();
+  initRobotPresenceUi();
+  fetchRobotStatusCache()
+    .then(() => updateRobotPresenceTriggerSummary())
+    .catch(() => {});
   await initMonitor();
 }
 

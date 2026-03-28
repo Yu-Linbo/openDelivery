@@ -1,12 +1,30 @@
 {
   "robot1": {
-    "current_map": "",
+    "current_map": "nh_114",
     "robot_id": "robot1",
     "robot_name": "robot1",
-    "robot_status": "",
-    "stamp_ns": 1774601697975850469,
+    "robot_status": "mapping",
+    "stamp_ns": 1774683064245995183,
     "topic": "/robot1/robot_status",
-    "updated_at": 1774601697.9775891
+    "updated_at": 1774683064.247141
+  },
+  "robot110": {
+    "current_map": "nh_102",
+    "robot_id": "robot110",
+    "robot_name": "robot110",
+    "robot_status": "normal",
+    "stamp_ns": 1774684347317260486,
+    "topic": "/robot110/robot_status",
+    "updated_at": 1774684347.3186257
+  },
+  "robot2": {
+    "current_map": "nh_102",
+    "robot_id": "robot2",
+    "robot_name": "robot2",
+    "robot_status": "mapping",
+    "stamp_ns": 1774683948428561866,
+    "topic": "/robot2/robot_status",
+    "updated_at": 1774683948.4312677
   },
   "robot4": {
     "current_map": "",

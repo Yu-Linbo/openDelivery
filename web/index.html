@@ -8,20 +8,54 @@
   </head>
   <body>
     <div class="layout">
+      <div class="robot-presence-anchor" id="robot-presence-anchor">
+        <button
+          type="button"
+          id="btn-robot-presence"
+          class="robot-presence-trigger"
+          aria-expanded="false"
+          aria-haspopup="dialog"
+          aria-controls="robot-presence-panel"
+          title="查看各机器人在线 / 离线状态"
+        >
+          <span class="robot-presence-trigger__icon" aria-hidden="true">
+            <img src="./icons/robot.svg" alt="" width="20" height="20" />
+          </span>
+          <span class="robot-presence-trigger__text">
+            <span class="robot-presence-trigger__title">机器人状态</span>
+            <span class="robot-presence-trigger__sub" id="robot-presence-summary">—</span>
+          </span>
+          <span class="robot-presence-trigger__chev" aria-hidden="true"></span>
+        </button>
+        <div
+          id="robot-presence-panel"
+          class="robot-presence-panel"
+          role="dialog"
+          aria-label="机器人在线状态"
+          hidden
+        >
+          <div class="robot-presence-panel__head">
+            <span>连接状态</span>
+            <span class="robot-presence-panel__hint">实时位姿 + 最近心跳缓存</span>
+          </div>
+          <ul id="robot-presence-list" class="robot-presence-list"></ul>
+          <p id="robot-presence-empty" class="robot-presence-empty" hidden>
+            暂无机器人数据；请确认 ROS 桥与 <code>/*/robot_status</code> 已发布。
+          </p>
+        </div>
+      </div>
+
       <button
-        id="btn-sidebar-toggle"
-        class="sidebar-toggle"
         type="button"
-        title="隐藏/显示侧边栏"
-        aria-label="隐藏/显示侧边栏"
+        id="btn-sidebar-reveal"
+        class="sidebar-reveal"
+        title="展开侧边栏"
+        aria-label="展开侧边栏"
       >
-        <img
-          src="./icons/robot.svg"
-          alt="toggle"
-          width="22"
-          height="22"
-        />
+        <span class="sidebar-reveal__chev">›</span>
+        <span class="sidebar-reveal__label">菜单</span>
       </button>
+
       <main class="content">
         <section id="view-monitor" class="view active">
           <header class="view-header">
@@ -65,7 +99,7 @@
                     class="map-name-input"
                     placeholder="地图目录名，如 floor1"
                     autocomplete="off"
-                    title="仅建图模式：保存到 map/&lt;名称&gt;/，切图发布 current_map 时也用此名"
+                    title="仅建图模式：保存到 map/&lt;名称&gt;/；切图时通过 /&lt;robot&gt;/robot_status 发布 current_map 字段也用此名"
                   />
                   <button id="btn-save-map" type="button" title="保存到仓库 map/ 目录">
                     保存地图
@@ -87,7 +121,7 @@
             <aside class="monitor-aside">
               <div
                 class="reloc-panel"
-                title="需 ROS2 TF 桥；与 fake_pub 联动：订阅 current_map 与 initial"
+                title="需 ROS2 TF 桥；切图发布 RobotStatus（current_map），重定位发布 initial"
               >
                 <span class="reloc-title">切图 / 重定位</span>
                 <label class="checkbox reloc-pick-row">
@@ -212,8 +246,13 @@
                     <input id="ros-node-robot-name" type="text" placeholder="robot2" />
                   </label>
                   <label class="ros-create-field">
-                    current_map
-                    <input id="ros-node-current-map" type="text" placeholder="nh_102" />
+                    initial_floor（fake_pub 初始楼层）
+                    <input
+                      id="ros-node-current-map"
+                      type="text"
+                      placeholder="nh_102"
+                      title="写入 fake_pub 的 current_map 参数；运行后由 RobotStatus 发布"
+                    />
                   </label>
                 </div>
 
@@ -237,7 +276,18 @@
       </main>
 
       <aside class="sidebar">
-        <h2>机器人管理</h2>
+        <div class="sidebar-header">
+          <h2>机器人管理</h2>
+          <button
+            type="button"
+            id="btn-sidebar-collapse"
+            class="sidebar-collapse"
+            title="收起侧边栏"
+            aria-label="收起侧边栏"
+          >
+            ‹
+          </button>
+        </div>
         <nav>
           <button class="menu-item active" data-view="monitor">监控</button>
           <button class="menu-item" data-view="ros">ROS 节点</button>

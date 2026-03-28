@@ -16,29 +16,27 @@ Environment (single robot defaults):
   ROS_ROBOT_NAME=robot1
   ROS_CURRENT_MAP=nh_102
 
-Current map string for web floor filter: subscribe ``std_msgs/String`` on ``/{robot_id}/current_map``
-(e.g. ``/robot1/current_map``). Until the first message, ``ROS_CURRENT_MAP`` / JSON ``current_map`` is used.
-Set ``ROS_SUBSCRIBE_CURRENT_MAP_TOPIC=0`` to disable.
+Floor / map id for web filtering comes from ``custom_msgs_srvs/RobotStatus`` on
+``/{robot_id}/robot_status`` (field ``current_map``). Until the first status message,
+``ROS_CURRENT_MAP`` / JSON ``current_map`` on the spec is used. The web pose snapshot
+exposes this as JSON field ``active_floor`` (not a ROS topic).
 
 Multi-robot JSON (overrides default env-based list when set).
   tf_topic optional per entry — defaults to ROS_TF_TOPIC or /tf.
   ROS_ROBOTS_TF_JSON='[
     {"id":"robot1","name":"送餐-01","map_frame":"map","base_frame":"robot1/base_link","current_map":"nh_102"},
-    {"id":"robot2","name":"送餐-02","map_frame":"map","base_frame":"robot2/base_link","current_map":"nh_103",
-     "current_map_topic":"/robot2/current_map"}
+    {"id":"robot2","name":"送餐-02","map_frame":"map","base_frame":"robot2/base_link","current_map":"nh_103"}
   ]'
 
-When JSON is **not** set: bridge loads ``ROS_ROBOT_ID`` (default robot1) **and** a second id
-``ROS_SECOND_ROBOT_ID`` (default **robot2**) so Web / API match dual ``fake_pub`` topics.
-Set ``ROS_TF_DISABLE_SECOND_ROBOT=1`` for a single-robot stack only.
-
-Optional per-robot ``current_map_topic``; default ``/{id}/current_map``.
+When JSON is **not** set: the bridge discovers robots only from ``/*/robot_status`` topics at runtime
+(no hardcoded robot1/robot2 list).
 
 Web commands (HTTP ``POST /api/robot/command`` → queue → this node):
 
 - Publish ``geometry_msgs/PoseWithCovarianceStamped`` on ``/{robot_id}/initial`` (template:
   ``ROS_INITIAL_POSE_TOPIC_TEMPLATE`` default ``/{id}/initial``).
-- Publish ``std_msgs/String`` map id on the same ``current_map`` topic as subscribed (switch floor).
+- Publish ``custom_msgs_srvs/RobotStatus`` on ``/{robot_id}/robot_status`` with updated
+  ``current_map`` (switch floor; preserves ``robot_name`` / ``robot_status`` from last status when known).
 
 Lost TF behavior:
   ROS_TF_LOST_POSE=hold   # default: keep last good x,y,yaw
@@ -62,7 +60,6 @@ from rclpy.time import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 try:
@@ -118,9 +115,8 @@ class OpenDeliveryTfBridgeNode(Node):
         self._publish_fn = publish_fn
         self._lost_mode = os.environ.get("ROS_TF_LOST_POSE", "hold").lower()
         self._last_good: Dict[str, Dict[str, Any]] = {}
-        self._current_map_from_topic: Dict[str, str] = {}
         self._initial_pubs: Dict[str, Any] = {}
-        self._map_cmd_pubs: Dict[str, Any] = {}
+        self._robot_status_cmd_pubs: Dict[str, Any] = {}
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
         # When enabled, web-side identity is derived from discovered robot_status topics.
@@ -139,7 +135,6 @@ class OpenDeliveryTfBridgeNode(Node):
         self._robot_status_payload_by_id: Dict[str, Dict[str, Any]] = {}
         self._robot_specific_subs_enabled = False
         self._wait_enable_robot_specific_timer = None
-        self._sub_current_map: Dict[str, Any] = {}
         self._sub_scan: Dict[str, Any] = {}
         self._sub_path: Dict[str, Any] = {}
         self._sub_mapping: Dict[str, Any] = {}
@@ -171,7 +166,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._cmd_timer = self.create_timer(1.0 / max(cmd_hz, 1.0), self._process_commands)
 
         ros_command_queue.set_bridge_ready(True)
-        self.get_logger().info("web command queue ready (initial pose + current_map publishers)")
+        self.get_logger().info("web command queue ready (initial pose + robot_status publishers)")
 
         # Discover and subscribe to /<robot_name>/robot_status topics dynamically when
         # the custom message type is available. But for the "no robot_status topics,
@@ -182,7 +177,7 @@ class OpenDeliveryTfBridgeNode(Node):
             self.get_logger().info("enabled heartbeat topic discovery (/robot_status)")
 
         # If there is *no* robot_status topic at all, do not create robot-specific
-        # subscriptions (current_map/scan_2d/planned_path/mapping). Enable them once
+        # subscriptions (scan_2d/planned_path/mapping). Enable them once
         # we observe at least one /*/robot_status topic.
         if not self._has_any_robot_status_topics():
             self.get_logger().info(
@@ -262,20 +257,6 @@ class OpenDeliveryTfBridgeNode(Node):
     ) -> None:
         rid = str(spec["id"])
         mf = str(spec["map_frame"])
-
-        if (
-            rid not in self._sub_current_map
-            and os.environ.get("ROS_SUBSCRIBE_CURRENT_MAP_TOPIC", "1").strip()
-            not in ("0", "false", "no")
-        ):
-            map_topic = str(spec.get("current_map_topic") or f"/{rid}/current_map")
-            self._sub_current_map[rid] = self.create_subscription(
-                String,
-                map_topic,
-                self._make_current_map_cb(rid),
-                10,
-            )
-            self.get_logger().info(f"subscribing String (current_map) on {map_topic}")
 
         if (
             rid not in self._sub_scan
@@ -370,7 +351,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._robot_status_topic_by_id[rid] = topic_name
 
         # If this robot is not in self._specs yet, add a minimal spec so that /api/robot/pose
-        # can include it (TF lookup + current_map subscription).
+        # can include it (TF lookup; current_map from RobotStatus).
         if not any(str(s.get("id")) == rid for s in self._specs):
             map_frame = os.environ.get("ROS_FRAME_MAP", "map")
             current_map_default = os.environ.get("ROS_CURRENT_MAP", "nh_102")
@@ -384,15 +365,7 @@ class OpenDeliveryTfBridgeNode(Node):
             }
             self._specs.append(spec)
 
-            # Subscribe current_map so web floor filtering works.
-            map_topic = f"/{rid}/current_map"
-            self.create_subscription(
-                String,
-                map_topic,
-                self._make_current_map_cb(rid),
-                10,
-            )
-            self.get_logger().info(f"discovered robot {rid} from {topic_name}; subscribing {map_topic}")
+            self.get_logger().info(f"discovered robot {rid} from {topic_name}")
             self._ensure_cmd_pubs(rid)
             if self._robot_specific_subs_enabled:
                 self._ensure_robot_specific_subs_for_spec(
@@ -437,11 +410,8 @@ class OpenDeliveryTfBridgeNode(Node):
                     continue
             self._ensure_robot_from_status_topic(rid, name)
 
-    def _current_map_pub_topic(self, rid: str) -> str:
-        for s in self._specs:
-            if str(s["id"]) == rid:
-                return str(s.get("current_map_topic") or f"/{rid}/current_map")
-        return f"/{rid}/current_map"
+    def _robot_status_cmd_topic(self, rid: str) -> str:
+        return f"/{rid}/robot_status"
 
     def _map_frame_for_robot(self, rid: str) -> str:
         for s in self._specs:
@@ -455,9 +425,12 @@ class OpenDeliveryTfBridgeNode(Node):
         tpl_init = os.environ.get("ROS_INITIAL_POSE_TOPIC_TEMPLATE", "/{id}/initial")
         topic_i = tpl_init.replace("{id}", rid)
         self._initial_pubs[rid] = self.create_publisher(PoseWithCovarianceStamped, topic_i, 10)
-        mt = self._current_map_pub_topic(rid)
-        self._map_cmd_pubs[rid] = self.create_publisher(String, mt, 10)
-        self.get_logger().info(f"cmd publishers: {topic_i} + String {mt}")
+        if self._robot_status_enabled:
+            mt = self._robot_status_cmd_topic(rid)
+            self._robot_status_cmd_pubs[rid] = self.create_publisher(RobotStatus, mt, 10)
+            self.get_logger().info(f"cmd publishers: {topic_i} + RobotStatus {mt}")
+        else:
+            self.get_logger().info(f"cmd publishers: {topic_i} (RobotStatus unavailable; map switch disabled)")
 
     def _process_commands(self) -> None:
         for cmd in ros_command_queue.drain_commands():
@@ -481,10 +454,20 @@ class OpenDeliveryTfBridgeNode(Node):
         if mode in ("map_only", "both"):
             mn = cmd.get("map_name")
             if mn is not None and str(mn).strip():
-                m = String()
-                m.data = str(mn).strip()
-                self._map_cmd_pubs[rid].publish(m)
-                self.get_logger().info(f"publish current_map {rid} -> {m.data!r}")
+                if not self._robot_status_enabled or rid not in self._robot_status_cmd_pubs:
+                    self.get_logger().warning(
+                        f"skip map switch for {rid}: RobotStatus publisher not available"
+                    )
+                else:
+                    payload = self._robot_status_payload_by_id.get(rid) or {}
+                    st = RobotStatus()
+                    st.header.stamp = self.get_clock().now().to_msg()
+                    st.header.frame_id = mf
+                    st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
+                    st.current_map = str(mn).strip()
+                    st.robot_status = str(payload.get("robot_status") or "").strip()
+                    self._robot_status_cmd_pubs[rid].publish(st)
+                    self.get_logger().info(f"publish robot_status {rid} current_map -> {st.current_map!r}")
 
         if mode in ("pose_only", "both"):
             msg = PoseWithCovarianceStamped()
@@ -556,14 +539,6 @@ class OpenDeliveryTfBridgeNode(Node):
                 self._buffer.set_transform(t, "open_delivery_web")
             except Exception as ex:  # noqa: BLE001
                 self.get_logger().debug(f"set_transform skip: {ex}")
-
-    def _make_current_map_cb(self, rid: str):
-        def _cb(msg: String) -> None:
-            text = (msg.data or "").strip()
-            if text:
-                self._current_map_from_topic[rid] = text
-
-        return _cb
 
     def _make_scan_cb(self, rid: str, map_frame: str):
         stride = max(1, int(os.environ.get("ROS_SCAN_STRIDE", "3")))
@@ -661,9 +636,7 @@ class OpenDeliveryTfBridgeNode(Node):
             if self._robot_status_enabled and hb_known and not hb_online:
                 continue
 
-            current_map = self._current_map_from_topic.get(rid) or str(
-                spec.get("current_map") or "nh_102"
-            )
+            current_map = str(spec.get("current_map") or os.environ.get("ROS_CURRENT_MAP", "nh_102"))
             status_payload = self._robot_status_payload_by_id.get(rid) or {}
             status_current_map = str(status_payload.get("current_map") or "").strip()
             if status_current_map:
@@ -686,7 +659,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "id": rid,
                         "name": robot_name,
                         "frame_id": mf,
-                        "current_map": current_map,
+                        "active_floor": current_map,
                         "pose": pose,
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "ok",
@@ -711,7 +684,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "id": rid,
                         "name": robot_name,
                         "frame_id": mf,
-                        "current_map": current_map,
+                        "active_floor": current_map,
                         "pose": pose,
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "lost",
@@ -769,14 +742,33 @@ def request_ros_shutdown() -> None:
         pass
 
 
-def list_mapping_robot_ids_from_status_store() -> List[str]:
-    """Robots whose latest RobotStatus indicates mapping mode."""
+def list_mapping_robot_ids_from_status_store(
+    max_status_age_sec: Optional[float] = None,
+) -> List[str]:
+    """Robots whose persisted RobotStatus indicates mapping mode.
+
+    Entries older than ``max_status_age_sec`` (default: env
+    ``ROS_MAPPING_STATUS_MAX_AGE_SEC`` or 25s, or ``inf`` if env is ``inf``/``none``)
+    by ``updated_at`` are ignored so removed robots do not keep ``{id}_mapping`` floors.
+    """
+    if max_status_age_sec is None:
+        raw = os.environ.get("ROS_MAPPING_STATUS_MAX_AGE_SEC", "25").strip().lower()
+        if raw in ("inf", "infinity", "none", "off"):
+            max_status_age_sec = float("inf")
+        else:
+            max_status_age_sec = float(raw) if raw else 25.0
+    now = time.time()
     out: List[str] = []
     for item in ros_robot_status_store.list_all_last_status():
         rid = str(item.get("robot_id") or "").strip()
         st = str(item.get("robot_status") or "").strip().lower()
         if not rid:
             continue
-        if st == "mapping":
-            out.append(rid)
+        if st != "mapping":
+            continue
+        if max_status_age_sec < float("inf"):
+            updated_at = float(item.get("updated_at") or 0.0)
+            if not updated_at or (now - updated_at) > max_status_age_sec:
+                continue
+        out.append(rid)
     return out
