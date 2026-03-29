@@ -2,7 +2,7 @@
 <package format="3">
   <name>custom_msgs_srvs</name>
   <version>0.0.1</version>
-  <description>Custom messages/services/actions for openDelivery.</description>
+  <description>Custom messages and services for openDelivery (e.g. RobotStatus, SetHeartbeatParams).</description>
 
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>

@@ -63,7 +63,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            # Headless-friendly defaults (no X required; Gazebo disables rendering if needed).
             SetEnvironmentVariable(name="QT_QPA_PLATFORM", value="minimal"),
             SetEnvironmentVariable(name="LIBGL_ALWAYS_SOFTWARE", value="1"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),

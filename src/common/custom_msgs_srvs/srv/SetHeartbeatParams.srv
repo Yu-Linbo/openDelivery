@@ -1,0 +1,9 @@
+# Empty string for robot_name / current_map / robot_status means "leave unchanged".
+# rate_hz <= 0 means leave publish_rate unchanged.
+string robot_name
+string current_map
+string robot_status
+float64 rate_hz
+---
+bool success
+string message

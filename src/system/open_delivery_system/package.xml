@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>open_delivery_system</name>
+  <version>0.0.1</version>
+  <description>Installed params launches, start scripts, and fake_pub runner for openDelivery stack.</description>
+  <maintainer email="dev@example.com">openDelivery</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>heartbeat</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>custom_msgs_srvs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
