@@ -2,7 +2,7 @@
 <package format="3">
   <name>heartbeat</name>
   <version>0.0.1</version>
-  <description>Publishes RobotStatus heartbeat on /{robot_name}/robot_status; runtime tuning via SetHeartbeatParams service.</description>
+  <description>Publishes RobotStatus on ~/robot_status (namespace from launch); ~/set_heartbeat_params. Use PushRosNamespace per robot instance.</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
 

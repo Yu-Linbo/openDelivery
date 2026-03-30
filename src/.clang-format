@@ -1,0 +1,35 @@
+# C/C++ under openDelivery/src/ only — clang-format walks up from the file and stops here.
+# Allman braces; vendor subtrees in .clang-format-ignore.
+#
+# Check:  clang-format --dry-run --Werror path/to/file.cpp
+# Fix:    clang-format -i path/to/file.cpp
+
+Language: Cpp
+BasedOnStyle: LLVM
+BreakBeforeBraces: Allman
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+ContinuationIndentWidth: 4
+
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+
+AlignAfterOpenBracket: Align
+AlignOperands: true
+AllowShortBlocksOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+IncludeBlocks: Preserve
+SortIncludes: true
+
+NamespaceIndent: None
+CompactNamespaces: false
+FixNamespaceComments: true
+
+SpaceBeforeParens: ControlStatements
+SpacesInAngles: false
