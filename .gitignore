@@ -6,3 +6,5 @@ src/fake/scripts/__pycache__
 map/
 # IDE: track agent defs; ignore other .cursor noise
 .cursor/
+params/launch/simulate/__pycache__
+src/simulate/simulate/launch/__pycache__

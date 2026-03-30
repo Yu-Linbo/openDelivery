@@ -67,9 +67,9 @@ class RosNodeManager:
                 "id": "simulate",
                 "name": "simulate",
                 "persistent": True,
-                "start_cmd": "ros2 launch simulate headless_sim.launch.py",
-                "stop_cmd": "pkill -f 'ros2 launch simulate headless_sim.launch.py'",
-                "match": "headless_sim.launch.py",
+                "start_cmd": "ros2 launch simulate simulate.launch.py",
+                "stop_cmd": "pkill -f 'ros2 launch simulate simulate.launch.py'",
+                "match": "simulate.launch.py",
                 "note": "仿真场景（示例）",
             },
         ]

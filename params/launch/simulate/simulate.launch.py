@@ -1,0 +1,143 @@
+"""Gazebo 无头仿真（installed to bringup_launch/simulate/simulate.launch.py；源码镜像见 src/simulate/simulate/launch/simulate.launch.py）。"""
+
+import os
+import subprocess
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+)
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.substitutions import FindPackageShare
+
+
+def _run_xacro_robot_description(namespace: str) -> str:
+    """Namespace for ROS plugins; frame_prefix for TF link names (empty if global)."""
+    ns = (namespace or "").strip()
+    fp = "" if ns in ("/", "") else f"{ns}/"
+    share = get_package_share_directory("simulate")
+    urdf = os.path.join(share, "urdf", "simple_2d_robot.urdf.xacro")
+    out = subprocess.check_output(
+        [
+            "xacro",
+            urdf,
+            f"robot_namespace:={ns}",
+            f"frame_prefix:={fp}",
+        ],
+        stderr=subprocess.STDOUT,
+    )
+    return out.decode("utf-8")
+
+
+def launch_setup(context, *_args, **_kwargs):
+    ns = LaunchConfiguration("namespace").perform(context).strip()
+    use_sim = LaunchConfiguration("use_sim_time").perform(context).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    start_gz = LaunchConfiguration("start_gazebo").perform(context).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    world = LaunchConfiguration("world").perform(context)
+
+    try:
+        robot_desc = _run_xacro_robot_description(ns)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
+
+    robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim, "robot_description": robot_desc}],
+    )
+
+    spawn_robot = Node(
+        package="gazebo_ros",
+        executable="spawn_entity.py",
+        arguments=[
+            "-entity",
+            ns,
+            "-topic",
+            "robot_description",
+            "-x",
+            "0.0",
+            "-y",
+            "0.0",
+            "-z",
+            "0.05",
+        ],
+        output="screen",
+    )
+
+    actions = []
+
+    if start_gz:
+        actions.append(
+            SetEnvironmentVariable(name="QT_QPA_PLATFORM", value="minimal")
+        )
+        actions.append(
+            SetEnvironmentVariable(name="LIBGL_ALWAYS_SOFTWARE", value="1")
+        )
+        gazebo_launch = IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution(
+                    [
+                        FindPackageShare("gazebo_ros"),
+                        "launch",
+                        "gazebo.launch.py",
+                    ]
+                )
+            ),
+            launch_arguments={
+                "gui": "false",
+                "verbose": "false",
+                "world": world,
+            }.items(),
+        )
+        actions.append(gazebo_launch)
+
+    group_children = [PushRosNamespace(ns), robot_state_publisher, spawn_robot]
+    actions.append(GroupAction(actions=group_children))
+    return actions
+
+
+def generate_launch_description():
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument(
+                "robot_name",
+                default_value="sim_robot",
+                description="When namespace is not set, also selects default namespace.",
+            ),
+            DeclareLaunchArgument(
+                "namespace",
+                default_value=LaunchConfiguration("robot_name"),
+                description="ROS namespace + TF prefix (e.g. robot2 → robot2/odom, robot2/base_link).",
+            ),
+            DeclareLaunchArgument(
+                "start_gazebo",
+                default_value="true",
+                description="If false, skip starting Gazebo (use after a first full launch is running).",
+            ),
+            DeclareLaunchArgument(
+                "world",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("simulate"), "worlds", "empty.world"]
+                ),
+                description="Gazebo world file.",
+            ),
+            OpaqueFunction(function=launch_setup),
+        ]
+    )

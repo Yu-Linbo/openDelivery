@@ -4,7 +4,7 @@ Subscribe to standard TF topics (tf2_msgs/TFMessage), lookup map -> robot base_l
 
 Typical tree (shared /tf + often /tf_static):
   map
-   ├── robot1/odom → robot1/base_link
+   ├── robot1/odom → robot1/base_link   # URDF may insert robot1/base_footprint between odom and base_link
    └── robot2/odom → robot2/base_link
 
 Environment (single robot defaults):

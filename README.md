@@ -41,7 +41,7 @@ cd /path/to/openDelivery
 source /opt/ros/$ROS_DISTRO/setup.bash
 colcon build --symlink-install --packages-up-to simulate slam_bringup
 source install/setup.bash
-ros2 launch simulate headless_sim.launch.py
+ros2 launch simulate simulate.launch.py
 ```
 
 另一终端（已 `source install/setup.bash`）：
@@ -50,7 +50,7 @@ ros2 launch simulate headless_sim.launch.py
 ros2 launch slam_bringup mapping.launch.py
 ```
 
-详见 `src/simulate/README.md`（目录说明）与 `src/simulate/simulate/README.md`（仿真包文档）。
+详见 **`src/README.md`**（含 TF 约定、仿真与构建说明）。
 
 ## Web 栈
 
@@ -66,7 +66,7 @@ cd /path/to/openDelivery
 - **保存地图**：仅在建图楼层时显示「保存为 / 保存地图」工具条；写入 `map/<名称>/`（`nav2_map_server` 的 `map_saver_cli`）。**切图** 时：后端向 `/<robot_id>/robot_status` 发布 `RobotStatus`，在消息里设置 `current_map`（已保存楼层用该楼层名；建图楼层用「保存为」输入框中的名称）。
 - **`GET /api/robot/pose`**（及 SSE）：每台机器人的当前楼层在 JSON 字段 **`active_floor`** 中（由 TF 桥从 `RobotStatus` 合并而来）；前端不再使用已废弃的 `/*/current_map` 话题，也不单独轮询该话题。
 
-保存依赖与仿真包说明见 `src/simulate/simulate/README.md`。
+保存依赖与仿真说明见 **`src/README.md`** §6。
 </think>
 
 

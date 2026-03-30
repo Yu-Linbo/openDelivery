@@ -12,6 +12,7 @@ install(
 install(
   DIRECTORY
     "${_PARAMS_ROOT}/launch/system"
+    "${_PARAMS_ROOT}/launch/fake"
     "${_PARAMS_ROOT}/launch/simulate"
   DESTINATION share/${PROJECT_NAME}/bringup_launch
 )

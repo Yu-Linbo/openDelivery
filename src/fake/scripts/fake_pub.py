@@ -10,7 +10,7 @@ TF 树（单机示例 robot1）::
 
 与 Web 切图/重定位联动（与 ``openDelivery`` 后端 ``robot_status`` 驱动发现一致）：
 
-- 发布 ``custom_msgs_srvs/RobotStatus`` ``/{robot_name}/robot_status``（含 ``current_map``、``robot_status``），供后端发现与其它模块读状态。
+- 发布 ``custom_msgs_srvs/RobotStatus`` 到 ``robot_status``（若在 launch 里套了 ``PushRosNamespace``，则全名为 ``/<namespace>/robot_status``；根命名空间下仍为 ``/{robot_name}/robot_status`` 兼容旧启动方式）。
 - 订阅同话题：当外部更新 ``current_map`` 字段时重算圆心并重建路径。
 - 订阅 ``geometry_msgs/PoseWithCovarianceStamped`` ``/{robot_name}/initial``：按该位姿 **接回** 圆周演示——
   将圆心与弧长对齐到 ``(x,y,yaw)`` 后 **继续沿轨迹运动**（不再长期停住）。
@@ -134,6 +134,13 @@ def _circle_motion_from_seed(
 
 
 class FakeRobotNode(Node):
+    def _topic(self, name: str) -> str:
+        """Under a non-root ROS namespace use relative names; else legacy ``/{robot_name}/name``."""
+        ns = self.get_namespace()
+        if ns == "/":
+            return f"/{self.robot_name}/{name}"
+        return name
+
     def __init__(self):
         super().__init__("fake_robots_tf")
 
@@ -168,11 +175,11 @@ class FakeRobotNode(Node):
         self._arc1 = 0.0
 
         self.br = TransformBroadcaster(self)
-        scan_topic = f"/{self.robot_name}/scan_2d"
+        scan_topic = self._topic("scan_2d")
         self.scan_pub = self.create_publisher(LaserScan, scan_topic, 10)
-        self.path_pub = self.create_publisher(Path, f"/{self.robot_name}/planned_path", 10)
+        self.path_pub = self.create_publisher(Path, self._topic("planned_path"), 10)
 
-        self.robot_status_topic = f"/{self.robot_name}/robot_status"
+        self.robot_status_topic = self._topic("robot_status")
         self.robot_status_pub = self.create_publisher(RobotStatus, self.robot_status_topic, 10)
 
         self._rebuild_path_robot1()
@@ -188,7 +195,7 @@ class FakeRobotNode(Node):
             self._on_robot_status_robot1,
             10,
         )
-        initial_topic_1 = f"/{self.robot_name}/initial"
+        initial_topic_1 = self._topic("initial")
         self.create_subscription(
             PoseWithCovarianceStamped,
             initial_topic_1,

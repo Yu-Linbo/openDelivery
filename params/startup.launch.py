@@ -1,4 +1,4 @@
-"""Top-level stack: includes bringup launches under bringup_launch/ (e.g. system/*.launch.py, simulate/simulate/*.launch.py)."""
+"""Top-level stack: includes bringup launches under bringup_launch/ (e.g. system/*.launch.py, fake/*.launch.py)."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -31,7 +31,7 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     PathJoinSubstitution(
-                        [pkg, "bringup_launch", "simulate", "simulate", "simulate.launch.py"]
+                        [pkg, "bringup_launch", "fake", "fake_pub.launch.py"]
                     )
                 ),
                 launch_arguments=[
