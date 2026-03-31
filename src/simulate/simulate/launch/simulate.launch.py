@@ -22,6 +22,14 @@ from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.substitutions import FindPackageShare
 
 
+def _resolve_world_path(share: str, world_arg: str) -> str:
+    """Allow both absolute world path and worlds/<name> shorthand."""
+    world_arg = (world_arg or "").strip()
+    if world_arg.startswith("/"):
+        return world_arg
+    return os.path.join(share, "worlds", world_arg or "drawn_model.world")
+
+
 def _run_xacro_robot_description(namespace: str) -> str:
     """Namespace for ROS plugins; frame_prefix for TF link names (empty if global)."""
     ns = (namespace or "").strip()
@@ -53,6 +61,9 @@ def launch_setup(context, *_args, **_kwargs):
         "yes",
     )
     world = LaunchConfiguration("world").perform(context)
+    share = get_package_share_directory("simulate")
+    model_dir = os.path.join(share, "model")
+    world_path = _resolve_world_path(share, world)
 
     try:
         robot_desc = _run_xacro_robot_description(ns)
@@ -74,6 +85,10 @@ def launch_setup(context, *_args, **_kwargs):
             ns,
             "-topic",
             "robot_description",
+            "-timeout",
+            "180",
+            "-spawn_service_timeout",
+            "180",
             "-x",
             "0.0",
             "-y",
@@ -87,6 +102,15 @@ def launch_setup(context, *_args, **_kwargs):
     actions = []
 
     if start_gz:
+        gazebo_model_path = os.environ.get("GAZEBO_MODEL_PATH", "")
+        merged_model_path = (
+            model_dir
+            if not gazebo_model_path
+            else f"{model_dir}{os.pathsep}{gazebo_model_path}"
+        )
+        actions.append(
+            SetEnvironmentVariable(name="GAZEBO_MODEL_PATH", value=merged_model_path)
+        )
         actions.append(
             SetEnvironmentVariable(name="QT_QPA_PLATFORM", value="minimal")
         )
@@ -106,7 +130,7 @@ def launch_setup(context, *_args, **_kwargs):
             launch_arguments={
                 "gui": "false",
                 "verbose": "false",
-                "world": world,
+                "world": world_path,
             }.items(),
         )
         actions.append(gazebo_launch)
@@ -137,10 +161,8 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "world",
-                default_value=PathJoinSubstitution(
-                    [FindPackageShare("simulate"), "worlds", "empty.world"]
-                ),
-                description="Gazebo world file.",
+                default_value="drawn_model.world",
+                description="Gazebo world file name under simulate/worlds, or absolute path.",
             ),
             OpaqueFunction(function=launch_setup),
         ]
