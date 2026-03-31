@@ -13,6 +13,7 @@ const robotPresenceEmpty = document.getElementById("robot-presence-empty");
 const robotPresenceSummary = document.getElementById("robot-presence-summary");
 const views = {
   monitor: document.getElementById("view-monitor"),
+  gazebo: document.getElementById("view-gazebo"),
   ros: document.getElementById("view-ros"),
   settings: document.getElementById("view-settings"),
   logs: document.getElementById("view-logs"),
@@ -158,9 +159,12 @@ menuButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
     const target = btn.dataset.view;
     menuButtons.forEach((b) => b.classList.remove("active"));
-    Object.values(views).forEach((v) => v.classList.remove("active"));
+    Object.values(views).forEach((v) => {
+      if (v) v.classList.remove("active");
+    });
     btn.classList.add("active");
-    views[target].classList.add("active");
+    const pane = views[target];
+    if (pane) pane.classList.add("active");
   });
 });
 
@@ -244,6 +248,24 @@ async function resolveApiBaseUrl() {
 
 async function postRobotCommand(payload) {
   const res = await fetch(`${API_BASE_URL}/api/robot/command`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `请求失败 (${res.status})`);
+  }
+  return data;
+}
+
+async function postGazeboSetModelState(payload) {
+  const res = await fetch(`${API_BASE_URL}/api/gazebo/set_model_state`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -2028,6 +2050,210 @@ async function initMonitor() {
   startSensorPolling();
 }
 
+function initGazeboPage() {
+  const modelNameEl = document.getElementById("gazebo-model-name");
+  const gazeboX = document.getElementById("gazebo-x");
+  const gazeboY = document.getElementById("gazebo-y");
+  const gazeboYaw = document.getElementById("gazebo-yaw");
+  const topCameraCanvas = document.getElementById("gazebo-top-camera");
+  const topCameraCtx = topCameraCanvas ? topCameraCanvas.getContext("2d") : null;
+  const gazeboMessage = document.getElementById("gazebo-message");
+  const btnGazeboTeleport = document.getElementById("btn-gazebo-set-model-state");
+  const btnGazeboFill = document.getElementById("btn-gazebo-fill-pose");
+  const cameraModel = {
+    x: 0.0,
+    y: 0.0,
+    z: 12.0,
+    hfov: 1.3962634,
+  };
+  const cameraFrame = {
+    width: 0,
+    height: 0,
+  };
+
+  function fitTopCameraCanvas(w, h) {
+    if (!topCameraCanvas || !topCameraCtx) {
+      return;
+    }
+    const rect = topCameraCanvas.getBoundingClientRect();
+    const vw = Math.max(280, Math.floor(rect.width));
+    const vh = Math.max(180, Math.floor(rect.height));
+    const dpr = window.devicePixelRatio || 1;
+    topCameraCanvas.width = Math.floor(vw * dpr);
+    topCameraCanvas.height = Math.floor(vh * dpr);
+    topCameraCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    topCameraCtx.fillStyle = "#ffffff";
+    topCameraCtx.fillRect(0, 0, vw, vh);
+    if (w && h) {
+      topCameraCtx.fillStyle = "#475569";
+      topCameraCtx.font = "12px sans-serif";
+      topCameraCtx.fillText(`${w}x${h}`, 8, 16);
+    }
+  }
+
+  function cameraPixelToWorld(px, py) {
+    const width = cameraFrame.width;
+    const height = cameraFrame.height;
+    if (!width || !height) {
+      return null;
+    }
+    const hfov = Number(cameraModel.hfov || 0);
+    const z = Number(cameraModel.z || 0);
+    if (!hfov || !z) {
+      return null;
+    }
+    const fx = width / (2 * Math.tan(hfov / 2));
+    const vfov = 2 * Math.atan(Math.tan(hfov / 2) * (height / width));
+    const fy = height / (2 * Math.tan(vfov / 2));
+    const cx = width / 2;
+    const cy = height / 2;
+    const dx = ((px - cx) / fx) * z;
+    const dy = ((py - cy) / fy) * z;
+    return {
+      x: cameraModel.x + dx,
+      y: cameraModel.y - dy,
+    };
+  }
+
+  async function refreshTopCameraFrame() {
+    if (!topCameraCanvas || !topCameraCtx) {
+      return;
+    }
+    try {
+      const data = await fetchJson(`${API_BASE_URL}/api/gazebo/top_camera`);
+      if (data && data.available && data.data_b64) {
+        const width = Number(data.width || 0);
+        const height = Number(data.height || 0);
+        if (!width || !height) {
+          return;
+        }
+        cameraFrame.width = width;
+        cameraFrame.height = height;
+        const raw = atob(data.data_b64);
+        const rgb = new Uint8ClampedArray(raw.length);
+        for (let i = 0; i < raw.length; i += 1) {
+          rgb[i] = raw.charCodeAt(i);
+        }
+        const rgba = new Uint8ClampedArray(width * height * 4);
+        for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+          rgba[j] = rgb[i];
+          rgba[j + 1] = rgb[i + 1];
+          rgba[j + 2] = rgb[i + 2];
+          rgba[j + 3] = 255;
+        }
+        fitTopCameraCanvas(width, height);
+        const vw = topCameraCanvas.clientWidth || width;
+        const vh = topCameraCanvas.clientHeight || height;
+        const off = document.createElement("canvas");
+        off.width = width;
+        off.height = height;
+        const offCtx = off.getContext("2d");
+        offCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
+        topCameraCtx.clearRect(0, 0, vw, vh);
+        topCameraCtx.drawImage(off, 0, 0, vw, vh);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (btnGazeboFill) {
+    btnGazeboFill.addEventListener("click", async () => {
+      if (!gazeboMessage || !gazeboX || !gazeboY || !gazeboYaw) {
+        return;
+      }
+      gazeboMessage.textContent = "读取位姿中…";
+      try {
+        const data = await fetchJson(`${API_BASE_URL}/api/robot/pose`);
+        const robots = Array.isArray(data.robots) ? data.robots : [];
+        const r = robots[0];
+        if (!r || !r.pose) {
+          gazeboMessage.textContent = "无可用位姿数据（检查 ROS TF 桥与机器人是否在图上）";
+          return;
+        }
+        const p = r.pose;
+        gazeboX.value = String(p.x ?? 0);
+        gazeboY.value = String(p.y ?? 0);
+        gazeboYaw.value = String(p.yaw ?? 0);
+        if (modelNameEl && !modelNameEl.value.trim()) {
+          modelNameEl.value = String(r.id || "robot2");
+        }
+        gazeboMessage.textContent = `已填入 ${r.name || r.id} 的位姿`;
+      } catch (err) {
+        gazeboMessage.textContent = err.message || String(err);
+      }
+    });
+  }
+
+  if (btnGazeboTeleport) {
+    btnGazeboTeleport.addEventListener("click", async () => {
+      if (!gazeboMessage) {
+        return;
+      }
+      const modelName = modelNameEl?.value?.trim();
+      if (!modelName) {
+        gazeboMessage.textContent = "请填写 Gazebo 模型名（与 spawn -entity 一致，如 robot2）";
+        return;
+      }
+      const x = parseFloat((gazeboX && gazeboX.value) || "");
+      const y = parseFloat((gazeboY && gazeboY.value) || "");
+      const yaw = parseFloat((gazeboYaw && gazeboYaw.value) || "0");
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        gazeboMessage.textContent = "请填写 x、y 坐标";
+        return;
+      }
+      gazeboMessage.textContent = "Gazebo 瞬移中…";
+      try {
+        await postGazeboSetModelState({
+          model_name: modelName,
+          x,
+          y,
+          yaw: Number.isNaN(yaw) ? 0 : yaw,
+          z: 0.05,
+          reference_frame: "world",
+        });
+        gazeboMessage.textContent = `Gazebo 已瞬移: ${modelName}`;
+        appendLog(`Gazebo set_model_state: ${modelName} -> (${x.toFixed(2)}, ${y.toFixed(2)})`);
+      } catch (err) {
+        gazeboMessage.textContent = `Gazebo 瞬移失败: ${err.message || err}`;
+      }
+    });
+  }
+
+  if (topCameraCanvas) {
+    fitTopCameraCanvas();
+    window.addEventListener("resize", () => {
+      fitTopCameraCanvas();
+    });
+    topCameraCanvas.addEventListener("click", (ev) => {
+      if (!gazeboMessage) {
+        return;
+      }
+      if (!cameraFrame.width || !cameraFrame.height) {
+        gazeboMessage.textContent = "相机画面未就绪，稍后再试";
+        return;
+      }
+      const rect = topCameraCanvas.getBoundingClientRect();
+      const sx = ev.clientX - rect.left;
+      const sy = ev.clientY - rect.top;
+      const px = (sx / Math.max(1, rect.width)) * cameraFrame.width;
+      const py = (sy / Math.max(1, rect.height)) * cameraFrame.height;
+      const pos = cameraPixelToWorld(px, py);
+      if (!pos) {
+        gazeboMessage.textContent = "相机内参不可用，无法换算点击坐标";
+        return;
+      }
+      if (gazeboX) gazeboX.value = String(Number(pos.x.toFixed(3)));
+      if (gazeboY) gazeboY.value = String(Number(pos.y.toFixed(3)));
+      gazeboMessage.textContent = `已取点: (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)})，点击“移动到该坐标”执行`;
+    });
+    refreshTopCameraFrame().catch(() => {});
+    setInterval(() => {
+      refreshTopCameraFrame().catch(() => {});
+    }, 500);
+  }
+}
+
 async function bootstrap() {
   initSettings();
   initLogs();
@@ -2037,6 +2263,7 @@ async function bootstrap() {
     .then(() => updateRobotPresenceTriggerSummary())
     .catch(() => {});
   await initMonitor();
+  initGazeboPage();
 }
 
 bootstrap();

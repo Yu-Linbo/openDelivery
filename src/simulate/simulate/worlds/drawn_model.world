@@ -60,5 +60,42 @@
       <name>drawn_model</name>
       <pose>0 0 0 0 0 0</pose>
     </include>
+    <model name="topdown_camera">
+      <static>true</static>
+      <pose>0 0 12 0 -1.57079632679 0</pose>
+      <link name="topdown_camera_link">
+        <sensor name="topdown_rgb_sensor" type="camera">
+          <always_on>true</always_on>
+          <update_rate>15</update_rate>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.3962634</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.1</near>
+              <far>100</far>
+            </clip>
+          </camera>
+          <plugin name="topdown_camera_controller" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>drawn_model/topdown_camera</namespace>
+              <remapping>topdown_rgb_sensor/image_raw:=image_raw</remapping>
+              <remapping>topdown_rgb_sensor/camera_info:=camera_info</remapping>
+              <remapping>image_raw:=image_raw</remapping>
+              <remapping>camera_info:=camera_info</remapping>
+            </ros>
+            <frame_name>topdown_camera_link</frame_name>
+            <robotNamespace>/drawn_model/topdown_camera</robotNamespace>
+            <imageTopicName>image_raw</imageTopicName>
+            <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+            <frameName>topdown_camera_link</frameName>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
   </world>
 </sdf>

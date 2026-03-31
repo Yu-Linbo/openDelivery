@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -14,7 +15,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from ros_sensor_store import get_planned_path, get_scan
+from ros_sensor_store import (
+    get_gazebo_models,
+    get_planned_path,
+    get_scan,
+    get_topdown_image,
+)
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -22,6 +28,59 @@ if str(_BACKEND_DIR) not in sys.path:
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
+
+
+def call_gazebo_set_model_state(
+    root_dir: Path,
+    model_name: str,
+    x: float,
+    y: float,
+    z: float,
+    yaw: float,
+    reference_frame: str,
+):
+    """Call /gazebo/set_model_state via ros2 CLI with sourced workspace."""
+    ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+    install_setup = Path(root_dir) / "install" / "setup.bash"
+    install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
+
+    q_model = shlex.quote(str(model_name))
+    q_ref = shlex.quote(str(reference_frame))
+    payload = (
+        "{state: {"
+        f"model_name: {q_model}, "
+        "pose: {"
+        f"position: {{x: {float(x)}, y: {float(y)}, z: {float(z)}}}, "
+        f"orientation: {{x: 0.0, y: 0.0, z: {math.sin(float(yaw) / 2.0)}, w: {math.cos(float(yaw) / 2.0)}}}"
+        "}, "
+        "twist: {"
+        "linear: {x: 0.0, y: 0.0, z: 0.0}, "
+        "angular: {x: 0.0, y: 0.0, z: 0.0}"
+        "}, "
+        f"reference_frame: {q_ref}"
+        "}}"
+    )
+    cmd = (
+        f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
+        f'cd "{root_dir}" && {install_src}; '
+        "ros2 service call /gazebo/set_model_state gazebo_msgs/srv/SetModelState "
+        f"{shlex.quote(payload)}"
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+        timeout=12.0,
+        env=os.environ.copy(),
+    )
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip() or "ros2 service call failed"
+        raise RuntimeError(msg)
+    out = (proc.stdout or "").strip()
+    ok = ("success: True" in out) or ("success=true" in out)
+    if not ok:
+        raise RuntimeError(out or "set_model_state returned non-success")
+    return {"ok": True, "output": out}
 
 
 class RosNodeManager:
@@ -961,6 +1020,62 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/gazebo/set_model_state":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            model_name = str(data.get("model_name") or "").strip()
+            reference_frame = str(data.get("reference_frame") or "world").strip() or "world"
+            if not model_name:
+                self._send_json({"error": "model_name is required"}, 400)
+                return
+            try:
+                x = float(data.get("x"))
+                y = float(data.get("y"))
+                yaw = float(data.get("yaw", 0.0))
+                z = float(data.get("z", 0.05))
+            except (TypeError, ValueError):
+                self._send_json({"error": "x, y, yaw, z must be numeric"}, 400)
+                return
+            try:
+                out = call_gazebo_set_model_state(
+                    ROOT_DIR, model_name, x, y, z, yaw, reference_frame
+                )
+            except subprocess.TimeoutExpired:
+                self._send_json({"error": "set_model_state timeout"}, 504)
+                return
+            except RuntimeError as err:
+                self._send_json({"error": str(err)}, 500)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "model_name": model_name,
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "yaw": yaw,
+                    "reference_frame": reference_frame,
+                    "raw": out.get("output", ""),
+                }
+            )
+            return
+
         if path != "/api/robot/command":
             self._not_found("endpoint not found")
             return
@@ -1122,6 +1237,28 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/robot/pose":
             self._send_json(POSE_PROVIDER.get_pose())
+            return
+
+        if path == "/api/gazebo/topdown/state":
+            snap = get_gazebo_models()
+            if not snap:
+                self._send_json(
+                    {"available": False, "reason": "no /gazebo/model_states data yet"},
+                    200,
+                )
+                return
+            self._send_json(snap, 200)
+            return
+
+        if path == "/api/gazebo/top_camera":
+            frame = get_topdown_image()
+            if not frame:
+                self._send_json(
+                    {"available": False, "reason": "no topdown camera frame yet"},
+                    200,
+                )
+                return
+            self._send_json(frame, 200)
             return
 
         m_scan = re.match(r"^/api/robot/([^/]+)/scan_2d$", path)

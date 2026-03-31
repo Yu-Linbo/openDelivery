@@ -7,10 +7,13 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
+    LogInfo,
     OpaqueFunction,
     SetEnvironmentVariable,
+    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -56,6 +59,12 @@ def launch_setup(context, *_args, **_kwargs):
         "1",
         "yes",
     )
+    start_xvfb = LaunchConfiguration("start_xvfb").perform(context).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    xvfb_display = LaunchConfiguration("xvfb_display").perform(context).strip() or ":99"
     world = LaunchConfiguration("world").perform(context)
     share = get_package_share_directory("simulate")
     model_dir = os.path.join(share, "model")
@@ -113,6 +122,29 @@ def launch_setup(context, *_args, **_kwargs):
         actions.append(
             SetEnvironmentVariable(name="LIBGL_ALWAYS_SOFTWARE", value="1")
         )
+        if start_xvfb:
+            actions.append(SetEnvironmentVariable(name="DISPLAY", value=xvfb_display))
+            actions.append(
+                LogInfo(
+                    msg=(
+                        f"[simulate] starting Xvfb on {xvfb_display} for headless camera rendering"
+                    )
+                )
+            )
+            actions.append(
+                ExecuteProcess(
+                    cmd=[
+                        "Xvfb",
+                        xvfb_display,
+                        "-screen",
+                        "0",
+                        "1280x720x24",
+                        "-nolisten",
+                        "tcp",
+                    ],
+                    output="screen",
+                )
+            )
         gazebo_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution(
@@ -129,7 +161,62 @@ def launch_setup(context, *_args, **_kwargs):
                 "world": world_path,
             }.items(),
         )
-        actions.append(gazebo_launch)
+        if start_xvfb:
+            actions.append(TimerAction(period=0.8, actions=[gazebo_launch]))
+        else:
+            actions.append(gazebo_launch)
+
+    start_gzweb = LaunchConfiguration("start_gzweb").perform(context).lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    if start_gzweb:
+        gzweb_root_arg = LaunchConfiguration("gzweb_root").perform(context).strip()
+        if not gzweb_root_arg:
+            gzweb_root_arg = os.environ.get("GZWEB_ROOT", "").strip()
+        if not gzweb_root_arg:
+            vendored_root = os.path.join(share, "third_party", "gzweb")
+            if os.path.isfile(os.path.join(vendored_root, "package.json")):
+                gzweb_root_arg = vendored_root
+        port = LaunchConfiguration("gzweb_port").perform(context).strip() or "8080"
+        raw_delay = LaunchConfiguration("gzweb_start_delay").perform(context).strip()
+        try:
+            delay_sec = float(raw_delay if raw_delay else "8.0")
+        except ValueError:
+            delay_sec = 8.0
+        delay_sec = max(0.0, delay_sec)
+        script = os.path.join(share, "scripts", "start_gzweb.sh")
+        pkg_json = (
+            os.path.join(gzweb_root_arg, "package.json") if gzweb_root_arg else ""
+        )
+        if gzweb_root_arg and os.path.isfile(pkg_json):
+            actions.append(
+                LogInfo(
+                    msg=(
+                        f"[simulate] GzWeb will start in {delay_sec}s "
+                        f"(root={gzweb_root_arg}, port={port})"
+                    )
+                )
+            )
+            gzweb_proc = ExecuteProcess(
+                cmd=["bash", script, gzweb_root_arg, port],
+                output="screen",
+            )
+            actions.append(
+                TimerAction(period=delay_sec, actions=[gzweb_proc])
+            )
+        else:
+            actions.append(
+                LogInfo(
+                    msg=(
+                        "[simulate] start_gzweb:=true but gzweb_root empty or not a GzWeb "
+                        "directory (missing package.json). Set gzweb_root:=/path/to/gzweb, "
+                        "or export GZWEB_ROOT, or download源码到 src/simulate/gzweb then "
+                        "colcon build --packages-select simulate."
+                    )
+                )
+            )
 
     group_children = [PushRosNamespace(ns), robot_state_publisher, spawn_robot]
     actions.append(GroupAction(actions=group_children))
@@ -159,6 +246,39 @@ def generate_launch_description():
                 "world",
                 default_value="drawn_model.world",
                 description="Gazebo world file name under simulate/worlds, or absolute path.",
+            ),
+            DeclareLaunchArgument(
+                "start_xvfb",
+                default_value="true",
+                description="Start Xvfb in headless environments so Gazebo camera sensors can render.",
+            ),
+            DeclareLaunchArgument(
+                "xvfb_display",
+                default_value=":99",
+                description="DISPLAY value used by Xvfb/gzserver when start_xvfb is true.",
+            ),
+            DeclareLaunchArgument(
+                "start_gzweb",
+                default_value="false",
+                description=(
+                    "If true, start OSRF GzWeb (npm) after a delay; uses gzweb_root, or "
+                    "GZWEB_ROOT, or installed vendored source share/simulate/third_party/gzweb."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "gzweb_root",
+                default_value="",
+                description="Absolute path to GzWeb repository root (overrides GZWEB_ROOT env if set).",
+            ),
+            DeclareLaunchArgument(
+                "gzweb_port",
+                default_value="8080",
+                description="HTTP port passed to GzWeb (PORT env).",
+            ),
+            DeclareLaunchArgument(
+                "gzweb_start_delay",
+                default_value="8.0",
+                description="Seconds to wait after launch before starting GzWeb (lets gzserver come up).",
             ),
             OpaqueFunction(function=launch_setup),
         ]

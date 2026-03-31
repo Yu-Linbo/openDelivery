@@ -50,6 +50,7 @@ import os
 import re
 import threading
 import time
+import base64
 from typing import Any, Callable, Dict, List, Optional
 
 import rclpy
@@ -57,9 +58,11 @@ from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from gazebo_msgs.msg import ModelStates
 from nav_msgs.msg import OccupancyGrid, Path
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Image
 from tf2_msgs.msg import TFMessage
 
 try:
@@ -155,6 +158,34 @@ class OpenDeliveryTfBridgeNode(Node):
         if static_topic and static_topic not in topics:
             self.create_subscription(TFMessage, static_topic, self._on_tf_message, 10)
             self.get_logger().info(f"subscribing TFMessage on {static_topic} (static)")
+
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        # Gazebo global model states for lightweight top-down view.
+        self.create_subscription(
+            ModelStates,
+            "/gazebo/model_states",
+            self._on_gazebo_model_states,
+            sensor_qos,
+        )
+        self.get_logger().info("subscribing ModelStates on /gazebo/model_states")
+
+        # Optional top-down RGB camera stream.
+        self._topdown_camera_topic = os.environ.get(
+            "ROS_TOPDOWN_CAMERA_TOPIC", "/drawn_model/topdown_camera/image_raw"
+        ).strip()
+        if self._topdown_camera_topic:
+            self.create_subscription(
+                Image,
+                self._topdown_camera_topic,
+                self._on_topdown_image,
+                sensor_qos,
+            )
+            self.get_logger().info(f"subscribing topdown image on {self._topdown_camera_topic}")
 
         scan_suffix = os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d")
         path_suffix = os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path")
@@ -539,6 +570,70 @@ class OpenDeliveryTfBridgeNode(Node):
                 self._buffer.set_transform(t, "open_delivery_web")
             except Exception as ex:  # noqa: BLE001
                 self.get_logger().debug(f"set_transform skip: {ex}")
+
+    def _on_gazebo_model_states(self, msg: ModelStates) -> None:
+        try:
+            models = []
+            n = min(len(msg.name), len(msg.pose))
+            for i in range(n):
+                nm = str(msg.name[i] or "").strip()
+                p = msg.pose[i]
+                x = float(p.position.x)
+                y = float(p.position.y)
+                qx = float(p.orientation.x)
+                qy = float(p.orientation.y)
+                qz = float(p.orientation.z)
+                qw = float(p.orientation.w)
+                yaw = _yaw_from_quat(qx, qy, qz, qw)
+                models.append({"name": nm, "pose": {"x": x, "y": y, "yaw": yaw}})
+            ros_sensor_store.set_gazebo_models(
+                {
+                    "available": True,
+                    "models": models,
+                    "source": "model_states_topic",
+                    "stamp": time.time(),
+                }
+            )
+        except Exception:  # noqa: BLE001
+            return
+
+    def _on_topdown_image(self, msg: Image) -> None:
+        try:
+            width = int(msg.width)
+            height = int(msg.height)
+            if width <= 0 or height <= 0:
+                return
+            enc = str(msg.encoding or "").lower()
+            raw = bytes(msg.data or b"")
+            if not raw:
+                return
+            if enc == "rgb8":
+                rgb = raw
+            elif enc == "bgr8":
+                rgb = bytearray(len(raw))
+                for i in range(0, len(raw), 3):
+                    if i + 2 >= len(raw):
+                        break
+                    rgb[i] = raw[i + 2]
+                    rgb[i + 1] = raw[i + 1]
+                    rgb[i + 2] = raw[i]
+                rgb = bytes(rgb)
+            else:
+                return
+            ros_sensor_store.set_topdown_image(
+                {
+                    "available": True,
+                    "width": width,
+                    "height": height,
+                    "encoding": "rgb8",
+                    "data_b64": base64.b64encode(rgb).decode("ascii"),
+                    "frame_id": str(msg.header.frame_id or ""),
+                    "stamp_sec": int(msg.header.stamp.sec),
+                    "stamp_nanosec": int(msg.header.stamp.nanosec),
+                }
+            )
+        except Exception:  # noqa: BLE001
+            return
 
     def _make_scan_cb(self, rid: str, map_frame: str):
         stride = max(1, int(os.environ.get("ROS_SCAN_STRIDE", "3")))

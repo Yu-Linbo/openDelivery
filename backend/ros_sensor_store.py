@@ -10,6 +10,10 @@ from typing import Any, Dict, Optional
 _lock = threading.Lock()
 _scans: Dict[str, Dict[str, Any]] = {}
 _paths: Dict[str, Dict[str, Any]] = {}
+_gazebo_models: Dict[str, Any] = {}
+_topdown_image: Dict[str, Any] = {}
+_gazebo_models: Dict[str, Any] = {}
+_topdown_image: Dict[str, Any] = {}
 
 
 def set_scan(robot_id: str, payload: Dict[str, Any]) -> None:
@@ -38,3 +42,59 @@ def clear_all() -> None:
     with _lock:
         _scans.clear()
         _paths.clear()
+        _gazebo_models.clear()
+        _topdown_image.clear()
+
+
+def set_gazebo_models(payload: Dict[str, Any]) -> None:
+    with _lock:
+        _gazebo_models.clear()
+        _gazebo_models.update({**payload, "_cached_at": time.time()})
+
+
+def get_gazebo_models() -> Optional[Dict[str, Any]]:
+    with _lock:
+        if not _gazebo_models:
+            return None
+        return json.loads(json.dumps(_gazebo_models))
+
+
+def set_topdown_image(payload: Dict[str, Any]) -> None:
+    with _lock:
+        _topdown_image.clear()
+        _topdown_image.update({**payload, "_cached_at": time.time()})
+
+
+def get_topdown_image() -> Optional[Dict[str, Any]]:
+    with _lock:
+        if not _topdown_image:
+            return None
+        return json.loads(json.dumps(_topdown_image))
+        _gazebo_models.clear()
+        _topdown_image.clear()
+
+
+def set_gazebo_models(payload: Dict[str, Any]) -> None:
+    with _lock:
+        _gazebo_models.clear()
+        _gazebo_models.update({**payload, "_cached_at": time.time()})
+
+
+def get_gazebo_models() -> Optional[Dict[str, Any]]:
+    with _lock:
+        if not _gazebo_models:
+            return None
+        return json.loads(json.dumps(_gazebo_models))
+
+
+def set_topdown_image(payload: Dict[str, Any]) -> None:
+    with _lock:
+        _topdown_image.clear()
+        _topdown_image.update({**payload, "_cached_at": time.time()})
+
+
+def get_topdown_image() -> Optional[Dict[str, Any]]:
+    with _lock:
+        if not _topdown_image:
+            return None
+        return json.loads(json.dumps(_topdown_image))

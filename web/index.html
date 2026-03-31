@@ -158,6 +158,7 @@
                   <button id="btn-reloc-pose-only" type="button">仅重定位</button>
                   <button id="btn-reloc-both" type="button">切图并重定位</button>
                 </div>
+                
                 <span id="reloc-message" class="reloc-message-block"></span>
               </div>
             </aside>
@@ -203,6 +204,55 @@
             <button id="btn-clear-log" type="button">清空日志</button>
           </div>
           <ul id="log-list" class="log-list"></ul>
+        </section>
+
+        <section id="view-gazebo" class="view">
+          <header class="view-header">
+            <h1>Gazebo</h1>
+            <p>
+              轻量页面直接显示 <code>/drawn_model/topdown_camera/image_raw</code> 实时画面（不依赖 GzWeb）。
+              点击相机画面只做取点，使用相机内参换算到 world 坐标，确认后再调用
+              <code>/gazebo/set_model_state</code> 移动模型。
+            </p>
+          </header>
+
+          <div class="gazebo-layout">
+            <div class="gazebo-panel gazebo-panel--teleport">
+              <h2 class="gazebo-subtitle">快速移动机器人</h2>
+              <p class="gazebo-hint">
+                Gazebo 页独立使用：填写目标位姿后直接移动。可先用“从位姿接口填入”读取当前位姿再微调。
+              </p>
+              <div class="gazebo-camera-wrap">
+                <canvas id="gazebo-top-camera"></canvas>
+              </div>
+              <p class="gazebo-hint">在相机画面点击目标点只会取点填入坐标，需点按钮后才执行移动。</p>
+              <label class="reloc-field">
+                Gazebo 模型名
+                <input id="gazebo-model-name" type="text" value="robot2" autocomplete="off" />
+              </label>
+              <div class="gazebo-xyz-grid">
+                <label class="reloc-field">
+                  X (m)
+                  <input id="gazebo-x" type="number" step="0.01" placeholder="0" />
+                </label>
+                <label class="reloc-field">
+                  Y (m)
+                  <input id="gazebo-y" type="number" step="0.01" placeholder="0" />
+                </label>
+                <label class="reloc-field">
+                  Yaw (rad)
+                  <input id="gazebo-yaw" type="number" step="0.01" placeholder="0" />
+                </label>
+              </div>
+              <div class="gazebo-actions">
+                <button id="btn-gazebo-fill-pose" type="button" class="btn-secondary">
+                  从位姿接口填入
+                </button>
+                <button id="btn-gazebo-set-model-state" type="button">移动到该坐标</button>
+              </div>
+              <span id="gazebo-message" class="reloc-message-block"></span>
+            </div>
+          </div>
         </section>
 
         <section id="view-ros" class="view">
@@ -290,6 +340,7 @@
         </div>
         <nav>
           <button class="menu-item active" data-view="monitor">监控</button>
+          <button class="menu-item" data-view="gazebo">Gazebo</button>
           <button class="menu-item" data-view="ros">ROS 节点</button>
           <button class="menu-item" data-view="settings">参数设置</button>
           <button class="menu-item" data-view="logs">日志</button>
