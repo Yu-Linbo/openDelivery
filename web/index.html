@@ -226,6 +226,26 @@
                 <canvas id="gazebo-top-camera"></canvas>
               </div>
               <p class="gazebo-hint">在相机画面点击目标点只会取点填入坐标，需点按钮后才执行移动。</p>
+              <div class="gazebo-camera-controls">
+                <div class="gazebo-camera-controls__title">俯视相机位姿</div>
+                <div class="gazebo-xyz-grid">
+                  <label class="reloc-field">
+                    相机 X (m)
+                    <input id="camera-x" type="number" step="0.01" value="0" />
+                  </label>
+                  <label class="reloc-field">
+                    相机 Y (m)
+                    <input id="camera-y" type="number" step="0.01" value="0" />
+                  </label>
+                  <label class="reloc-field">
+                    相机高度 Z (m)
+                    <input id="camera-z" type="number" step="0.01" value="12" />
+                  </label>
+                </div>
+                <button id="btn-gazebo-set-camera" type="button" class="btn-secondary">
+                  应用相机位姿
+                </button>
+              </div>
               <label class="reloc-field">
                 Gazebo 模型名
                 <input id="gazebo-model-name" type="text" value="robot2" autocomplete="off" />

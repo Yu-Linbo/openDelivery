@@ -62,7 +62,7 @@
     </include>
     <model name="topdown_camera">
       <static>true</static>
-      <pose>0 0 12 0 -1.57079632679 0</pose>
+      <pose>0 0 12 0 1.57079632679 0</pose>
       <link name="topdown_camera_link">
         <sensor name="topdown_rgb_sensor" type="camera">
           <always_on>true</always_on>

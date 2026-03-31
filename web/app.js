@@ -2055,6 +2055,10 @@ function initGazeboPage() {
   const gazeboX = document.getElementById("gazebo-x");
   const gazeboY = document.getElementById("gazebo-y");
   const gazeboYaw = document.getElementById("gazebo-yaw");
+  const cameraXEl = document.getElementById("camera-x");
+  const cameraYEl = document.getElementById("camera-y");
+  const cameraZEl = document.getElementById("camera-z");
+  const btnGazeboSetCamera = document.getElementById("btn-gazebo-set-camera");
   const topCameraCanvas = document.getElementById("gazebo-top-camera");
   const topCameraCtx = topCameraCanvas ? topCameraCanvas.getContext("2d") : null;
   const gazeboMessage = document.getElementById("gazebo-message");
@@ -2070,6 +2074,42 @@ function initGazeboPage() {
     width: 0,
     height: 0,
   };
+  const cameraModelName = "topdown_camera";
+
+  function syncCameraModelFromInputs() {
+    const x = Number(cameraXEl && cameraXEl.value);
+    const y = Number(cameraYEl && cameraYEl.value);
+    const z = Number(cameraZEl && cameraZEl.value);
+    if (!Number.isNaN(x)) cameraModel.x = x;
+    if (!Number.isNaN(y)) cameraModel.y = y;
+    if (!Number.isNaN(z) && z > 0.01) cameraModel.z = z;
+  }
+
+  async function fillTopdownCameraPoseFromGazebo() {
+    if (!gazeboMessage) {
+      return;
+    }
+    gazeboMessage.textContent = "读取 topdown_camera 位姿中…";
+    try {
+      const data = await fetchJson(`${API_BASE_URL}/api/gazebo/topdown/state`);
+      const models = Array.isArray(data && data.models) ? data.models : [];
+      const cam = models.find((m) => m && m.name === cameraModelName);
+      if (!cam || !cam.pose) {
+        gazeboMessage.textContent = "未找到 topdown_camera 模型，请确认 world 中模型名";
+        return;
+      }
+      const px = Number(cam.pose.x);
+      const py = Number(cam.pose.y);
+      const pz = Number(cam.pose.z);
+      if (cameraXEl && !Number.isNaN(px)) cameraXEl.value = String(Number(px.toFixed(3)));
+      if (cameraYEl && !Number.isNaN(py)) cameraYEl.value = String(Number(py.toFixed(3)));
+      if (cameraZEl && !Number.isNaN(pz)) cameraZEl.value = String(Number(pz.toFixed(3)));
+      syncCameraModelFromInputs();
+      gazeboMessage.textContent = `已读取 topdown_camera: (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`;
+    } catch (err) {
+      gazeboMessage.textContent = err.message || String(err);
+    }
+  }
 
   function fitTopCameraCanvas(w, h) {
     if (!topCameraCanvas || !topCameraCtx) {
@@ -2220,7 +2260,44 @@ function initGazeboPage() {
     });
   }
 
+  if (cameraXEl) {
+    cameraXEl.addEventListener("input", () => syncCameraModelFromInputs());
+  }
+  if (cameraYEl) {
+    cameraYEl.addEventListener("input", () => syncCameraModelFromInputs());
+  }
+  if (cameraZEl) {
+    cameraZEl.addEventListener("input", () => syncCameraModelFromInputs());
+  }
+  if (btnGazeboSetCamera) {
+    btnGazeboSetCamera.addEventListener("click", async () => {
+      if (!gazeboMessage) {
+        return;
+      }
+      syncCameraModelFromInputs();
+      gazeboMessage.textContent = "设置 topdown_camera 位姿中…";
+      try {
+        await postGazeboSetModelState({
+          model_name: cameraModelName,
+          x: cameraModel.x,
+          y: cameraModel.y,
+          z: cameraModel.z,
+          yaw: 0.0,
+          reference_frame: "world",
+        });
+        gazeboMessage.textContent = `topdown_camera 已更新: (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`;
+        appendLog(
+          `Gazebo set_model_state: ${cameraModelName} -> (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`
+        );
+      } catch (err) {
+        gazeboMessage.textContent = `设置相机位姿失败: ${err.message || err}`;
+      }
+    });
+  }
+
   if (topCameraCanvas) {
+    syncCameraModelFromInputs();
+    fillTopdownCameraPoseFromGazebo().catch(() => {});
     fitTopCameraCanvas();
     window.addEventListener("resize", () => {
       fitTopCameraCanvas();

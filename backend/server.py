@@ -44,10 +44,62 @@ def call_gazebo_set_model_state(
     install_setup = Path(root_dir) / "install" / "setup.bash"
     install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
 
+    # Preflight: in some setups service list can show stale entries, while the service
+    # is actually unreachable from this process (common with cross-container DDS).
+    probe_cmd = (
+        f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
+        f'cd "{root_dir}" && {install_src}; '
+        "python3 - <<'PY'\n"
+        "import rclpy\n"
+        "from gazebo_msgs.srv import SetModelState\n"
+        "rclpy.init()\n"
+        "node = rclpy.create_node('set_model_state_probe_web')\n"
+        "cli = node.create_client(SetModelState, '/gazebo/set_model_state')\n"
+        "ok = cli.wait_for_service(timeout_sec=1.5)\n"
+        "print('OK' if ok else 'NO')\n"
+        "node.destroy_node()\n"
+        "rclpy.shutdown()\n"
+        "PY"
+    )
+    probe = subprocess.run(
+        ["bash", "-lc", probe_cmd],
+        capture_output=True,
+        text=True,
+        timeout=6.0,
+        env=os.environ.copy(),
+    )
+    if probe.returncode != 0 or "OK" not in (probe.stdout or ""):
+        # Fallback: use Gazebo native transport command, which is often more reliable
+        # than ROS service calls in mixed host/container DDS setups.
+        q_model = shlex.quote(str(model_name))
+        gz_cmd = (
+            f'cd "{root_dir}" && '
+            f"gz model -m {q_model} "
+            f"-x {float(x)} -y {float(y)} -z {float(z)} "
+            f"-R 0.0 -P 0.0 -Y {float(yaw)}"
+        )
+        gz_proc = subprocess.run(
+            ["bash", "-lc", gz_cmd],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+            env=os.environ.copy(),
+        )
+        if gz_proc.returncode != 0:
+            msg = (gz_proc.stderr or gz_proc.stdout or "").strip() or "gz model failed"
+            raise RuntimeError(
+                "set_model_state service unreachable and gz fallback failed: " + msg
+            )
+        return {
+            "ok": True,
+            "output": (gz_proc.stdout or "").strip(),
+            "fallback": "gz model",
+        }
+
     q_model = shlex.quote(str(model_name))
     q_ref = shlex.quote(str(reference_frame))
     payload = (
-        "{state: {"
+        "{model_state: {"
         f"model_name: {q_model}, "
         "pose: {"
         f"position: {{x: {float(x)}, y: {float(y)}, z: {float(z)}}}, "
