@@ -13,6 +13,7 @@ import time
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ros_sensor_store import (
@@ -30,6 +31,22 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
 
 
+def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
+    """Roll, pitch, yaw (rad) for ``gz model -R -P -Y`` fallback; same convention as common ROS utilities."""
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return roll, pitch, yaw
+
+
 def call_gazebo_set_model_state(
     root_dir: Path,
     model_name: str,
@@ -38,8 +55,38 @@ def call_gazebo_set_model_state(
     z: float,
     yaw: float,
     reference_frame: str,
+    orientation: Optional[Tuple[float, float, float, float]] = None,
 ):
-    """Call /gazebo/set_model_state via ros2 CLI with sourced workspace."""
+    """Call /gazebo/set_model_state via ros2 CLI with sourced workspace.
+
+    Positions are in ``reference_frame`` (typically Gazebo ``world``).
+    If ``orientation`` is ``(qx, qy, qz, qw)``, it is applied; otherwise yaw-only about Z (legacy).
+    """
+    fast_disabled = os.environ.get("GAZEBO_SET_STATE_DISABLE_FAST", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not fast_disabled:
+        try:
+            from gazebo_set_state_client import try_set_model_state_fast
+
+            fast = try_set_model_state_fast(
+                model_name,
+                x,
+                y,
+                z,
+                yaw,
+                reference_frame,
+                orientation=orientation,
+            )
+            if fast is not None:
+                return fast
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+
     ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
     install_setup = Path(root_dir) / "install" / "setup.bash"
     install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
@@ -72,11 +119,17 @@ def call_gazebo_set_model_state(
         # Fallback: use Gazebo native transport command, which is often more reliable
         # than ROS service calls in mixed host/container DDS setups.
         q_model = shlex.quote(str(model_name))
+        if orientation is not None:
+            ox, oy, oz, ow = orientation
+            r, p, y_ang = _rpy_from_quaternion(ox, oy, oz, ow)
+            rpy = f"-R {float(r)} -P {float(p)} -Y {float(y_ang)}"
+        else:
+            rpy = f"-R 0.0 -P 0.0 -Y {float(yaw)}"
         gz_cmd = (
             f'cd "{root_dir}" && '
             f"gz model -m {q_model} "
             f"-x {float(x)} -y {float(y)} -z {float(z)} "
-            f"-R 0.0 -P 0.0 -Y {float(yaw)}"
+            f"{rpy}"
         )
         gz_proc = subprocess.run(
             ["bash", "-lc", gz_cmd],
@@ -98,12 +151,20 @@ def call_gazebo_set_model_state(
 
     q_model = shlex.quote(str(model_name))
     q_ref = shlex.quote(str(reference_frame))
+    if orientation is not None:
+        ox, oy, oz, ow = orientation
+        ori = f"orientation: {{x: {float(ox)}, y: {float(oy)}, z: {float(oz)}, w: {float(ow)}}}"
+    else:
+        ori = (
+            f"orientation: {{x: 0.0, y: 0.0, "
+            f"z: {math.sin(float(yaw) / 2.0)}, w: {math.cos(float(yaw) / 2.0)}}}"
+        )
     payload = (
         "{model_state: {"
         f"model_name: {q_model}, "
         "pose: {"
         f"position: {{x: {float(x)}, y: {float(y)}, z: {float(z)}}}, "
-        f"orientation: {{x: 0.0, y: 0.0, z: {math.sin(float(yaw) / 2.0)}, w: {math.cos(float(yaw) / 2.0)}}}"
+        f"{ori}"
         "}, "
         "twist: {"
         "linear: {x: 0.0, y: 0.0, z: 0.0}, "
@@ -1101,9 +1162,32 @@ class ApiHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._send_json({"error": "x, y, yaw, z must be numeric"}, 400)
                 return
+            orientation = None
+            ori = data.get("orientation")
+            if isinstance(ori, dict):
+                try:
+                    orientation = (
+                        float(ori["x"]),
+                        float(ori["y"]),
+                        float(ori["z"]),
+                        float(ori["w"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    self._send_json(
+                        {"error": "orientation, if set, must be object with numeric x,y,z,w"},
+                        400,
+                    )
+                    return
             try:
                 out = call_gazebo_set_model_state(
-                    ROOT_DIR, model_name, x, y, z, yaw, reference_frame
+                    ROOT_DIR,
+                    model_name,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    reference_frame,
+                    orientation=orientation,
                 )
             except subprocess.TimeoutExpired:
                 self._send_json({"error": "set_model_state timeout"}, 504)
@@ -1114,18 +1198,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as err:  # noqa: BLE001
                 self._send_json({"error": str(err)}, 500)
                 return
-            self._send_json(
-                {
-                    "ok": True,
-                    "model_name": model_name,
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "yaw": yaw,
-                    "reference_frame": reference_frame,
-                    "raw": out.get("output", ""),
+            body_out = {
+                "ok": True,
+                "model_name": model_name,
+                "x": x,
+                "y": y,
+                "z": z,
+                "yaw": yaw,
+                "reference_frame": reference_frame,
+                "raw": out.get("output", ""),
+            }
+            if orientation is not None:
+                body_out["orientation"] = {
+                    "x": orientation[0],
+                    "y": orientation[1],
+                    "z": orientation[2],
+                    "w": orientation[3],
                 }
-            )
+            self._send_json(body_out)
             return
 
         if path != "/api/robot/command":

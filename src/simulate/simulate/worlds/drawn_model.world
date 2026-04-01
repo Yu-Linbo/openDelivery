@@ -21,6 +21,7 @@
       </attenuation>
       <direction>-0.5 0.1 -0.9</direction>
     </light>
+
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
@@ -55,18 +56,404 @@
         </visual>
       </link>
     </model>
+
+    <model name="test_area_outline">
+      <static>true</static>
+      <link name="outline_link">
+        <visual name="zone_1_fill">
+          <pose>-10 10 0.003 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>19.7 19.7 0.006</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.25 0.25 0.35</ambient>
+            <diffuse>0.85 0.25 0.25 0.35</diffuse>
+          </material>
+        </visual>
+        <visual name="zone_2_fill">
+          <pose>10 10 0.003 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>19.7 19.7 0.006</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.55 0.95 0.35</ambient>
+            <diffuse>0.2 0.55 0.95 0.35</diffuse>
+          </material>
+        </visual>
+        <visual name="zone_3_fill">
+          <pose>-10 -10 0.003 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>19.7 19.7 0.006</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.75 0.45 0.35</ambient>
+            <diffuse>0.2 0.75 0.45 0.35</diffuse>
+          </material>
+        </visual>
+        <visual name="zone_4_fill">
+          <pose>10 -10 0.003 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>19.7 19.7 0.006</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.95 0.75 0.18 0.35</ambient>
+            <diffuse>0.95 0.75 0.18 0.35</diffuse>
+          </material>
+        </visual>
+
+        <visual name="zone_1_top_border">
+          <pose>-10 19.95 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.7 0.08 0.08 1</ambient><diffuse>0.7 0.08 0.08 1</diffuse></material>
+        </visual>
+        <visual name="zone_1_bottom_border">
+          <pose>-10 0.05 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.7 0.08 0.08 1</ambient><diffuse>0.7 0.08 0.08 1</diffuse></material>
+        </visual>
+        <visual name="zone_1_left_border">
+          <pose>-19.95 10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.7 0.08 0.08 1</ambient><diffuse>0.7 0.08 0.08 1</diffuse></material>
+        </visual>
+        <visual name="zone_1_right_border">
+          <pose>-0.05 10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.7 0.08 0.08 1</ambient><diffuse>0.7 0.08 0.08 1</diffuse></material>
+        </visual>
+
+        <visual name="zone_2_top_border">
+          <pose>10 19.95 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.05 0.3 0.8 1</ambient><diffuse>0.05 0.3 0.8 1</diffuse></material>
+        </visual>
+        <visual name="zone_2_bottom_border">
+          <pose>10 0.05 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.05 0.3 0.8 1</ambient><diffuse>0.05 0.3 0.8 1</diffuse></material>
+        </visual>
+        <visual name="zone_2_left_border">
+          <pose>0.05 10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.05 0.3 0.8 1</ambient><diffuse>0.05 0.3 0.8 1</diffuse></material>
+        </visual>
+        <visual name="zone_2_right_border">
+          <pose>19.95 10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.05 0.3 0.8 1</ambient><diffuse>0.05 0.3 0.8 1</diffuse></material>
+        </visual>
+
+        <visual name="zone_3_top_border">
+          <pose>-10 -0.05 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.05 0.55 0.22 1</ambient><diffuse>0.05 0.55 0.22 1</diffuse></material>
+        </visual>
+        <visual name="zone_3_bottom_border">
+          <pose>-10 -19.95 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.05 0.55 0.22 1</ambient><diffuse>0.05 0.55 0.22 1</diffuse></material>
+        </visual>
+        <visual name="zone_3_left_border">
+          <pose>-19.95 -10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.05 0.55 0.22 1</ambient><diffuse>0.05 0.55 0.22 1</diffuse></material>
+        </visual>
+        <visual name="zone_3_right_border">
+          <pose>-0.05 -10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.05 0.55 0.22 1</ambient><diffuse>0.05 0.55 0.22 1</diffuse></material>
+        </visual>
+
+        <visual name="zone_4_top_border">
+          <pose>10 -0.05 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.82 0.58 0.02 1</ambient><diffuse>0.82 0.58 0.02 1</diffuse></material>
+        </visual>
+        <visual name="zone_4_bottom_border">
+          <pose>10 -19.95 0.012 0 0 0</pose>
+          <geometry><box><size>19.8 0.1 0.02</size></box></geometry>
+          <material><ambient>0.82 0.58 0.02 1</ambient><diffuse>0.82 0.58 0.02 1</diffuse></material>
+        </visual>
+        <visual name="zone_4_left_border">
+          <pose>0.05 -10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.82 0.58 0.02 1</ambient><diffuse>0.82 0.58 0.02 1</diffuse></material>
+        </visual>
+        <visual name="zone_4_right_border">
+          <pose>19.95 -10 0.012 0 0 0</pose>
+          <geometry><box><size>0.1 19.8 0.02</size></box></geometry>
+          <material><ambient>0.82 0.58 0.02 1</ambient><diffuse>0.82 0.58 0.02 1</diffuse></material>
+        </visual>
+
+        <visual name="north_edge">
+          <pose>0 20 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>40 0.15 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.08 0.08 0.08 1</ambient>
+            <diffuse>0.08 0.08 0.08 1</diffuse>
+          </material>
+        </visual>
+        <visual name="south_edge">
+          <pose>0 -20 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>40 0.15 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.08 0.08 0.08 1</ambient>
+            <diffuse>0.08 0.08 0.08 1</diffuse>
+          </material>
+        </visual>
+        <visual name="east_edge">
+          <pose>20 0 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.15 40 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.08 0.08 0.08 1</ambient>
+            <diffuse>0.08 0.08 0.08 1</diffuse>
+          </material>
+        </visual>
+        <visual name="west_edge">
+          <pose>-20 0 0.01 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.15 40 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.08 0.08 0.08 1</ambient>
+            <diffuse>0.08 0.08 0.08 1</diffuse>
+          </material>
+        </visual>
+        <visual name="center_x_axis">
+          <pose>0 0 0.008 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>40 0.04 0.016</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.2 0.2 1</ambient>
+            <diffuse>0.85 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+        <visual name="center_y_axis">
+          <pose>0 0 0.008 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.04 40 0.016</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.85 0.2 0.2 1</ambient>
+            <diffuse>0.85 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
     <include>
       <uri>model://drawn_model</uri>
-      <name>drawn_model</name>
-      <pose>0 0 0 0 0 0</pose>
+      <name>drawn_model_1</name>
+      <pose>-10 10 0 0 0 0</pose>
     </include>
+    <include>
+      <uri>model://drawn_model</uri>
+      <name>drawn_model_2</name>
+      <pose>10 10 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://drawn_model</uri>
+      <name>drawn_model_3</name>
+      <pose>-10 -10 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://drawn_model</uri>
+      <name>drawn_model_4</name>
+      <pose>10 -10 0 0 0 0</pose>
+    </include>
+
+    <model name="label_1">
+      <static>true</static>
+      <pose>-16 16 0 0 0 0</pose>
+      <link name="label_link">
+        <visual name="plate">
+          <pose>0 0 0.005 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.6 1.6 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+        <visual name="digit">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.25 1.1 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="label_2">
+      <static>true</static>
+      <pose>4 16 0 0 0 0</pose>
+      <link name="label_link">
+        <visual name="plate">
+          <pose>0 0 0.005 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.6 1.6 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+        <visual name="top">
+          <pose>0 0.5 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="mid">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="bottom">
+          <pose>0 -0.5 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="upper_right">
+          <pose>0.35 0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="lower_left">
+          <pose>-0.35 -0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="label_3">
+      <static>true</static>
+      <pose>-16 -4 0 0 0 0</pose>
+      <link name="label_link">
+        <visual name="plate">
+          <pose>0 0 0.005 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.6 1.6 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+        <visual name="top">
+          <pose>0 0.5 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="mid">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="bottom">
+          <pose>0 -0.5 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="upper_right">
+          <pose>0.35 0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="lower_right">
+          <pose>0.35 -0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="label_4">
+      <static>true</static>
+      <pose>4 -4 0 0 0 0</pose>
+      <link name="label_link">
+        <visual name="plate">
+          <pose>0 0 0.005 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>1.6 1.6 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.05 0.05 0.05 1</ambient>
+            <diffuse>0.05 0.05 0.05 1</diffuse>
+          </material>
+        </visual>
+        <visual name="mid">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><box><size>0.9 0.18 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="upper_left">
+          <pose>-0.35 0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="upper_right">
+          <pose>0.35 0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+        <visual name="lower_right">
+          <pose>0.35 -0.22 0.02 0 0 0</pose>
+          <geometry><box><size>0.18 0.56 0.02</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
     <model name="topdown_camera">
       <static>true</static>
-      <pose>0 0 12 0 1.57079632679 0</pose>
+      <pose>0 0 32 0 1.57079632679 1.57079632679</pose>
       <link name="topdown_camera_link">
         <sensor name="topdown_rgb_sensor" type="camera">
           <always_on>true</always_on>
-          <update_rate>15</update_rate>
+          <update_rate>30</update_rate>
           <visualize>false</visualize>
           <camera>
             <horizontal_fov>1.3962634</horizontal_fov>

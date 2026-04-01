@@ -217,35 +217,61 @@
           </header>
 
           <div class="gazebo-layout">
-            <div class="gazebo-panel gazebo-panel--teleport">
+            <div class="gazebo-panel gazebo-panel--camera">
+              <h2 class="gazebo-subtitle">俯视相机</h2>
+              <p class="gazebo-hint">
+                左侧画面用于观察与取点。单击画面会把目标位置换算到 world 坐标并填入右侧表单。
+              </p>
+              <div class="gazebo-camera-stage">
+                <div class="gazebo-camera-wrap">
+                  <canvas id="gazebo-top-camera"></canvas>
+                </div>
+                <div class="gazebo-camera-pad">
+                  <div class="gazebo-camera-controls__title">俯视相机控制</div>
+                  <p class="gazebo-hint">
+                    用右侧遥控手柄控制相机平移与缩放；区域按钮会自动居中并放大到对应区域。
+                  </p>
+                  <label class="reloc-field">
+                    移动速度 (m/s)
+                    <input id="camera-drive-speed" type="number" step="0.1" min="0.1" value="4.0" />
+                  </label>
+                  <div class="gazebo-pad-grid" aria-label="俯视相机方向控制">
+                    <div></div>
+                    <button id="btn-gazebo-cam-up" type="button" class="btn-secondary">上</button>
+                    <div></div>
+                    <button id="btn-gazebo-cam-left" type="button" class="btn-secondary">左</button>
+                    <button id="btn-gazebo-cam-home" type="button" class="btn-secondary">全图</button>
+                    <button id="btn-gazebo-cam-right" type="button" class="btn-secondary">右</button>
+                    <div></div>
+                    <button id="btn-gazebo-cam-down" type="button" class="btn-secondary">下</button>
+                    <div></div>
+                  </div>
+                  <div class="gazebo-pad-zoom">
+                    <button id="btn-gazebo-cam-zoom-in" type="button" class="btn-secondary">放大</button>
+                    <button id="btn-gazebo-cam-zoom-out" type="button" class="btn-secondary">缩小</button>
+                    <button id="btn-gazebo-reset-camera" type="button" class="btn-secondary">复原</button>
+                  </div>
+                  <div class="gazebo-zone-grid">
+                    <button id="btn-gazebo-zone-1" type="button" class="btn-secondary">区域 1</button>
+                    <button id="btn-gazebo-zone-2" type="button" class="btn-secondary">区域 2</button>
+                    <button id="btn-gazebo-zone-3" type="button" class="btn-secondary">区域 3</button>
+                    <button id="btn-gazebo-zone-4" type="button" class="btn-secondary">区域 4</button>
+                  </div>
+                </div>
+              </div>
+              <div class="gazebo-camera-controls">
+                <div class="gazebo-camera-controls__title">俯视相机说明</div>
+                <p class="gazebo-hint">
+                  已移除图片上的拖拽和滚轮操控。当前通过按钮控制俯视相机，点击画面只做
+                  world 坐标取点，不直接移动模型。
+                </p>
+              </div>
+            </div>
+            <div class="gazebo-panel gazebo-panel--move">
               <h2 class="gazebo-subtitle">快速移动机器人</h2>
               <p class="gazebo-hint">
-                Gazebo 页独立使用：填写目标位姿后直接移动。可先用“从位姿接口填入”读取当前位姿再微调。
+                点击左侧画面可快速填入目标 X/Y；Yaw 可手填微调，然后直接移动模型。
               </p>
-              <div class="gazebo-camera-wrap">
-                <canvas id="gazebo-top-camera"></canvas>
-              </div>
-              <p class="gazebo-hint">在相机画面点击目标点只会取点填入坐标，需点按钮后才执行移动。</p>
-              <div class="gazebo-camera-controls">
-                <div class="gazebo-camera-controls__title">俯视相机位姿</div>
-                <div class="gazebo-xyz-grid">
-                  <label class="reloc-field">
-                    相机 X (m)
-                    <input id="camera-x" type="number" step="0.01" value="0" />
-                  </label>
-                  <label class="reloc-field">
-                    相机 Y (m)
-                    <input id="camera-y" type="number" step="0.01" value="0" />
-                  </label>
-                  <label class="reloc-field">
-                    相机高度 Z (m)
-                    <input id="camera-z" type="number" step="0.01" value="12" />
-                  </label>
-                </div>
-                <button id="btn-gazebo-set-camera" type="button" class="btn-secondary">
-                  应用相机位姿
-                </button>
-              </div>
               <label class="reloc-field">
                 Gazebo 模型名
                 <input id="gazebo-model-name" type="text" value="robot2" autocomplete="off" />
@@ -260,14 +286,11 @@
                   <input id="gazebo-y" type="number" step="0.01" placeholder="0" />
                 </label>
                 <label class="reloc-field">
-                  Yaw (rad)
-                  <input id="gazebo-yaw" type="number" step="0.01" placeholder="0" />
+                  Yaw (deg)
+                  <input id="gazebo-yaw" type="number" step="1" min="0" max="360" placeholder="0-360" />
                 </label>
               </div>
               <div class="gazebo-actions">
-                <button id="btn-gazebo-fill-pose" type="button" class="btn-secondary">
-                  从位姿接口填入
-                </button>
                 <button id="btn-gazebo-set-model-state" type="button">移动到该坐标</button>
               </div>
               <span id="gazebo-message" class="reloc-message-block"></span>

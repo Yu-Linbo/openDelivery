@@ -95,6 +95,7 @@ const LOGS_KEY = "robotLogs";
 const MONITOR_CHECKBOXES_KEY = "openDelivery_monitor_checkboxes_v1";
 const FLOOR_PREF_KEY = "openDelivery_active_floor_v1";
 const MAP_NAME_PREF_KEY = "openDelivery_map_name_v1";
+const ACTIVE_VIEW_KEY = "openDelivery_active_view_v1";
 const MAPPING_SUFFIX = "_mapping";
 const ROBOT_ICON_PATH = "./icons/robot.svg";
 
@@ -155,18 +156,53 @@ let relocPickAnchorWorld = null;
 let relocPickHoverSx = null;
 let relocPickHoverSy = null;
 
+function activateView(target, persist = true) {
+  const next = views[target] ? target : "monitor";
+  menuButtons.forEach((b) => b.classList.toggle("active", b.dataset.view === next));
+  Object.entries(views).forEach(([key, pane]) => {
+    if (pane) {
+      pane.classList.toggle("active", key === next);
+    }
+  });
+  if (persist) {
+    try {
+      localStorage.setItem(ACTIVE_VIEW_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (window.location.hash !== `#${next}`) {
+    history.replaceState(null, "", `#${next}`);
+  }
+}
+
+function getInitialView() {
+  const hashView = window.location.hash.replace(/^#/, "").trim();
+  if (views[hashView]) {
+    return hashView;
+  }
+  try {
+    const savedView = localStorage.getItem(ACTIVE_VIEW_KEY);
+    if (savedView && views[savedView]) {
+      return savedView;
+    }
+  } catch {
+    /* ignore */
+  }
+  return "monitor";
+}
+
 menuButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
-    const target = btn.dataset.view;
-    menuButtons.forEach((b) => b.classList.remove("active"));
-    Object.values(views).forEach((v) => {
-      if (v) v.classList.remove("active");
-    });
-    btn.classList.add("active");
-    const pane = views[target];
-    if (pane) pane.classList.add("active");
+    activateView(btn.dataset.view);
   });
 });
+
+window.addEventListener("hashchange", () => {
+  activateView(window.location.hash.replace(/^#/, "").trim(), false);
+});
+
+activateView(getInitialView(), false);
 
 function isMappingFloor(f) {
   return typeof f === "string" && f.endsWith(MAPPING_SUFFIX);
@@ -2055,35 +2091,256 @@ function initGazeboPage() {
   const gazeboX = document.getElementById("gazebo-x");
   const gazeboY = document.getElementById("gazebo-y");
   const gazeboYaw = document.getElementById("gazebo-yaw");
-  const cameraXEl = document.getElementById("camera-x");
-  const cameraYEl = document.getElementById("camera-y");
-  const cameraZEl = document.getElementById("camera-z");
-  const btnGazeboSetCamera = document.getElementById("btn-gazebo-set-camera");
+  const btnGazeboResetCamera = document.getElementById("btn-gazebo-reset-camera");
+  const btnGazeboCamHome = document.getElementById("btn-gazebo-cam-home");
+  const btnGazeboCamUp = document.getElementById("btn-gazebo-cam-up");
+  const btnGazeboCamDown = document.getElementById("btn-gazebo-cam-down");
+  const btnGazeboCamLeft = document.getElementById("btn-gazebo-cam-left");
+  const btnGazeboCamRight = document.getElementById("btn-gazebo-cam-right");
+  const btnGazeboCamZoomIn = document.getElementById("btn-gazebo-cam-zoom-in");
+  const btnGazeboCamZoomOut = document.getElementById("btn-gazebo-cam-zoom-out");
+  const btnGazeboZone1 = document.getElementById("btn-gazebo-zone-1");
+  const btnGazeboZone2 = document.getElementById("btn-gazebo-zone-2");
+  const btnGazeboZone3 = document.getElementById("btn-gazebo-zone-3");
+  const btnGazeboZone4 = document.getElementById("btn-gazebo-zone-4");
   const topCameraCanvas = document.getElementById("gazebo-top-camera");
   const topCameraCtx = topCameraCanvas ? topCameraCanvas.getContext("2d") : null;
   const gazeboMessage = document.getElementById("gazebo-message");
   const btnGazeboTeleport = document.getElementById("btn-gazebo-set-model-state");
-  const btnGazeboFill = document.getElementById("btn-gazebo-fill-pose");
-  const cameraModel = {
+  // World-frame position; orientation matches drawn_model.world topdown_camera
+  // (look down, then rotate counterclockwise 90 deg in the ground plane).
+  const cameraDefaultPose = {
     x: 0.0,
     y: 0.0,
-    z: 12.0,
+    z: 32.0,
     hfov: 1.3962634,
+    qx: -0.5,
+    qy: 0.5,
+    qz: 0.5,
+    qw: 0.5,
   };
+  const cameraModel = { ...cameraDefaultPose };
   const cameraFrame = {
     width: 0,
     height: 0,
   };
   const cameraModelName = "topdown_camera";
+  const cameraDriveSpeedEl = document.getElementById("camera-drive-speed");
+  const camDriveKey = { up: false, down: false, left: false, right: false };
+  let lastCameraDriveSendMs = 0;
+  let cameraDriveTimer = null;
+  let topCameraRefreshTimer = null;
+  let topCameraRefreshInFlight = false;
+  let camZoomDir = 0;
 
-  function syncCameraModelFromInputs() {
-    const x = Number(cameraXEl && cameraXEl.value);
-    const y = Number(cameraYEl && cameraYEl.value);
-    const z = Number(cameraZEl && cameraZEl.value);
-    if (!Number.isNaN(x)) cameraModel.x = x;
-    if (!Number.isNaN(y)) cameraModel.y = y;
-    if (!Number.isNaN(z) && z > 0.01) cameraModel.z = z;
+  const CAMERA_Z_MIN = 6.0;
+  const CAMERA_Z_MAX = 80.0;
+  const CAMERA_FRAME_SIZE = 20.0;
+  const CAMERA_REFRESH_MS = 40;
+  const CAMERA_ZONE_CENTERS = {
+    1: { x: -10.0, y: 10.0 },
+    2: { x: 10.0, y: 10.0 },
+    3: { x: -10.0, y: -10.0 },
+    4: { x: 10.0, y: -10.0 },
+  };
+
+  function gazeboViewActive() {
+    return !!(views.gazebo && views.gazebo.classList.contains("active"));
   }
+
+  function cameraOrientationPayload() {
+    return {
+      x: cameraModel.qx,
+      y: cameraModel.qy,
+      z: cameraModel.qz,
+      w: cameraModel.qw,
+    };
+  }
+
+  function buildTopdownCameraSetStateBody() {
+    return {
+      model_name: cameraModelName,
+      x: cameraModel.x,
+      y: cameraModel.y,
+      z: cameraModel.z,
+      yaw: 0,
+      reference_frame: "world",
+      orientation: cameraOrientationPayload(),
+    };
+  }
+
+  function fitCameraZForArea(areaWidth, areaHeight, padding = 1.1) {
+    const w = Number(cameraFrame.width || 640);
+    const h = Number(cameraFrame.height || 480);
+    const hfov = Number(cameraModel.hfov || 0);
+    if (!hfov || !w || !h) {
+      return cameraDefaultPose.z;
+    }
+    const vfov = 2 * Math.atan(Math.tan(hfov / 2) * (h / w));
+    const zx = areaWidth / (2 * Math.tan(hfov / 2));
+    const zy = areaHeight / (2 * Math.tan(vfov / 2));
+    return Math.min(CAMERA_Z_MAX, Math.max(CAMERA_Z_MIN, Math.max(zx, zy) * padding));
+  }
+
+  function setTopCameraPose(pose, message, useQuiet = false) {
+    cameraModel.x = Number.isFinite(pose.x) ? pose.x : cameraModel.x;
+    cameraModel.y = Number.isFinite(pose.y) ? pose.y : cameraModel.y;
+    cameraModel.z = Math.min(
+      CAMERA_Z_MAX,
+      Math.max(CAMERA_Z_MIN, Number.isFinite(pose.z) ? pose.z : cameraModel.z)
+    );
+    cameraModel.qx = Number.isFinite(pose.qx) ? pose.qx : cameraModel.qx;
+    cameraModel.qy = Number.isFinite(pose.qy) ? pose.qy : cameraModel.qy;
+    cameraModel.qz = Number.isFinite(pose.qz) ? pose.qz : cameraModel.qz;
+    cameraModel.qw = Number.isFinite(pose.qw) ? pose.qw : cameraModel.qw;
+    if (useQuiet) {
+      postTopdownCameraPoseQuiet();
+      if (gazeboMessage && message) {
+        gazeboMessage.textContent = message;
+      }
+      return Promise.resolve();
+    }
+    return postGazeboSetModelState(buildTopdownCameraSetStateBody()).then(() => {
+      if (gazeboMessage && message) {
+        gazeboMessage.textContent = message;
+      }
+    });
+  }
+
+  function zoomTopCameraToZone(zoneId, useQuiet = false) {
+    const zone = CAMERA_ZONE_CENTERS[String(zoneId)];
+    if (!zone) {
+      return Promise.resolve();
+    }
+    return setTopCameraPose(
+      {
+        x: zone.x,
+        y: zone.y,
+        z: fitCameraZForArea(CAMERA_FRAME_SIZE, CAMERA_FRAME_SIZE),
+      },
+      `已聚焦区域 ${zoneId}`,
+      useQuiet
+    );
+  }
+
+  function cameraDriveSpeedMps() {
+    const v = cameraDriveSpeedEl && Number(cameraDriveSpeedEl.value);
+    return Number.isFinite(v) && v > 0 ? v : 4;
+  }
+
+  function postTopdownCameraPoseQuiet() {
+    const now = performance.now();
+    if (now - lastCameraDriveSendMs < 26) {
+      return;
+    }
+    lastCameraDriveSendMs = now;
+    fetch(`${API_BASE_URL}/api/gazebo/set_model_state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildTopdownCameraSetStateBody()),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function setCamDriveKey(code, down) {
+    if (code === "KeyW" || code === "ArrowUp") {
+      camDriveKey.up = down;
+    } else if (code === "KeyS" || code === "ArrowDown") {
+      camDriveKey.down = down;
+    } else if (code === "KeyA" || code === "ArrowLeft") {
+      camDriveKey.left = down;
+    } else if (code === "KeyD" || code === "ArrowRight") {
+      camDriveKey.right = down;
+    }
+  }
+
+  function clearCamDriveKeys() {
+    camDriveKey.up = false;
+    camDriveKey.down = false;
+    camDriveKey.left = false;
+    camDriveKey.right = false;
+    camZoomDir = 0;
+  }
+
+  function tickTopdownCameraDrive() {
+    if (!gazeboViewActive()) {
+      return;
+    }
+    let ix = 0;
+    let iy = 0;
+    if (camDriveKey.up) {
+      ix += 1;
+    }
+    if (camDriveKey.down) {
+      ix -= 1;
+    }
+    if (camDriveKey.left) {
+      iy += 1;
+    }
+    if (camDriveKey.right) {
+      iy -= 1;
+    }
+    if (ix === 0 && iy === 0) {
+      if (camZoomDir === 0) {
+        return;
+      }
+    }
+    const sp = cameraDriveSpeedMps();
+    const dt = 1 / 30;
+    cameraModel.x += ix * sp * dt;
+    cameraModel.y += iy * sp * dt;
+    if (camZoomDir !== 0) {
+      const zoomSpeed = Math.max(6.0, cameraModel.z * 1.15);
+      cameraModel.z = Math.min(
+        CAMERA_Z_MAX,
+        Math.max(CAMERA_Z_MIN, cameraModel.z + camZoomDir * zoomSpeed * dt)
+      );
+    }
+    postTopdownCameraPoseQuiet();
+  }
+
+  window.addEventListener("keydown", (ev) => {
+    if (!gazeboViewActive()) {
+      return;
+    }
+    const t = ev.target;
+    if (
+      t &&
+      (t.tagName === "INPUT" ||
+        t.tagName === "TEXTAREA" ||
+        t.tagName === "SELECT" ||
+        t.isContentEditable)
+    ) {
+      return;
+    }
+    if (
+      !["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
+        ev.code
+      )
+    ) {
+      return;
+    }
+    ev.preventDefault();
+    setCamDriveKey(ev.code, true);
+  });
+  window.addEventListener("keyup", (ev) => {
+    if (
+      !["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(
+        ev.code
+      )
+    ) {
+      return;
+    }
+    setCamDriveKey(ev.code, false);
+  });
+  window.addEventListener("blur", () => {
+    clearCamDriveKeys();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearCamDriveKeys();
+    }
+  });
 
   async function fillTopdownCameraPoseFromGazebo() {
     if (!gazeboMessage) {
@@ -2101,10 +2358,22 @@ function initGazeboPage() {
       const px = Number(cam.pose.x);
       const py = Number(cam.pose.y);
       const pz = Number(cam.pose.z);
-      if (cameraXEl && !Number.isNaN(px)) cameraXEl.value = String(Number(px.toFixed(3)));
-      if (cameraYEl && !Number.isNaN(py)) cameraYEl.value = String(Number(py.toFixed(3)));
-      if (cameraZEl && !Number.isNaN(pz)) cameraZEl.value = String(Number(pz.toFixed(3)));
-      syncCameraModelFromInputs();
+      const pq = cam.pose;
+      if (
+        pq.qx != null &&
+        pq.qy != null &&
+        pq.qz != null &&
+        pq.qw != null &&
+        [pq.qx, pq.qy, pq.qz, pq.qw].every((v) => Number.isFinite(Number(v)))
+      ) {
+        cameraModel.qx = Number(pq.qx);
+        cameraModel.qy = Number(pq.qy);
+        cameraModel.qz = Number(pq.qz);
+        cameraModel.qw = Number(pq.qw);
+      }
+      if (!Number.isNaN(px)) cameraModel.x = px;
+      if (!Number.isNaN(py)) cameraModel.y = py;
+      if (!Number.isNaN(pz)) cameraModel.z = pz;
       gazeboMessage.textContent = `已读取 topdown_camera: (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`;
     } catch (err) {
       gazeboMessage.textContent = err.message || String(err);
@@ -2131,6 +2400,36 @@ function initGazeboPage() {
     }
   }
 
+  function rotateVectorByQuaternion(vec, quat) {
+    const x = Number(quat.x || 0);
+    const y = Number(quat.y || 0);
+    const z = Number(quat.z || 0);
+    const w = Number(quat.w || 1);
+    const xx = x * x;
+    const yy = y * y;
+    const zz = z * z;
+    const xy = x * y;
+    const xz = x * z;
+    const yz = y * z;
+    const wx = w * x;
+    const wy = w * y;
+    const wz = w * z;
+    return {
+      x:
+        (1 - 2 * (yy + zz)) * vec.x +
+        2 * (xy - wz) * vec.y +
+        2 * (xz + wy) * vec.z,
+      y:
+        2 * (xy + wz) * vec.x +
+        (1 - 2 * (xx + zz)) * vec.y +
+        2 * (yz - wx) * vec.z,
+      z:
+        2 * (xz - wy) * vec.x +
+        2 * (yz + wx) * vec.y +
+        (1 - 2 * (xx + yy)) * vec.z,
+    };
+  }
+
   function cameraPixelToWorld(px, py) {
     const width = cameraFrame.width;
     const height = cameraFrame.height;
@@ -2138,8 +2437,8 @@ function initGazeboPage() {
       return null;
     }
     const hfov = Number(cameraModel.hfov || 0);
-    const z = Number(cameraModel.z || 0);
-    if (!hfov || !z) {
+    const camZ = Number(cameraModel.z || 0);
+    if (!hfov || !camZ) {
       return null;
     }
     const fx = width / (2 * Math.tan(hfov / 2));
@@ -2147,18 +2446,82 @@ function initGazeboPage() {
     const fy = height / (2 * Math.tan(vfov / 2));
     const cx = width / 2;
     const cy = height / 2;
-    const dx = ((px - cx) / fx) * z;
-    const dy = ((py - cy) / fy) * z;
-    return {
-      x: cameraModel.x + dx,
-      y: cameraModel.y - dy,
+    // Gazebo camera optical axis is +X in camera frame.
+    // For the rendered image, screen-right maps to -Y and screen-down maps to -Z.
+    const rayCamera = {
+      x: 1,
+      y: -(px - cx) / fx,
+      z: -(py - cy) / fy,
     };
+    const rayWorld = rotateVectorByQuaternion(rayCamera, cameraOrientationPayload());
+    if (!Number.isFinite(rayWorld.z) || Math.abs(rayWorld.z) < 1e-6) {
+      return null;
+    }
+    const t = -camZ / rayWorld.z;
+    if (!Number.isFinite(t) || t <= 0) {
+      return null;
+    }
+    return {
+      x: cameraModel.x + rayWorld.x * t,
+      y: cameraModel.y + rayWorld.y * t,
+    };
+  }
+
+  function fillGazeboTargetFromWorld(world) {
+    if (!gazeboX || !gazeboY || !gazeboMessage || !world) {
+      return;
+    }
+    gazeboX.value = String(Number(world.x.toFixed(3)));
+    gazeboY.value = String(Number(world.y.toFixed(3)));
+    gazeboMessage.textContent =
+      `已从画面取点: (${world.x.toFixed(2)}, ${world.y.toFixed(2)})，可调整 yaw 后移动模型`;
+  }
+
+  function normalizeDegrees360(value) {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    const wrapped = ((value % 360) + 360) % 360;
+    return wrapped === 0 && value > 0 ? 360 : wrapped;
+  }
+
+  function correctTopCameraPickWorld(world) {
+    if (!world) {
+      return null;
+    }
+    return world;
+  }
+
+  function handleTopCameraPick(ev) {
+    if (!topCameraCanvas || !cameraFrame.width || !cameraFrame.height) {
+      return;
+    }
+    const rect = topCameraCanvas.getBoundingClientRect();
+    const sx = ev.clientX - rect.left;
+    const sy = ev.clientY - rect.top;
+    if (sx < 0 || sy < 0 || sx > rect.width || sy > rect.height) {
+      return;
+    }
+    const px = (sx / rect.width) * cameraFrame.width;
+    const py = (sy / rect.height) * cameraFrame.height;
+    const world = correctTopCameraPickWorld(cameraPixelToWorld(px, py));
+    if (!world) {
+      if (gazeboMessage) {
+        gazeboMessage.textContent = "当前相机参数不足，无法从画面换算 world 坐标";
+      }
+      return;
+    }
+    fillGazeboTargetFromWorld(world);
   }
 
   async function refreshTopCameraFrame() {
     if (!topCameraCanvas || !topCameraCtx) {
       return;
     }
+    if (topCameraRefreshInFlight) {
+      return;
+    }
+    topCameraRefreshInFlight = true;
     try {
       const data = await fetchJson(`${API_BASE_URL}/api/gazebo/top_camera`);
       if (data && data.available && data.data_b64) {
@@ -2194,35 +2557,9 @@ function initGazeboPage() {
       }
     } catch {
       /* ignore */
+    } finally {
+      topCameraRefreshInFlight = false;
     }
-  }
-
-  if (btnGazeboFill) {
-    btnGazeboFill.addEventListener("click", async () => {
-      if (!gazeboMessage || !gazeboX || !gazeboY || !gazeboYaw) {
-        return;
-      }
-      gazeboMessage.textContent = "读取位姿中…";
-      try {
-        const data = await fetchJson(`${API_BASE_URL}/api/robot/pose`);
-        const robots = Array.isArray(data.robots) ? data.robots : [];
-        const r = robots[0];
-        if (!r || !r.pose) {
-          gazeboMessage.textContent = "无可用位姿数据（检查 ROS TF 桥与机器人是否在图上）";
-          return;
-        }
-        const p = r.pose;
-        gazeboX.value = String(p.x ?? 0);
-        gazeboY.value = String(p.y ?? 0);
-        gazeboYaw.value = String(p.yaw ?? 0);
-        if (modelNameEl && !modelNameEl.value.trim()) {
-          modelNameEl.value = String(r.id || "robot2");
-        }
-        gazeboMessage.textContent = `已填入 ${r.name || r.id} 的位姿`;
-      } catch (err) {
-        gazeboMessage.textContent = err.message || String(err);
-      }
-    });
   }
 
   if (btnGazeboTeleport) {
@@ -2237,7 +2574,12 @@ function initGazeboPage() {
       }
       const x = parseFloat((gazeboX && gazeboX.value) || "");
       const y = parseFloat((gazeboY && gazeboY.value) || "");
-      const yaw = parseFloat((gazeboYaw && gazeboYaw.value) || "0");
+      const yawDegRaw = parseFloat((gazeboYaw && gazeboYaw.value) || "0");
+      const yawDeg = normalizeDegrees360(Number.isNaN(yawDegRaw) ? 0 : yawDegRaw);
+      const yaw = (yawDeg * Math.PI) / 180;
+      if (gazeboYaw) {
+        gazeboYaw.value = String(yawDeg);
+      }
       if (Number.isNaN(x) || Number.isNaN(y)) {
         gazeboMessage.textContent = "请填写 x、y 坐标";
         return;
@@ -2248,7 +2590,7 @@ function initGazeboPage() {
           model_name: modelName,
           x,
           y,
-          yaw: Number.isNaN(yaw) ? 0 : yaw,
+          yaw,
           z: 0.05,
           reference_frame: "world",
         });
@@ -2260,74 +2602,115 @@ function initGazeboPage() {
     });
   }
 
-  if (cameraXEl) {
-    cameraXEl.addEventListener("input", () => syncCameraModelFromInputs());
+  function bindHoldButton(btn, onStart, onStop) {
+    if (!btn) {
+      return;
+    }
+    const stop = () => {
+      if (onStop) {
+        onStop();
+      }
+    };
+    btn.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      btn.setPointerCapture?.(ev.pointerId);
+      onStart();
+    });
+    btn.addEventListener("pointerup", stop);
+    btn.addEventListener("pointercancel", stop);
+    btn.addEventListener("pointerleave", stop);
   }
-  if (cameraYEl) {
-    cameraYEl.addEventListener("input", () => syncCameraModelFromInputs());
-  }
-  if (cameraZEl) {
-    cameraZEl.addEventListener("input", () => syncCameraModelFromInputs());
-  }
-  if (btnGazeboSetCamera) {
-    btnGazeboSetCamera.addEventListener("click", async () => {
+
+  bindHoldButton(btnGazeboCamUp, () => {
+    camDriveKey.up = true;
+  }, () => {
+    camDriveKey.up = false;
+  });
+  bindHoldButton(btnGazeboCamDown, () => {
+    camDriveKey.down = true;
+  }, () => {
+    camDriveKey.down = false;
+  });
+  bindHoldButton(btnGazeboCamLeft, () => {
+    camDriveKey.left = true;
+  }, () => {
+    camDriveKey.left = false;
+  });
+  bindHoldButton(btnGazeboCamRight, () => {
+    camDriveKey.right = true;
+  }, () => {
+    camDriveKey.right = false;
+  });
+  bindHoldButton(btnGazeboCamZoomIn, () => {
+    camZoomDir = -1;
+  }, () => {
+    camZoomDir = 0;
+  });
+  bindHoldButton(btnGazeboCamZoomOut, () => {
+    camZoomDir = 1;
+  }, () => {
+    camZoomDir = 0;
+  });
+
+  if (btnGazeboCamHome) {
+    btnGazeboCamHome.addEventListener("click", async () => {
       if (!gazeboMessage) {
         return;
       }
-      syncCameraModelFromInputs();
-      gazeboMessage.textContent = "设置 topdown_camera 位姿中…";
       try {
-        await postGazeboSetModelState({
-          model_name: cameraModelName,
-          x: cameraModel.x,
-          y: cameraModel.y,
-          z: cameraModel.z,
-          yaw: 0.0,
-          reference_frame: "world",
-        });
-        gazeboMessage.textContent = `topdown_camera 已更新: (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`;
-        appendLog(
-          `Gazebo set_model_state: ${cameraModelName} -> (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`
-        );
+        await setTopCameraPose(cameraDefaultPose, "已切换到全图视角");
       } catch (err) {
-        gazeboMessage.textContent = `设置相机位姿失败: ${err.message || err}`;
+        gazeboMessage.textContent = `切换全图失败: ${err.message || err}`;
+      }
+    });
+  }
+
+  [btnGazeboZone1, btnGazeboZone2, btnGazeboZone3, btnGazeboZone4].forEach((btn, idx) => {
+    if (!btn) {
+      return;
+    }
+    const zoneId = idx + 1;
+    btn.addEventListener("click", async () => {
+      if (!gazeboMessage) {
+        return;
+      }
+      try {
+        await zoomTopCameraToZone(zoneId);
+      } catch (err) {
+        gazeboMessage.textContent = `切换区域 ${zoneId} 失败: ${err.message || err}`;
+      }
+    });
+  });
+
+  if (btnGazeboResetCamera) {
+    btnGazeboResetCamera.addEventListener("click", async () => {
+      if (!gazeboMessage) {
+        return;
+      }
+      gazeboMessage.textContent = "复原俯视相机中…";
+      try {
+        await setTopCameraPose(cameraDefaultPose, "俯视相机已复原");
+        gazeboMessage.textContent = "俯视相机已复原";
+      } catch (err) {
+        gazeboMessage.textContent = `复原俯视相机失败: ${err.message || err}`;
       }
     });
   }
 
   if (topCameraCanvas) {
-    syncCameraModelFromInputs();
     fillTopdownCameraPoseFromGazebo().catch(() => {});
     fitTopCameraCanvas();
+    topCameraCanvas.addEventListener("click", handleTopCameraPick);
+    cameraDriveTimer = window.setInterval(() => {
+      tickTopdownCameraDrive();
+    }, 33);
     window.addEventListener("resize", () => {
       fitTopCameraCanvas();
     });
-    topCameraCanvas.addEventListener("click", (ev) => {
-      if (!gazeboMessage) {
-        return;
-      }
-      if (!cameraFrame.width || !cameraFrame.height) {
-        gazeboMessage.textContent = "相机画面未就绪，稍后再试";
-        return;
-      }
-      const rect = topCameraCanvas.getBoundingClientRect();
-      const sx = ev.clientX - rect.left;
-      const sy = ev.clientY - rect.top;
-      const px = (sx / Math.max(1, rect.width)) * cameraFrame.width;
-      const py = (sy / Math.max(1, rect.height)) * cameraFrame.height;
-      const pos = cameraPixelToWorld(px, py);
-      if (!pos) {
-        gazeboMessage.textContent = "相机内参不可用，无法换算点击坐标";
-        return;
-      }
-      if (gazeboX) gazeboX.value = String(Number(pos.x.toFixed(3)));
-      if (gazeboY) gazeboY.value = String(Number(pos.y.toFixed(3)));
-      gazeboMessage.textContent = `已取点: (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)})，点击“移动到该坐标”执行`;
-    });
     refreshTopCameraFrame().catch(() => {});
-    setInterval(() => {
+    topCameraRefreshTimer = window.setInterval(() => {
       refreshTopCameraFrame().catch(() => {});
-    }, 500);
+    }, CAMERA_REFRESH_MS);
   }
 }
 

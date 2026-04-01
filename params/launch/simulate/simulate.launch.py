@@ -21,6 +21,10 @@ from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.substitutions import FindPackageShare
 
 
+def _as_bool(text: str) -> bool:
+    return (text or "").strip().lower() in ("true", "1", "yes", "on")
+
+
 def _resolve_world_path(share: str, world_arg: str) -> str:
     """Allow both absolute world path and worlds/<name> shorthand."""
     world_arg = (world_arg or "").strip()
@@ -47,62 +51,55 @@ def _run_xacro_robot_description(namespace: str) -> str:
     return out.decode("utf-8")
 
 
+def _spawn_pose_from_slot(slot_text: str):
+    slots = {
+        "0": (0.0, 0.0, 0.05, 0.0),
+        "1": (-10.0, 10.0, 0.05, 0.0),
+        "2": (10.0, 10.0, 0.05, 0.0),
+        "3": (-10.0, -10.0, 0.05, 0.0),
+        "4": (10.0, -10.0, 0.05, 0.0),
+    }
+    slot = (slot_text or "0").strip()
+    if slot not in slots:
+        raise RuntimeError(
+            f"invalid spawn_slot={slot!r}; expected one of 0, 1, 2, 3, 4"
+        )
+    return slots[slot]
+
+
+def _resolve_spawn_pose(context):
+    sx = LaunchConfiguration("spawn_x").perform(context).strip()
+    sy = LaunchConfiguration("spawn_y").perform(context).strip()
+    sz = LaunchConfiguration("spawn_z").perform(context).strip()
+    syaw = LaunchConfiguration("spawn_yaw").perform(context).strip()
+    if sx or sy or sz or syaw:
+        try:
+            return (
+                float(sx or "0.0"),
+                float(sy or "0.0"),
+                float(sz or "0.05"),
+                float(syaw or "0.0"),
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "spawn_x/spawn_y/spawn_z/spawn_yaw must be numeric when set"
+            ) from exc
+    return _spawn_pose_from_slot(LaunchConfiguration("spawn_slot").perform(context))
+
+
 def launch_setup(context, *_args, **_kwargs):
     ns = LaunchConfiguration("namespace").perform(context).strip()
-    use_sim = LaunchConfiguration("use_sim_time").perform(context).lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    start_gz = LaunchConfiguration("start_gazebo").perform(context).lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    start_xvfb = LaunchConfiguration("start_xvfb").perform(context).lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    robot_name = LaunchConfiguration("robot_name").perform(context).strip() or "sim_robot"
+    entity_name = ns or robot_name
+    use_sim = _as_bool(LaunchConfiguration("use_sim_time").perform(context))
+    start_gz = _as_bool(LaunchConfiguration("start_gazebo").perform(context))
+    start_xvfb = _as_bool(LaunchConfiguration("start_xvfb").perform(context))
+    spawn_robot = _as_bool(LaunchConfiguration("spawn_robot").perform(context))
     xvfb_display = LaunchConfiguration("xvfb_display").perform(context).strip() or ":99"
     world = LaunchConfiguration("world").perform(context)
     share = get_package_share_directory("simulate")
     model_dir = os.path.join(share, "model")
     world_path = _resolve_world_path(share, world)
-
-    try:
-        robot_desc = _run_xacro_robot_description(ns)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
-
-    robot_state_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        output="screen",
-        parameters=[{"use_sim_time": use_sim, "robot_description": robot_desc}],
-    )
-
-    spawn_robot = Node(
-        package="gazebo_ros",
-        executable="spawn_entity.py",
-        arguments=[
-            "-entity",
-            ns,
-            "-topic",
-            "robot_description",
-            "-timeout",
-            "180",
-            "-spawn_service_timeout",
-            "180",
-            "-x",
-            "0.0",
-            "-y",
-            "0.0",
-            "-z",
-            "0.05",
-        ],
-        output="screen",
-    )
 
     actions = []
 
@@ -166,11 +163,7 @@ def launch_setup(context, *_args, **_kwargs):
         else:
             actions.append(gazebo_launch)
 
-    start_gzweb = LaunchConfiguration("start_gzweb").perform(context).lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    start_gzweb = _as_bool(LaunchConfiguration("start_gzweb").perform(context))
     if start_gzweb:
         gzweb_root_arg = LaunchConfiguration("gzweb_root").perform(context).strip()
         if not gzweb_root_arg:
@@ -218,8 +211,58 @@ def launch_setup(context, *_args, **_kwargs):
                 )
             )
 
-    group_children = [PushRosNamespace(ns), robot_state_publisher, spawn_robot]
-    actions.append(GroupAction(actions=group_children))
+    if spawn_robot:
+        spawn_x, spawn_y, spawn_z, spawn_yaw = _resolve_spawn_pose(context)
+        try:
+            robot_desc = _run_xacro_robot_description(ns)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
+
+        robot_state_publisher = Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            output="screen",
+            parameters=[{"use_sim_time": use_sim, "robot_description": robot_desc}],
+        )
+        spawn_robot_node = Node(
+            package="gazebo_ros",
+            executable="spawn_entity.py",
+            arguments=[
+                "-entity",
+                entity_name,
+                "-topic",
+                "robot_description",
+                "-timeout",
+                "180",
+                "-spawn_service_timeout",
+                "180",
+                "-x",
+                str(spawn_x),
+                "-y",
+                str(spawn_y),
+                "-z",
+                str(spawn_z),
+                "-Y",
+                str(spawn_yaw),
+            ],
+            output="screen",
+        )
+        group_children = [PushRosNamespace(ns), robot_state_publisher, spawn_robot_node]
+        actions.append(GroupAction(actions=group_children))
+        actions.append(
+            LogInfo(
+                msg=(
+                    f"[simulate] spawn robot entity={entity_name} namespace={ns or '/'} "
+                    f"at x={spawn_x:.2f}, y={spawn_y:.2f}, z={spawn_z:.2f}, yaw={spawn_yaw:.2f}"
+                )
+            )
+        )
+    else:
+        actions.append(
+            LogInfo(
+                msg="[simulate] spawn_robot:=false -> world/map only (no robot entity spawned)"
+            )
+        )
     return actions
 
 
@@ -243,9 +286,39 @@ def generate_launch_description():
                 description="If false, skip starting Gazebo (use after a first full launch is running).",
             ),
             DeclareLaunchArgument(
+                "spawn_robot",
+                default_value="true",
+                description="If false, only load the Gazebo world/map once and skip robot spawning.",
+            ),
+            DeclareLaunchArgument(
                 "world",
                 default_value="drawn_model.world",
                 description="Gazebo world file name under simulate/worlds, or absolute path.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_slot",
+                default_value="0",
+                description="Predefined spawn slot: 0=center, 1=top-left, 2=top-right, 3=bottom-left, 4=bottom-right.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_x",
+                default_value="",
+                description="Optional explicit spawn X in world coordinates; overrides spawn_slot when set.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_y",
+                default_value="",
+                description="Optional explicit spawn Y in world coordinates; overrides spawn_slot when set.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_z",
+                default_value="",
+                description="Optional explicit spawn Z in world coordinates; overrides spawn_slot when set.",
+            ),
+            DeclareLaunchArgument(
+                "spawn_yaw",
+                default_value="",
+                description="Optional explicit spawn yaw (rad); overrides spawn_slot when set.",
             ),
             DeclareLaunchArgument(
                 "start_xvfb",

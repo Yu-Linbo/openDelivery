@@ -1,4 +1,4 @@
-"""Test bringup: load world/map once, then spawn one robot into slot 1-4."""
+"""Installed mirror of simulate test bringup: world once, then one robot."""
 
 import os
 

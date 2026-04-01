@@ -586,7 +586,21 @@ class OpenDeliveryTfBridgeNode(Node):
                 qz = float(p.orientation.z)
                 qw = float(p.orientation.w)
                 yaw = _yaw_from_quat(qx, qy, qz, qw)
-                models.append({"name": nm, "pose": {"x": x, "y": y, "z": z, "yaw": yaw}})
+                models.append(
+                    {
+                        "name": nm,
+                        "pose": {
+                            "x": x,
+                            "y": y,
+                            "z": z,
+                            "yaw": yaw,
+                            "qx": qx,
+                            "qy": qy,
+                            "qz": qz,
+                            "qw": qw,
+                        },
+                    }
+                )
             ros_sensor_store.set_gazebo_models(
                 {
                     "available": True,

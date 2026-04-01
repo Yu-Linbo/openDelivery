@@ -845,16 +845,24 @@ button {
 
 .gazebo-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 380px);
+  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 420px);
   gap: 18px;
   align-items: start;
 }
 
 .gazebo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 16px;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(15, 23, 42, 0.65);
+}
+
+.gazebo-panel--move {
+  position: sticky;
+  top: 18px;
 }
 
 .gazebo-subtitle {
@@ -873,15 +881,14 @@ button {
 
 .gazebo-xyz-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px 12px;
 }
 
 .gazebo-actions {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 12px;
 }
 
 .gazebo-actions button {
@@ -889,13 +896,32 @@ button {
 }
 
 .gazebo-camera-wrap {
+  flex: 1 1 auto;
   width: 100%;
   height: 360px;
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
   background: #ffffff;
-  margin: 0 0 10px;
+  min-height: 420px;
+  margin: 0;
+}
+
+.gazebo-camera-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.gazebo-camera-pad {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.5);
 }
 
 .gazebo-camera-controls {
@@ -913,15 +939,57 @@ button {
   font-weight: 600;
 }
 
+.gazebo-pad-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.gazebo-pad-grid button,
+.gazebo-pad-zoom button,
+.gazebo-zone-grid button {
+  min-height: 40px;
+}
+
+.gazebo-pad-zoom {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.gazebo-pad-zoom button:last-child {
+  grid-column: 1 / -1;
+}
+
+.gazebo-zone-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 #gazebo-top-camera {
   width: 100%;
   height: 100%;
   display: block;
   background: #ffffff;
+  cursor: crosshair;
 }
 
 @media (max-width: 960px) {
   .gazebo-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .gazebo-panel--move {
+    position: static;
+  }
+
+  .gazebo-camera-stage {
+    grid-template-columns: 1fr;
+  }
+
+  .gazebo-xyz-grid,
+  .gazebo-actions {
     grid-template-columns: 1fr;
   }
 }
