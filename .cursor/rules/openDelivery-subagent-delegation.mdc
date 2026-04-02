@@ -1,0 +1,24 @@
+---
+description: Delegate openDelivery work to specialized subagents (ROS, web, docs, Obsidian)
+globs: openDelivery/**/*
+alwaysApply: false
+---
+
+# Subagent delegation (openDelivery)
+
+When the task clearly matches an area below, **prefer invoking the corresponding subagent** (definitions in **workspace** `.cursor/agents/*.md`; mirrored under `openDelivery/.cursor/agents/` for colocation) so context stays focused and package boundaries stay clear.
+
+| Area | Subagent `name` | When to use |
+|------|-----------------|-------------|
+| `openDelivery/src/` robot packages (driver, slam bringup configs, navigation, system, **not** fake/sim) | `ros-robot-packages` | ROS 2 packages, launches, params, `colcon`, on-robot behavior |
+| `openDelivery/src/fake/`, `openDelivery/src/simulate/*/` (simulation packages), sim + slam smoke tests | `ros-fake-simulate` | `fake_pub`, Gazebo headless, URDF, sim topics/TF |
+| `openDelivery/web/` | `web-frontend` | Browser UI, `app.js`, static assets, API consumption |
+| `openDelivery/backend/` | `web-backend-ros` | FastAPI, ROS bridges, env vars, `/api`, SSE |
+| Notes to Obsidian vaults | `obsidian-notes` | Session notes, runbooks; MCP `user-obsidian` only; vault paths **only** under `self/project_openclaw/` (see agent file) |
+| README / developer docs only | `readme-writer` | `README.md`, `src/**/README.md`, command snippets |
+
+**Cross-cutting:** If a change touches both web and ROS, split: backend agent for API/ROS, frontend agent for UI; keep topic/API contracts in sync.
+
+**Obsidian:** Before `create-note` / `edit-note`, list/read MCP tool descriptors in `mcps/user-obsidian/tools/`. Restrict every note path to **`self/project_openclaw/`** unless the user clearly asks otherwise; create that folder via MCP if missing. Full wording: `.cursor/agents/obsidian-notes.md` → **Vault path scope**.
+
+**Launch isolation (`heartbeat` + `simulate`):** Both use **`PushRosNamespace`** + `namespace` / `robot_name` launch args for multi-instance isolation. `heartbeat`: node + topics/services under `/<namespace>/`. `simulate`: namespaced **robot** stack only (`robot_state_publisher`, `spawn_entity`); Gazebo stays global; a second robot without a second `gzserver` → `start_gazebo:=false`. Keep `params/launch/system/` and `params/launch/simulate/` in sync with package launches.
