@@ -21,6 +21,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("current_map", default_value="nh_102"),
             DeclareLaunchArgument("robot_status", default_value="normal"),
+            DeclareLaunchArgument(
+                "mapping_mode",
+                default_value="false",
+                description="If true, publish robot_status as 建图状态 (current_map unchanged).",
+            ),
             DeclareLaunchArgument("publish_rate", default_value="2.0"),
             GroupAction(
                 actions=[
@@ -35,6 +40,7 @@ def generate_launch_description():
                                 "robot_name": LaunchConfiguration("namespace"),
                                 "current_map": LaunchConfiguration("current_map"),
                                 "robot_status": LaunchConfiguration("robot_status"),
+                                "mapping_mode": LaunchConfiguration("mapping_mode"),
                                 "publish_rate": LaunchConfiguration("publish_rate"),
                             }
                         ],

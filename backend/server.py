@@ -279,22 +279,29 @@ class RosNodeManager:
         status = self.control(spec["id"], "restart")
         return {"node_id": spec["id"], "status": status}
 
-    def _make_slam_mapping_spec(self) -> dict:
+    def _make_slam_mapping_spec(self, robot_name: str = "sim_robot") -> dict:
+        rn = self._sanitize_node_fragment(robot_name, "robot_name")
         return {
             "id": "slam_bringup_mapping",
             "name": "slam_bringup_mapping",
             "persistent": False,
-            "start_cmd": "ros2 launch slam_bringup mapping.launch.py",
+            "start_cmd": (
+                f"ros2 launch slam_bringup mapping.launch.py "
+                f"robot_name:={rn} namespace:={rn}"
+            ),
             "stop_cmd": "pkill -f 'ros2 launch slam_bringup mapping.launch.py'",
             "match": "mapping.launch.py",
-            "note": "SLAM 建图",
+            "note": f"SLAM 建图 (robot_name={rn}, 与仿真 namespace 对齐)",
         }
 
-    def create_slam_mapping_node_and_start(self):
-        spec = self._make_slam_mapping_spec()
+    def create_slam_mapping_node_and_start(self, robot_name: str = "sim_robot"):
+        spec = self._make_slam_mapping_spec(robot_name)
         with self._lock:
-            exists = any(s.get("id") == spec["id"] for s in self._managed_nodes)
-            if not exists:
+            for i, s in enumerate(self._managed_nodes):
+                if s.get("id") == spec["id"]:
+                    self._managed_nodes[i] = spec
+                    break
+            else:
                 self._managed_nodes.append(spec)
         status = self.control(spec["id"], "restart")
         return {"node_id": spec["id"], "status": status}
@@ -848,7 +855,7 @@ class RobotPoseProvider:
                     "name": "ros_tf_bridge",
                     "running": running,
                     "managed": self._mode == "ros2_tf",
-                    "note": "TF + /map subscriber thread",
+                    "note": "TF + /<robot_id>/mapping (OccupancyGrid) subscriber thread",
                 }
             ],
             "last_error": err,
@@ -923,7 +930,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                         robot_name, initial_floor
                     )
                 elif node_type == "slam_bringup_mapping":
-                    payload = ROS_NODE_MANAGER.create_slam_mapping_node_and_start()
+                    slam_rn = str(data.get("robot_name") or "sim_robot").strip()
+                    payload = ROS_NODE_MANAGER.create_slam_mapping_node_and_start(slam_rn)
                 else:
                     self._send_json(
                         {

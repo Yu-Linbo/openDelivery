@@ -1,12 +1,12 @@
-slam_toolbox:
+# map_name overridden by localization.launch.py → /<namespace>/map
+/**:
   ros__parameters:
     use_sim_time: true
 
     odom_frame: odom
     map_frame: map
-    base_frame: base_link
-    scan_topic: /scan
-    mode: localization
+    base_frame: base_footprint
+    scan_topic: scan_2d
 
     map_file_name: ""
     map_start_pose: [0.0, 0.0, 0.0]

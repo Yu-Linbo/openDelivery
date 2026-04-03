@@ -350,11 +350,17 @@
                 </div>
 
                 <div id="ros-node-fields-slam_bringup_mapping" class="ros-create-subfields">
-                  <div
-                    class="ros-create-hint"
-                    style="margin-top: -4px; grid-column: 1 / -1;"
-                  >
-                    slam_bringup_mapping 无需额外参数
+                  <label class="ros-create-field">
+                    robot_name（与 simulate namespace 一致）
+                    <input
+                      id="ros-node-slam-robot-name"
+                      type="text"
+                      placeholder="sim_robot"
+                      title="与 ros2 launch simulate ... namespace:= 相同，用于 scan_2d/odom TF 对齐"
+                    />
+                  </label>
+                  <div class="ros-create-hint" style="grid-column: 1 / -1;">
+                    默认 sim_robot；多机仿真时填 robot2 等与 Gazebo 命名空间相同的名字。
                   </div>
                 </div>
 

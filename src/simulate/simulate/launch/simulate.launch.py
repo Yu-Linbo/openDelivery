@@ -222,15 +222,21 @@ def launch_setup(context, *_args, **_kwargs):
         except subprocess.CalledProcessError as e:
             raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
 
+        # Node FQN: /<ns>/simulate/<node> (simulate package); joint_states from Gazebo on /<ns>/joint_states.
+        sim_ns = f"{ns}/simulate" if ns else "simulate"
+        js_topic = f"/{ns}/joint_states" if ns else "/joint_states"
         robot_state_publisher = Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
+            name="robot_state_publisher",
             output="screen",
             parameters=[{"use_sim_time": use_sim, "robot_description": robot_desc}],
+            remappings=[("joint_states", js_topic)],
         )
         spawn_robot_node = Node(
             package="gazebo_ros",
             executable="spawn_entity.py",
+            name="spawn_entity",
             arguments=[
                 "-entity",
                 entity_name,
@@ -251,7 +257,7 @@ def launch_setup(context, *_args, **_kwargs):
             ],
             output="screen",
         )
-        group_children = [PushRosNamespace(ns), robot_state_publisher, spawn_robot_node]
+        group_children = [PushRosNamespace(sim_ns), robot_state_publisher, spawn_robot_node]
         actions.append(GroupAction(actions=group_children))
         actions.append(
             LogInfo(

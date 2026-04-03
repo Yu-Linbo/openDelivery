@@ -21,10 +21,10 @@
     "current_map": "nh_102",
     "robot_id": "robot2",
     "robot_name": "robot2",
-    "robot_status": "normal",
-    "stamp_ns": 1775021889351867395,
+    "robot_status": "mapping",
+    "stamp_ns": 1775202109074971040,
     "topic": "/robot2/robot_status",
-    "updated_at": 1775021889.4580054
+    "updated_at": 1775202109.0839381
   },
   "robot4": {
     "current_map": "",

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>nav_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Navigation2 (Foxy) bringup: controller, planner, recoveries, bt_navigator, waypoint_follower.
+    Global costmap remaps map to /&lt;robot&gt;/map (localize) or /&lt;robot&gt;/mapping (mapping). No map_server/AMCL.
+  </description>
+  <maintainer email="dev@example.com">openDelivery</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_recoveries</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_waypoint_follower</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

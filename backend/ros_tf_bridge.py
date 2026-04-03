@@ -852,6 +852,18 @@ def request_ros_shutdown() -> None:
         pass
 
 
+def is_robot_status_mapping(robot_status: str) -> bool:
+    """True when heartbeat / stack indicates SLAM 建图 (not localization-only)."""
+    s = (robot_status or "").strip()
+    if not s:
+        return False
+    if s.lower() == "mapping":
+        return True
+    if s in ("建图", "建图状态"):
+        return True
+    return False
+
+
 def list_mapping_robot_ids_from_status_store(
     max_status_age_sec: Optional[float] = None,
 ) -> List[str]:
@@ -871,10 +883,10 @@ def list_mapping_robot_ids_from_status_store(
     out: List[str] = []
     for item in ros_robot_status_store.list_all_last_status():
         rid = str(item.get("robot_id") or "").strip()
-        st = str(item.get("robot_status") or "").strip().lower()
+        st_raw = str(item.get("robot_status") or "").strip()
         if not rid:
             continue
-        if st != "mapping":
+        if not is_robot_status_mapping(st_raw):
             continue
         if max_status_age_sec < float("inf"):
             updated_at = float(item.get("updated_at") or 0.0)

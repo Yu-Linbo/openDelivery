@@ -26,7 +26,7 @@ def generate_launch_description():
                     Node(
                         package="open_delivery_system",
                         executable="fake_pub_node",
-                        name="fake_pub",
+                        name="fake",
                         output="screen",
                         parameters=[
                             {

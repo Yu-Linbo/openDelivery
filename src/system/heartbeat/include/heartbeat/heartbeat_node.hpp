@@ -17,6 +17,8 @@ public:
 
 private:
   std::string effective_robot_name() const;
+  bool slam_mapping_node_present();
+  std::string resolved_robot_status_string();
   void recreate_io();
   void tick();
   void on_set_params(

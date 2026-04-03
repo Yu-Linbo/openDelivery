@@ -87,6 +87,7 @@ const rosNodeFieldsSlamMapping = document.getElementById(
   "ros-node-fields-slam_bringup_mapping"
 );
 const rosNodeRobotName = document.getElementById("ros-node-robot-name");
+const rosNodeSlamRobotName = document.getElementById("ros-node-slam-robot-name");
 const rosNodeCurrentMap = document.getElementById("ros-node-current-map");
 const btnRosNodeCreate = document.getElementById("btn-ros-node-create");
 
@@ -936,6 +937,13 @@ function initRosNodesPage() {
           return;
         }
         params = { robot_name: rn, initial_floor: cm };
+      } else if (nodeType === "slam_bringup_mapping") {
+        const rn = (
+          rosNodeSlamRobotName && rosNodeSlamRobotName.value
+            ? rosNodeSlamRobotName.value
+            : ""
+        ).trim();
+        params = { robot_name: rn || "sim_robot" };
       }
 
       if (btnRosNodeCreate) {
@@ -1144,20 +1152,10 @@ function drawScan2dOnMap(data) {
   if (!activePgm || !data || !data.hits || data.hits.length === 0) {
     return;
   }
-  const o = data.origin;
-  let osx;
-  let osy;
-  if (o && o.length >= 2) {
-    const op = worldToMapPixels({ x: o[0], y: o[1] });
-    if (op) {
-      const s = mapPixelToScreen(op.mapX, op.mapY);
-      osx = s.sx;
-      osy = s.sy;
-    }
-  }
   ctx.save();
-  ctx.strokeStyle = "rgba(249, 115, 22, 0.4)";
-  ctx.lineWidth = 1;
+  // scan_2d：地图坐标系下的命中点，红色圆点（半径随缩放略变）
+  const ptRadius = Math.max(1.25, Math.min(3.5, viewScale * 0.2));
+  ctx.fillStyle = "#ef4444";
   data.hits.forEach((hit) => {
     if (!hit || hit.length < 2) {
       return;
@@ -1167,12 +1165,9 @@ function drawScan2dOnMap(data) {
       return;
     }
     const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
-    if (osx != null && osy != null) {
-      ctx.beginPath();
-      ctx.moveTo(osx, osy);
-      ctx.lineTo(sx, sy);
-      ctx.stroke();
-    }
+    ctx.beginPath();
+    ctx.arc(sx, sy, ptRadius, 0, Math.PI * 2);
+    ctx.fill();
   });
   ctx.restore();
 }

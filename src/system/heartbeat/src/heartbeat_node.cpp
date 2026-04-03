@@ -1,6 +1,7 @@
 #include "heartbeat/heartbeat_node.hpp"
 
 #include <chrono>
+#include <utility>
 #include <vector>
 
 #include "rclcpp/create_timer.hpp"
@@ -75,6 +76,8 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("robot_name", "");
   declare_parameter<std::string>("current_map", "");
   declare_parameter<std::string>("robot_status", "normal");
+  declare_parameter<bool>("mapping_mode", false);
+  declare_parameter<bool>("auto_mapping_status", true);
   declare_parameter<double>("publish_rate", 2.0);
 
   const std::string ns = get_namespace();
@@ -106,6 +109,43 @@ std::string HeartbeatNode::effective_robot_name() const {
   }
   std::string leaf = leaf_namespace_id(get_namespace());
   return leaf.empty() ? std::string{"robot"} : leaf;
+}
+
+bool HeartbeatNode::slam_mapping_node_present() {
+  std::string rn = effective_robot_name();
+  while (!rn.empty() && rn.front() == '/') {
+    rn.erase(0, 1);
+  }
+  if (rn.empty()) {
+    return false;
+  }
+  const std::string expected_ns = std::string("/") + rn + "/slam_bringup";
+  std::vector<std::pair<std::string, std::string>> pairs;
+  try {
+    pairs = get_node_graph_interface()->get_node_names_and_namespaces();
+  } catch (const std::exception &) {
+    return false;
+  }
+  for (const auto & pr : pairs) {
+    if (pr.first == "mapping" && pr.second == expected_ns) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string HeartbeatNode::resolved_robot_status_string() {
+  std::string status = strip_spaces(get_parameter("robot_status").as_string());
+  if (status.empty()) {
+    status = "normal";
+  }
+  const bool manual_mapping = get_parameter("mapping_mode").as_bool();
+  const bool auto_mapping =
+    get_parameter("auto_mapping_status").as_bool() && slam_mapping_node_present();
+  if (manual_mapping || auto_mapping) {
+    return "mapping";
+  }
+  return status;
 }
 
 void HeartbeatNode::recreate_io() {
@@ -142,7 +182,7 @@ void HeartbeatNode::tick() {
   msg.header.frame_id = "map";
   msg.robot_name = effective_robot_name();
   msg.current_map = get_parameter("current_map").as_string();
-  msg.robot_status = get_parameter("robot_status").as_string();
+  msg.robot_status = resolved_robot_status_string();
   pub_->publish(msg);
 }
 
