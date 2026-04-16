@@ -268,7 +268,10 @@ class OpenDeliveryTfBridgeNode(Node):
             qos_map = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
+                # OccupancyGrid map topics are commonly latched as TRANSIENT_LOCAL.
+                # Use the same durability so late-joining subscribers still receive
+                # the latest map snapshot immediately.
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
                 history=HistoryPolicy.KEEP_LAST,
             )
             rid_fallback = str(robot_specs[0]["id"]) if robot_specs else "robot1"
@@ -327,7 +330,7 @@ class OpenDeliveryTfBridgeNode(Node):
             qos_map = QoSProfile(
                 depth=1,
                 reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.VOLATILE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
                 history=HistoryPolicy.KEEP_LAST,
             )
             tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()

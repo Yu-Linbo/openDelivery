@@ -22,9 +22,9 @@
     "robot_id": "robot2",
     "robot_name": "robot2",
     "robot_status": "mapping",
-    "stamp_ns": 1775202109074971040,
+    "stamp_ns": 1776328118017913138,
     "topic": "/robot2/robot_status",
-    "updated_at": 1775202109.0839381
+    "updated_at": 1776328118.0184145
   },
   "robot4": {
     "current_map": "",

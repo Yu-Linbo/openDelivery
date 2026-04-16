@@ -362,6 +362,18 @@ function parseOrigin(originText) {
   return [items[0], items[1], items[2] || 0];
 }
 
+function getMapOriginPose() {
+  if (!activeMeta) {
+    return { x: 0, y: 0, yaw: 0 };
+  }
+  const [ox, oy, legacyThird] = parseOrigin(activeMeta.origin);
+  // YAML origin[2] is yaw; live mapping stores yaw in origin_yaw.
+  const explicitYaw = Number(activeMeta.origin_yaw);
+  const yaw =
+    Number.isFinite(explicitYaw) && !Number.isNaN(explicitYaw) ? explicitYaw : Number(legacyThird || 0);
+  return { x: ox, y: oy, yaw: Number.isFinite(yaw) ? yaw : 0 };
+}
+
 function getCanvasCssSize() {
   const w = canvas.clientWidth || mapWrapper.clientWidth || 900;
   const h = canvas.clientHeight || 560;
@@ -391,20 +403,25 @@ function resizeCanvasToDisplay() {
 /**
  * Build grayscale bitmap from PGM once per floor (avoids per-frame distortion / heavy work).
  */
-function buildMapBitmap(pgm) {
+function buildMapBitmap(pgm, options = {}) {
+  const { flipY = false } = options;
   const { width, height, maxVal, data } = pgm;
   const c = document.createElement("canvas");
   c.width = width;
   c.height = height;
   const cctx = c.getContext("2d");
   const imageData = cctx.createImageData(width, height);
-  for (let i = 0; i < width * height; i += 1) {
-    const v = Math.round((data[i] / maxVal) * 255);
-    const p = i * 4;
-    imageData.data[p] = v;
-    imageData.data[p + 1] = v;
-    imageData.data[p + 2] = v;
-    imageData.data[p + 3] = 255;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const srcY = flipY ? height - 1 - y : y;
+      const src = srcY * width + x;
+      const v = Math.round((data[src] / maxVal) * 255);
+      const p = (y * width + x) * 4;
+      imageData.data[p] = v;
+      imageData.data[p + 1] = v;
+      imageData.data[p + 2] = v;
+      imageData.data[p + 3] = 255;
+    }
   }
   cctx.putImageData(imageData, 0, 0);
   return c;
@@ -436,9 +453,16 @@ function worldToMapPixels(pose) {
   if (!resolution || Number.isNaN(resolution)) {
     return null;
   }
-  const [ox, oy] = parseOrigin(activeMeta.origin);
-  const mapX = (pose.x - ox) / resolution;
-  const mapY = activePgm.height - (pose.y - oy) / resolution;
+  const { x: ox, y: oy, yaw } = getMapOriginPose();
+  const dx = Number(pose.x) - ox;
+  const dy = Number(pose.y) - oy;
+  const cosYaw = Math.cos(yaw);
+  const sinYaw = Math.sin(yaw);
+  // p_grid = R(-yaw) * (p_map - origin)
+  const gx = (cosYaw * dx + sinYaw * dy) / resolution;
+  const gy = (-sinYaw * dx + cosYaw * dy) / resolution;
+  const mapX = gx;
+  const mapY = activePgm.height - gy;
   return { mapX, mapY };
 }
 
@@ -451,9 +475,14 @@ function mapPixelsToWorld(mapX, mapY) {
   if (!resolution || Number.isNaN(resolution)) {
     return null;
   }
-  const [ox, oy] = parseOrigin(activeMeta.origin);
-  const x = ox + mapX * resolution;
-  const y = oy + (activePgm.height - mapY) * resolution;
+  const { x: ox, y: oy, yaw } = getMapOriginPose();
+  const gx = mapX * resolution;
+  const gy = (activePgm.height - mapY) * resolution;
+  const cosYaw = Math.cos(yaw);
+  const sinYaw = Math.sin(yaw);
+  // p_map = R(yaw) * p_grid + origin
+  const x = ox + cosYaw * gx - sinYaw * gy;
+  const y = oy + sinYaw * gx + cosYaw * gy;
   return { x, y };
 }
 
@@ -1707,11 +1736,15 @@ async function applyLiveMappingFrame() {
   activePgm = pgm;
   activeMeta = {
     resolution: String(data.resolution),
-    origin: `[${data.origin[0]}, ${data.origin[1]}, ${data.origin[2]}]`,
+    // Keep origin text format for existing renderer helpers; yaw is stored separately.
+    origin: `[${data.origin[0]}, ${data.origin[1]}, 0]`,
+    origin_yaw: String(data.origin_yaw || 0),
     occupied_thresh: "0.65",
     free_thresh: "0.196",
   };
-  mapBitmap = buildMapBitmap(pgm);
+  // OccupancyGrid data are row-major from grid (0,0) at lower-left; flip Y once
+  // during rasterization so world<->pixel conversion matches saved-map behavior.
+  mapBitmap = buildMapBitmap(pgm, { flipY: true });
   if (!mapLiveInitializedView) {
     resetViewToFit();
     mapLiveInitializedView = true;

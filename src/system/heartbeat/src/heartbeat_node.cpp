@@ -181,8 +181,12 @@ void HeartbeatNode::tick() {
   msg.header.stamp = now();
   msg.header.frame_id = "map";
   msg.robot_name = effective_robot_name();
-  msg.current_map = get_parameter("current_map").as_string();
   msg.robot_status = resolved_robot_status_string();
+  if (msg.robot_status == "mapping") {
+    msg.current_map = msg.robot_name + "_mapping";
+  } else {
+    msg.current_map = get_parameter("current_map").as_string();
+  }
   pub_->publish(msg);
 }
 

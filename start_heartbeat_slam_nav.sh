@@ -19,6 +19,8 @@
 #   USE_SIM_TIME=true|false   (default: true)
 #   MAP_FILE                  used for normal mode if map yaml not passed as 3rd arg
 #   CURRENT_MAP               heartbeat current_map (default: nh_102)
+#   STARTUP_TF_WAIT_SEC       max seconds to wait for /<robot>/odom -> /<robot>/base_footprint
+#   STARTUP_REQUIRE_TF        true|false (default: true). If true and TF not ready, exit with error.
 #   OPEN_DELIVERY_ROOT        optional repo root for other tools (default: this repo root)
 
 set -euo pipefail
@@ -81,6 +83,8 @@ set -u
 
 USE_SIM_TIME="${USE_SIM_TIME:-true}"
 CURRENT_MAP="${CURRENT_MAP:-nh_102}"
+STARTUP_TF_WAIT_SEC="${STARTUP_TF_WAIT_SEC:-15}"
+STARTUP_REQUIRE_TF="${STARTUP_REQUIRE_TF:-true}"
 
 PIDS=()
 cleanup() {
@@ -97,7 +101,62 @@ trap cleanup EXIT INT TERM
 # heartbeat.launch.py has no use_sim_time; slam + navigation do.
 SIM_ARG="use_sim_time:=$USE_SIM_TIME"
 
+wait_for_robot_tf_ready() {
+  local robot="$1"
+  local wait_sec="$2"
+  local parent_frame="${robot}/odom"
+  local child_frame="${robot}/base_footprint"
+  local deadline=$((SECONDS + wait_sec))
+  echo "[start_heartbeat_slam_nav] waiting TF ${parent_frame} -> ${child_frame} (<= ${wait_sec}s)"
+
+  while (( SECONDS < deadline )); do
+    if python3 - "$parent_frame" "$child_frame" <<'PY' >/dev/null 2>&1
+import sys
+import rclpy
+from rclpy.duration import Duration
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener
+
+parent = sys.argv[1]
+child = sys.argv[2]
+rclpy.init(args=None)
+node = rclpy.create_node("heartbeat_tf_wait")
+buf = Buffer(cache_time=Duration(seconds=2.0))
+_listener = TransformListener(buf, node, spin_thread=False)
+ok = False
+deadline_ns = node.get_clock().now().nanoseconds + int(1.2e9)
+while rclpy.ok() and node.get_clock().now().nanoseconds < deadline_ns:
+    rclpy.spin_once(node, timeout_sec=0.1)
+    try:
+        buf.lookup_transform(parent, child, Time(), timeout=Duration(seconds=0.05))
+        ok = True
+        break
+    except Exception:
+        pass
+node.destroy_node()
+if rclpy.ok():
+    rclpy.shutdown()
+sys.exit(0 if ok else 1)
+PY
+    then
+      echo "[start_heartbeat_slam_nav] TF ready: ${parent_frame} -> ${child_frame}"
+      return 0
+    fi
+    sleep 0.4
+  done
+
+  echo "[start_heartbeat_slam_nav] warn: TF ${parent_frame} -> ${child_frame} not ready within ${wait_sec}s; continue startup"
+  return 1
+}
+
 echo "[start_heartbeat_slam_nav] robot=${ROBOT} mode=${MODE} USE_SIM_TIME=${USE_SIM_TIME} OPEN_DELIVERY_ROOT=${OPEN_DELIVERY_ROOT}"
+
+if ! wait_for_robot_tf_ready "$ROBOT" "$STARTUP_TF_WAIT_SEC"; then
+  if [[ "${STARTUP_REQUIRE_TF,,}" == "true" || "${STARTUP_REQUIRE_TF}" == "1" || "${STARTUP_REQUIRE_TF,,}" == "yes" ]]; then
+    echo "[start_heartbeat_slam_nav] error: required TF not ready for ${ROBOT}; this script does not start simulate. Ensure external simulate stack is running with matching namespace." >&2
+    exit 1
+  fi
+fi
 
 if [[ "$MODE" == "mapping" ]]; then
   ros2 launch heartbeat heartbeat.launch.py \
