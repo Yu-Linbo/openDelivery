@@ -26,7 +26,10 @@ install(
 )
 
 install(
-  PROGRAMS scripts/start_open_delivery.sh
+  PROGRAMS
+    scripts/start_open_delivery.sh
+    scripts/sim_bringup.sh
+    scripts/sim_shutdown.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

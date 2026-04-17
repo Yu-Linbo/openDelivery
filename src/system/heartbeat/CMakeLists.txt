@@ -3,6 +3,7 @@ project(heartbeat)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 find_package(custom_msgs_srvs REQUIRED)
 
 add_executable(heartbeat_node
@@ -14,6 +15,7 @@ target_include_directories(heartbeat_node PRIVATE
 )
 ament_target_dependencies(heartbeat_node
   rclcpp
+  rclcpp_lifecycle
   custom_msgs_srvs
 )
 

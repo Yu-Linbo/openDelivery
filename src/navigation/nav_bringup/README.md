@@ -6,6 +6,10 @@
 
 Nav2 全局代价地图的 **static_layer** 运行在独立节点 `/<robot>/global_costmap/global_costmap` 上，launch 里对 `planner_server` 的 **remap** 不会作用到该节点。此处通过参数 **`map_topic`**（模板占位符 `@@OCC_GRID_TOPIC@@`，由 `stack.launch.py` 按 `grid_mode` 写成 `/<robot>/map` 或 `/<robot>/mapping`）订阅栅格；`remap ("map", …)` 仍保留以便兼容仅含 `map` 相对名的组件。
 
+`map_subscribe_transient_local` 也由 `grid_mode` 自动切换：
+- `mapping` -> `false`（适配 slam_toolbox 实时地图流）
+- `localize` -> `true`（适配 map_server latched map）
+
 | `stack.launch.py` 参数 `grid_mode` | 订阅的 OccupancyGrid |
 |-------------------------------------|----------------------|
 | `localize`（默认） | **`/<robot_name>/map`** |

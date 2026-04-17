@@ -9,3 +9,4 @@ map/
 params/launch/simulate/__pycache__
 src/simulate/simulate/launch/__pycache__
 backend/data/robot_status_last.json
+backend/logs/

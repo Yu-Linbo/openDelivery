@@ -1,5 +1,6 @@
 #include "heartbeat/heartbeat_node.hpp"
 
+#include <cctype>
 #include <chrono>
 #include <utility>
 #include <vector>
@@ -34,6 +35,29 @@ std::string leaf_namespace_id(const std::string & raw_ns) {
     return ns;
   }
   return ns.substr(slash + 1);
+}
+
+std::string fully_qualified_name(std::string ns, const std::string & name) {
+  if (ns.empty() || ns == "/") {
+    return std::string("/") + name;
+  }
+  if (ns.back() == '/') {
+    ns.pop_back();
+  }
+  return ns + "/" + name;
+}
+
+bool parameter_indicates_simulation(const std::string & raw) {
+  const std::string s = strip_spaces(raw);
+  if (s.empty()) {
+    return true;
+  }
+  std::string lower;
+  lower.reserve(s.size());
+  for (unsigned char ch : s) {
+    lower.push_back(static_cast<char>(std::tolower(ch)));
+  }
+  return lower != "real";
 }
 
 }  // namespace
@@ -72,12 +96,13 @@ double HeartbeatNode::publish_rate_hz_from_parameter(
 }
 
 HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
-: rclcpp::Node("heartbeat", options) {
+: rclcpp_lifecycle::LifecycleNode("heartbeat", options) {
   declare_parameter<std::string>("robot_name", "");
   declare_parameter<std::string>("current_map", "");
   declare_parameter<std::string>("robot_status", "normal");
   declare_parameter<bool>("mapping_mode", false);
   declare_parameter<bool>("auto_mapping_status", true);
+  declare_parameter<std::string>("sim_mode", "sim");
   declare_parameter<double>("publish_rate", 2.0);
 
   const std::string ns = get_namespace();
@@ -89,8 +114,6 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
       "isolated topics and services");
   }
 
-  recreate_io();
-
   srv_ = create_service<custom_msgs_srvs::srv::SetHeartbeatParams>(
     "set_heartbeat_params",
     std::bind(
@@ -98,8 +121,8 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "heartbeat ready: FQN=%s; relative topics '~/robot_status', service '~/set_heartbeat_params'",
-    get_fully_qualified_name());
+    "heartbeat lifecycle node ready: FQN=%s; use lifecycle transitions configure->activate before publishing",
+    fully_qualified_name(get_namespace(), get_name()).c_str());
 }
 
 std::string HeartbeatNode::effective_robot_name() const {
@@ -148,20 +171,14 @@ std::string HeartbeatNode::resolved_robot_status_string() {
   return status;
 }
 
-void HeartbeatNode::recreate_io() {
-  std::lock_guard<std::mutex> lock(mutex_);
+void HeartbeatNode::recreate_timer_locked() {
   timer_.reset();
-  pub_.reset();
-
-  pub_ = create_publisher<custom_msgs_srvs::msg::RobotStatus>(
-    "robot_status", rclcpp::QoS(10));
-
   const double hz = publish_rate_hz_from_parameter(get_parameter("publish_rate"), 2.0);
   const auto period = rclcpp::Duration::from_seconds(1.0 / hz);
   timer_ = rclcpp::create_timer(
     this, get_clock(), period, std::bind(&HeartbeatNode::tick, this));
 
-  const std::string fqn = get_fully_qualified_name();
+  const std::string fqn = fully_qualified_name(get_namespace(), get_name());
   const std::string ns = get_namespace();
   RCLCPP_INFO(
     get_logger(),
@@ -174,7 +191,7 @@ void HeartbeatNode::recreate_io() {
 
 void HeartbeatNode::tick() {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!pub_) {
+  if (!pub_ || !pub_->is_activated()) {
     return;
   }
   custom_msgs_srvs::msg::RobotStatus msg;
@@ -187,6 +204,7 @@ void HeartbeatNode::tick() {
   } else {
     msg.current_map = get_parameter("current_map").as_string();
   }
+  msg.is_simulation = parameter_indicates_simulation(get_parameter("sim_mode").as_string());
   pub_->publish(msg);
 }
 
@@ -221,13 +239,62 @@ void HeartbeatNode::on_set_params(
       }
     }
 
-    recreate_io();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (timer_) {
+        recreate_timer_locked();
+      }
+    }
     response->success = true;
     response->message = "ok";
   } catch (const std::exception & e) {
     response->success = false;
     response->message = e.what();
   }
+}
+
+HeartbeatNode::CallbackReturn HeartbeatNode::on_configure(const rclcpp_lifecycle::State &) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  pub_ = create_publisher<custom_msgs_srvs::msg::RobotStatus>("robot_status", rclcpp::QoS(10));
+  recreate_timer_locked();
+  RCLCPP_INFO(get_logger(), "heartbeat configured");
+  return CallbackReturn::SUCCESS;
+}
+
+HeartbeatNode::CallbackReturn HeartbeatNode::on_activate(const rclcpp_lifecycle::State &) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!pub_) {
+    RCLCPP_ERROR(get_logger(), "activate requested before configure");
+    return CallbackReturn::FAILURE;
+  }
+  pub_->on_activate();
+  RCLCPP_INFO(get_logger(), "heartbeat active");
+  return CallbackReturn::SUCCESS;
+}
+
+HeartbeatNode::CallbackReturn HeartbeatNode::on_deactivate(const rclcpp_lifecycle::State &) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (pub_) {
+    pub_->on_deactivate();
+  }
+  RCLCPP_INFO(get_logger(), "heartbeat inactive");
+  return CallbackReturn::SUCCESS;
+}
+
+HeartbeatNode::CallbackReturn HeartbeatNode::on_cleanup(const rclcpp_lifecycle::State &) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  timer_.reset();
+  pub_.reset();
+  RCLCPP_INFO(get_logger(), "heartbeat cleaned up");
+  return CallbackReturn::SUCCESS;
+}
+
+HeartbeatNode::CallbackReturn HeartbeatNode::on_shutdown(const rclcpp_lifecycle::State &) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  timer_.reset();
+  pub_.reset();
+  RCLCPP_INFO(get_logger(), "heartbeat shutdown");
+  return CallbackReturn::SUCCESS;
 }
 
 }  // namespace heartbeat

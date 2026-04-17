@@ -331,6 +331,7 @@ class FakeRobotNode(Node):
         st.robot_name = self.robot_name
         st.current_map = self.current_map
         st.robot_status = "normal"
+        st.is_simulation = True
         self.robot_status_pub.publish(st)
 
 

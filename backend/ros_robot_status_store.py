@@ -46,6 +46,7 @@ def _load_once() -> None:
                 "robot_name": str(item.get("robot_name") or rid_s),
                 "current_map": str(item.get("current_map") or ""),
                 "robot_status": str(item.get("robot_status") or ""),
+                "is_simulation": bool(item.get("is_simulation", False)),
                 "topic": str(item.get("topic") or ""),
                 "stamp_ns": int(item.get("stamp_ns") or 0),
                 "updated_at": float(item.get("updated_at") or 0.0),
@@ -71,6 +72,7 @@ def set_last_status(
     robot_name: str,
     current_map: str,
     robot_status: str,
+    is_simulation: bool = False,
     topic: str,
     stamp_ns: int,
 ) -> None:
@@ -84,6 +86,7 @@ def set_last_status(
             "robot_name": str(robot_name or rid),
             "current_map": str(current_map or ""),
             "robot_status": str(robot_status or ""),
+            "is_simulation": bool(is_simulation),
             "topic": str(topic or ""),
             "stamp_ns": int(stamp_ns or 0),
             "updated_at": time.time(),

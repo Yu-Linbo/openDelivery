@@ -196,6 +196,10 @@ body {
   border-color: rgba(51, 65, 85, 0.8);
 }
 
+.robot-presence-item--selected {
+  border-color: rgba(34, 197, 94, 0.7) !important;
+}
+
 .robot-presence-list__id {
   font-size: 12px;
   font-weight: 600;
@@ -206,6 +210,19 @@ body {
   font-size: 11px;
   color: var(--muted);
   margin-top: 2px;
+}
+
+.robot-presence-list__hint {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-top: 6px;
+  line-height: 1.45;
+  max-width: 220px;
+}
+
+.robot-presence-list__hint code {
+  font-size: 10px;
+  color: #cbd5e1;
 }
 
 .robot-presence-badge {
@@ -227,6 +244,40 @@ body {
   color: #fecaca;
   background: rgba(185, 28, 28, 0.2);
   border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.robot-presence-row__tail {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-sim-bringup {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(14, 165, 233, 0.15);
+  color: #bae6fd;
+  white-space: nowrap;
+}
+
+.btn-sim-bringup:hover:not(:disabled) {
+  border-color: rgba(34, 197, 94, 0.55);
+  color: #d1fae5;
+}
+
+.btn-sim-bringup:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-sim-bringup--offline {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(185, 28, 28, 0.2);
+  color: #fecaca;
 }
 
 .robot-presence-empty {
@@ -690,7 +741,7 @@ button {
 
 .ros-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 440px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -710,6 +761,22 @@ button {
   gap: 12px;
 }
 
+.ros-node-card--missing {
+  opacity: 0.68;
+}
+
+.ros-robot-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.ros-robot-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(17, 24, 39, 0.5);
+}
+
 .ros-node-card {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -718,6 +785,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  min-height: 190px;
+  overflow: hidden;
 }
 
 .ros-node-head {
@@ -754,10 +824,36 @@ button {
 .ros-node-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .ros-node-actions button {
-  flex: 1;
+  flex: 1 1 88px;
+  min-width: 88px;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.ros-node-controls {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ros-package-block {
+  border: 1px dashed rgba(71, 85, 105, 0.8);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.ros-package-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5e1;
+  margin: 0 0 8px;
 }
 
 .ros-create-form {
@@ -812,6 +908,90 @@ button {
   font-size: 13px;
   font-weight: 600;
   color: #93c5fd;
+}
+
+.ros-section-trace {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ros-node-head__titles {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ros-node-head__titles code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ros-node-comp-id {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.ros-node-comp-id code {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.ros-orchestration-hint {
+  margin: -4px 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ros-orchestration-hint code {
+  font-size: 10px;
+  color: #cbd5e1;
+}
+
+.ros-discovered-block {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(51, 65, 85, 0.85);
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.ros-discovered-block--empty {
+  border-style: dashed;
+  opacity: 0.92;
+}
+
+.ros-discovered-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #93c5fd;
+  margin-bottom: 6px;
+}
+
+.ros-discovered-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+
+.ros-discovered-list code {
+  font-size: 11px;
+  color: #e2e8f0;
+}
+
+.ros-discovered-empty {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .reloc-gazebo-hint {

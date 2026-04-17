@@ -66,7 +66,7 @@ from sensor_msgs.msg import LaserScan, Image
 from tf2_msgs.msg import TFMessage
 
 try:
-    # custom_msgs_srvs/RobotStatus: std_msgs/Header header + string robot_name
+    # custom_msgs_srvs/RobotStatus: header, robot_name, current_map, robot_status, is_simulation, ...
     from custom_msgs_srvs.msg import RobotStatus
 except Exception:  # noqa: BLE001
     RobotStatus = None
@@ -354,10 +354,12 @@ class OpenDeliveryTfBridgeNode(Node):
                 robot_name = str(getattr(msg, "robot_name", "") or rid).strip() or rid
                 current_map = str(getattr(msg, "current_map", "") or "").strip()
                 robot_status = str(getattr(msg, "robot_status", "") or "").strip()
+                is_simulation = bool(getattr(msg, "is_simulation", False))
                 payload = {
                     "robot_name": robot_name,
                     "current_map": current_map,
                     "robot_status": robot_status,
+                    "is_simulation": is_simulation,
                 }
                 self._robot_status_payload_by_id[rid] = payload
                 ros_robot_status_store.set_last_status(
@@ -365,6 +367,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     robot_name=robot_name,
                     current_map=current_map,
                     robot_status=robot_status,
+                    is_simulation=is_simulation,
                     topic=topic_name,
                     stamp_ns=last_ns,
                 )
@@ -415,6 +418,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "robot_name": str(last.get("robot_name") or rid),
                     "current_map": str(last.get("current_map") or ""),
                     "robot_status": str(last.get("robot_status") or ""),
+                    "is_simulation": bool(last.get("is_simulation", False)),
                 }
 
     def _discover_robot_status_topics(self) -> None:
@@ -500,6 +504,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
                     st.current_map = str(mn).strip()
                     st.robot_status = str(payload.get("robot_status") or "").strip()
+                    st.is_simulation = bool(payload.get("is_simulation", False))
                     self._robot_status_cmd_pubs[rid].publish(st)
                     self.get_logger().info(f"publish robot_status {rid} current_map -> {st.current_map!r}")
 
@@ -756,6 +761,7 @@ class OpenDeliveryTfBridgeNode(Node):
                 current_map = status_current_map
             robot_name = str(status_payload.get("robot_name") or name or rid)
             robot_status = str(status_payload.get("robot_status") or "").strip()
+            is_simulation = bool(status_payload.get("is_simulation", False))
             task_status = robot_status if robot_status else str(spec.get("task_status") or "Running")
             try:
                 tr = self._buffer.lookup_transform(mf, bf, Time(), timeout=Duration(seconds=0.05))
@@ -780,6 +786,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "robot_status": robot_status,
                         "robot_status_topic": robot_status_topic,
                         "heartbeat_online": hb_online,
+                        "is_simulation": is_simulation,
                     }
                 )
             except Exception as ex:  # noqa: BLE001
@@ -805,6 +812,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "robot_status": robot_status,
                         "robot_status_topic": robot_status_topic,
                         "heartbeat_online": hb_online,
+                        "is_simulation": is_simulation,
                     }
                 )
         try:

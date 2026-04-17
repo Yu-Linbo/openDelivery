@@ -76,20 +76,8 @@ const mapNameInput = document.getElementById("map-name-input");
 const btnSaveMap = document.getElementById("btn-save-map");
 const rosNodesSummary = document.getElementById("ros-nodes-summary");
 const rosNodesError = document.getElementById("ros-nodes-error");
-const rosNodesPersistentList = document.getElementById("ros-nodes-persistent");
-const rosNodesCreatedList = document.getElementById("ros-nodes-created");
-const rosNodesDiscoveredList = document.getElementById("ros-nodes-discovered");
+const rosRobotGroups = document.getElementById("ros-robot-groups");
 const btnRosNodesRefresh = document.getElementById("btn-ros-nodes-refresh");
-const rosNodeCreateForm = document.getElementById("ros-node-create-form");
-const rosNodeCreateTypeSelect = document.getElementById("ros-node-create-type");
-const rosNodeFieldsFakePub = document.getElementById("ros-node-fields-fake_pub");
-const rosNodeFieldsSlamMapping = document.getElementById(
-  "ros-node-fields-slam_bringup_mapping"
-);
-const rosNodeRobotName = document.getElementById("ros-node-robot-name");
-const rosNodeSlamRobotName = document.getElementById("ros-node-slam-robot-name");
-const rosNodeCurrentMap = document.getElementById("ros-node-current-map");
-const btnRosNodeCreate = document.getElementById("btn-ros-node-create");
 
 const SETTINGS_KEY = "robotSettings";
 const LOGS_KEY = "robotLogs";
@@ -117,6 +105,66 @@ let latestSnapshot = null;
 let robotStatusCacheItems = [];
 let robotPresencePanelOpen = false;
 let robotPresenceCacheTimer = null;
+let selectedPresenceRobotId = "";
+
+/** Per-robot: idle | starting | sim_online（仿真上线流程） */
+const simBringupPhaseByRobot = {};
+/** 刷新后短暂保留 sim_online；每次渲染会 prune：无 robot_status 心跳则清为 idle，避免离线仍显示「仿真离线」 */
+const SIM_BRINGUP_PHASE_STORAGE_KEY = "openDelivery_sim_bringup_phase_v1";
+
+function loadSimBringupPhasesFromSession() {
+  try {
+    const raw = sessionStorage.getItem(SIM_BRINGUP_PHASE_STORAGE_KEY);
+    const o = raw ? JSON.parse(raw) : {};
+    if (!o || typeof o !== "object") {
+      return;
+    }
+    Object.keys(o).forEach((id) => {
+      if (o[id] === "sim_online") {
+        simBringupPhaseByRobot[id] = "sim_online";
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+function persistSimBringupPhasesToSession() {
+  try {
+    const o = {};
+    Object.keys(simBringupPhaseByRobot).forEach((id) => {
+      if (simBringupPhaseByRobot[id] === "sim_online") {
+        o[id] = "sim_online";
+      }
+    });
+    sessionStorage.setItem(SIM_BRINGUP_PHASE_STORAGE_KEY, JSON.stringify(o));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 已无 robot_status 心跳时清掉 sim_online（含 session 残留），避免离线仍显示「仿真离线」 */
+function pruneStaleSimOnlinePhaseIfNeeded(rid) {
+  if (!rid || simShutdownBusyByRobot[rid]) {
+    return false;
+  }
+  if (simBringupPhaseByRobot[rid] !== "sim_online") {
+    return false;
+  }
+  const rows = mergePresenceRows();
+  const row = rows.find((x) => x.id === rid);
+  if (!row || !row.online) {
+    simBringupPhaseByRobot[rid] = "idle";
+    return true;
+  }
+  return false;
+}
+
+/** 全局仅允许一台机器人处于「上线中」 */
+let simBringupGlobalStartingId = "";
+const simShutdownBusyByRobot = {};
+/** 仿真离线成功后，按钮短暂显示「离线」直到该时间戳（ms） */
+const simPostOfflineButtonUntilByRobot = {};
 
 /** Per-robot overlays from REST (map frame) */
 const latestScanByRobot = {};
@@ -234,8 +282,8 @@ function addFloorOptions() {
   });
 }
 
-async function fetchJson(path) {
-  const res = await fetch(path);
+async function fetchJson(path, options = undefined) {
+  const res = await fetch(path, options);
   if (!res.ok) {
     throw new Error(`请求失败: ${path} (${res.status})`);
   }
@@ -331,8 +379,24 @@ async function fetchJsonOptional(path) {
 }
 
 async function fetchFloors() {
-  const data = await fetchJson(`${API_BASE_URL}/api/floors`);
+  const ts = Date.now();
+  const data = await fetchJson(`${API_BASE_URL}/api/floors?_=${ts}`, {
+    cache: "no-store",
+  });
   floors = Array.isArray(data.floors) ? data.floors : [];
+}
+
+async function refreshFloorOptionsPreserveSelection() {
+  const prev = floorSelect ? String(floorSelect.value || "") : "";
+  await fetchFloors();
+  addFloorOptions();
+  if (floorSelect) {
+    if (prev && floors.includes(prev)) {
+      floorSelect.value = prev;
+    } else if (activeFloor && floors.includes(activeFloor)) {
+      floorSelect.value = activeFloor;
+    }
+  }
 }
 
 function parseYaml(text) {
@@ -675,11 +739,11 @@ function saveMapNamePreference(v) {
 }
 
 async function fetchRosNodesStatus() {
-  // Avoid hanging fetch when ROS discovery blocks.
+  // Debug view: backend aggregates node list + lifecycle capability.
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 900);
+  const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
-    const res = await fetch(`${API_BASE_URL}/api/ros/nodes/status`, { signal: ctrl.signal });
+    const res = await fetch(`${API_BASE_URL}/api/ros/debug/nodes`, { signal: ctrl.signal });
     if (res.status === 404) {
       return null;
     }
@@ -694,11 +758,11 @@ async function fetchRosNodesStatus() {
   }
 }
 
-async function controlRosNode(nodeId, action) {
-  const res = await fetch(`${API_BASE_URL}/api/ros/nodes/control`, {
+async function transitionLifecycle(robotId, component, transition) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/lifecycle/transition`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ node_id: nodeId, action }),
+    body: JSON.stringify({ robot_id: robotId, component, transition }),
   });
   let payload = {};
   try {
@@ -712,11 +776,11 @@ async function controlRosNode(nodeId, action) {
   return payload;
 }
 
-async function createRosNode(nodeType, params) {
-  const res = await fetch(`${API_BASE_URL}/api/ros/nodes/create`, {
+async function setNodeLifecycle(nodeName, transition) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/debug/nodes/lifecycle_set`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: nodeType, ...(params || {}) }),
+    body: JSON.stringify({ node_name: nodeName, transition }),
   });
   let payload = {};
   try {
@@ -748,103 +812,265 @@ async function killDiscoveredRosNode(nodeName) {
   return payload;
 }
 
+async function startupSelectedRobot(robotId, simMode = "sim") {
+  const res = await fetch(`${API_BASE_URL}/api/ros/lifecycle/startup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ robot_id: robotId, sim_mode: simMode }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `请求失败 (${res.status})`);
+  }
+  return payload;
+}
+
+async function shutdownSelectedRobot(robotId) {
+  const res = await fetch(`${API_BASE_URL}/api/ros/lifecycle/shutdown`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ robot_id: robotId }),
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(payload.error || `请求失败 (${res.status})`);
+  }
+  return payload;
+}
+
+async function runSimBringupForRobot(rid) {
+  if (!rid) {
+    return;
+  }
+  const backendOwnedPresence = robotStatusCacheItems.some((x) => x && x.id && x.sim_button);
+  if (pruneStaleSimOnlinePhaseIfNeeded(rid)) {
+    persistSimBringupPhasesToSession();
+  }
+  if (
+    !backendOwnedPresence &&
+    (simBringupPhaseByRobot[rid] === "starting" || simBringupPhaseByRobot[rid] === "sim_online")
+  ) {
+    return;
+  }
+  if (!backendOwnedPresence && simBringupGlobalStartingId) {
+    return;
+  }
+  delete simPostOfflineButtonUntilByRobot[rid];
+  simBringupPhaseByRobot[rid] = "starting";
+  simBringupGlobalStartingId = rid;
+  renderRobotPresencePanel();
+  try {
+    await startupSelectedRobot(rid, "sim");
+    // Backend may mark robot_status as mapping quickly; refresh floor labels early.
+    try {
+      await refreshFloorOptionsPreserveSelection();
+    } catch {
+      /* ignore */
+    }
+    // API 仅触发 sim_bringup.sh；按钮保持「仿真上线...」直到 /{id}/robot_status 心跳在线（见 renderRobotPresencePanel）
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await fetchRobotStatusCache();
+      try {
+        latestSnapshot = await fetchJson(`${API_BASE_URL}/api/robot/pose`);
+      } catch {
+        /* ignore */
+      }
+      renderRobotPresencePanel();
+      const rows = mergePresenceRows();
+      const row = rows.find((x) => x.id === rid);
+      if (row && row.online) {
+        try {
+          await refreshFloorOptionsPreserveSelection();
+        } catch {
+          /* ignore */
+        }
+        appendLog(`仿真 ${rid}：已收到 /${rid}/robot_status`);
+        break;
+      }
+      if (simBringupPhaseByRobot[rid] !== "starting") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    if (simBringupPhaseByRobot[rid] === "starting") {
+      simBringupPhaseByRobot[rid] = "idle";
+      appendLog(
+        `仿真 ${rid}：120s 内未收到 robot_status，已恢复按钮；请查看 backend/logs/managed_${rid}.log 与 sim_bringup.sh 日志`
+      );
+    }
+  } catch (e) {
+    simBringupPhaseByRobot[rid] = "idle";
+    throw e;
+  } finally {
+    simBringupGlobalStartingId = "";
+    renderRobotPresencePanel();
+    refreshRosNodesStatus().catch(() => {});
+  }
+}
+
 function renderRosNodesStatus(data) {
-  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesDiscoveredList || !rosNodesSummary) {
+  if (!rosRobotGroups || !rosNodesSummary) {
     return;
   }
 
   if (!data) {
     rosNodesSummary.textContent = "状态: 无法连接后端";
-    rosNodesPersistentList.innerHTML = "";
-    rosNodesCreatedList.innerHTML = "";
-    rosNodesDiscoveredList.innerHTML = "";
+    rosRobotGroups.innerHTML = "";
     return;
   }
 
-  const managed = Array.isArray(data.managed_nodes) ? data.managed_nodes : [];
-  const persistentNodes = managed.filter((n) => !!n.persistent);
-  const createdNodes = managed.filter((n) => !n.persistent);
-  const discovered = Array.isArray(data.discovered_nodes) ? data.discovered_nodes : [];
-  const running = managed.filter((n) => n.running).length;
-
-  rosNodesSummary.textContent = `受管节点: ${running}/${managed.length} 运行中 · ROS发现节点: ${discovered.length}`;
-
-  const renderInto = (listEl, nodes) => {
-    listEl.innerHTML = "";
-    nodes.forEach((node) => {
-      const card = document.createElement("article");
-      card.className = "ros-node-card";
-      const statusClass = node.running ? "running" : "stopped";
-      card.innerHTML = `
-        <div class="ros-node-head">
-          <strong>${node.name || node.id}</strong>
-          <span class="ros-node-badge ${statusClass}">${
-            node.running ? "运行中" : "已停止"
-          }</span>
-        </div>
-        <div class="ros-node-meta">ID: ${
-          node.id
-        } · 进程: ${node.process_count || 0}${
-        node.note ? ` · ${node.note}` : ""
-      }</div>
-        <div class="ros-node-actions">
-          <button type="button" data-node-action="pause" data-node-id="${
-            node.id
-          }">暂停</button>
-          <button type="button" data-node-action="restart" data-node-id="${
-            node.id
-          }">重启</button>
-        </div>
-      `;
-      listEl.appendChild(card);
-    });
+  const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  const packageLabel = {
+    simulate: "仿真",
+    slam: "slam",
+    system: "system",
+    nav2: "navigation",
+    other: "other",
+  };
+  const classifyRobot = (nodeName) => {
+    const m = String(nodeName || "").match(/^\/([^/]+)\//);
+    if (!m) return "system";
+    const rid = String(m[1] || "").trim();
+    if (/^robot[0-9a-z_-]*$/i.test(rid)) return rid;
+    return "system";
+  };
+  const classifyPackage = (nodeName) => {
+    const n = String(nodeName || "");
+    if (n.includes("/slam_bringup/")) return "slam";
+    if (
+      n.includes("/bt_navigator") ||
+      n.includes("/planner_server") ||
+      n.includes("/controller_server") ||
+      n.includes("/recoveries_server") ||
+      n.includes("/waypoint_follower") ||
+      n.includes("/costmap") ||
+      n.includes("/lifecycle_manager_navigation")
+    ) {
+      return "nav2";
+    }
+    if (
+      n.includes("/simulate/") ||
+      n.includes("/diff_drive_controller") ||
+      n.includes("/laser_controller") ||
+      n.includes("/imu_plugin") ||
+      n.includes("/camera_controller")
+    ) {
+      return "simulate";
+    }
+    if (n.includes("/heartbeat")) return "system";
+    return "other";
   };
 
-  renderInto(rosNodesPersistentList, persistentNodes);
-  renderInto(rosNodesCreatedList, createdNodes);
+  const robotMap = new Map();
+  nodes.forEach((n) => {
+    const name = String(n && n.name ? n.name : "").trim();
+    if (!name) return;
+    const rid = classifyRobot(name);
+    const pkg = classifyPackage(name);
+    if (!robotMap.has(rid)) {
+      robotMap.set(rid, { id: rid, packages: new Map(), count: 0 });
+    }
+    const g = robotMap.get(rid);
+    if (!g.packages.has(pkg)) g.packages.set(pkg, []);
+    g.packages.get(pkg).push(n);
+    g.count += 1;
+  });
+  const robotGroups = Array.from(robotMap.values()).sort((a, b) => a.id.localeCompare(b.id));
+  rosNodesSummary.textContent = `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length}`;
 
-  rosNodesDiscoveredList.innerHTML = "";
-  discovered
-    .map((node) => {
-      if (typeof node === "string") {
-        return { name: node, running: true };
-      }
-      return node || {};
-    })
-    .forEach((node) => {
-    const card = document.createElement("article");
-    card.className = "ros-node-card";
-    const nodeName = String(node && node.name ? node.name : "");
-    const running = node && node.running !== false;
-    const statusClass = running ? "running" : "stopped";
-    card.innerHTML = `
-      <div class="ros-node-head">
-        <strong>${nodeName || "(unknown)"}</strong>
-        <span class="ros-node-badge ${statusClass}">${running ? "发现中" : "离线"}</span>
-      </div>
-      <div class="ros-node-meta">来源: ros2 node list（只读，非受管）</div>
-      <div class="ros-node-actions">
-        <button
-          type="button"
-          data-discovered-kill="1"
-          data-node-name="${nodeName}"
-          ${nodeName ? "" : "disabled"}
-        >Kill</button>
-      </div>
+  const renderNodeCard = (n) => {
+    const name = String(n && n.name ? n.name : "");
+    const lifecycle = n && n.lifecycle ? n.lifecycle : {};
+    const lcAvailable = !!lifecycle.available;
+    const lcState = String(lifecycle.state || (lcAvailable ? "unknown" : "missing"));
+    const statusClass = n && n.running ? "running" : "stopped";
+    const transitions = Array.isArray(n && n.lifecycle_transitions) ? n.lifecycle_transitions : [];
+    const lcButtons = transitions
+      .map(
+        (t) =>
+          `<button type="button" data-node-lifecycle="1" data-node-name="${escapeHtml(
+            name
+          )}" data-transition="${escapeHtml(t)}"${lcAvailable ? "" : " disabled"}>${escapeHtml(
+            t
+          )}</button>`
+      )
+      .join("");
+    const killDisabled = !(n && n.can_kill);
+    const lifecycleMeta = transitions.length
+      ? `<div class="ros-node-meta">Lifecycle: <code>${escapeHtml(lcState)}</code> ${
+          lcAvailable ? "" : "（不可用）"
+        }</div>`
+      : `<div class="ros-node-meta">Lifecycle: <code>n/a</code>（该模块暂不开放）</div>`;
+    const lifecycleActions = transitions.length
+      ? `<div class="ros-node-actions">
+          ${lcButtons || '<button type="button" disabled>lifecycle 不可用</button>'}
+        </div>`
+      : "";
+    return `
+      <article class="ros-node-card ${n && n.running ? "" : "ros-node-card--missing"}">
+        <div class="ros-node-head">
+          <div class="ros-node-head__titles">
+            <strong><code>${escapeHtml(name)}</code></strong>
+          </div>
+          <span class="ros-node-badge ${statusClass}">${n && n.running ? "运行中" : "未运行"}</span>
+        </div>
+        ${lifecycleMeta}
+        <div class="ros-node-controls">
+          ${lifecycleActions}
+          <div class="ros-node-actions">
+            <button type="button" data-node-kill="1" data-node-name="${escapeHtml(name)}"${
+      killDisabled ? " disabled" : ""
+    }>kill</button>
+          </div>
+        </div>
+      </article>
     `;
-    rosNodesDiscoveredList.appendChild(card);
-    });
+  };
+
+  rosRobotGroups.innerHTML = robotGroups
+    .map((group) => {
+      const pkgOrder = ["simulate", "slam", "system", "nav2", "other"];
+      const pkgBlocks = pkgOrder
+        .filter((k) => group.packages.has(k))
+        .map((k) => {
+          const items = group.packages.get(k) || [];
+          return `
+            <div class="ros-package-block">
+              <div class="ros-package-title">${escapeHtml(packageLabel[k] || k)} · ${items.length}</div>
+              <div class="ros-nodes-list">
+                ${items.map(renderNodeCard).join("")}
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+      return `
+        <section class="ros-robot-group">
+          <div class="ros-section-title">
+            ${escapeHtml(group.id)}
+            <span class="ros-section-trace"> · ${group.count} nodes</span>
+          </div>
+          ${pkgBlocks || '<div class="ros-node-meta">暂无节点</div>'}
+        </section>
+      `;
+    })
+    .join("");
 }
 
 function setRosNodeButtonsDisabled(disabled) {
-  const lists = [rosNodesPersistentList, rosNodesCreatedList].filter(Boolean);
-  lists.forEach((listEl) => {
-    listEl.querySelectorAll("button[data-node-action]").forEach((b) => {
-      b.disabled = disabled;
-    });
-  });
-  if (rosNodesDiscoveredList) {
-    rosNodesDiscoveredList.querySelectorAll("button[data-discovered-kill]").forEach((b) => {
+  if (rosRobotGroups) {
+    rosRobotGroups.querySelectorAll("button[data-node-lifecycle], button[data-node-kill]").forEach((b) => {
       b.disabled = disabled;
     });
   }
@@ -862,7 +1088,7 @@ async function refreshRosNodesStatus() {
 }
 
 function initRosNodesPage() {
-  if (!rosNodesPersistentList || !rosNodesCreatedList || !rosNodesDiscoveredList) {
+  if (!rosRobotGroups) {
     return;
   }
   if (btnRosNodesRefresh) {
@@ -874,148 +1100,38 @@ function initRosNodesPage() {
       });
     });
   }
-
-  const bindNodeActions = (listEl) => {
-    if (!listEl) {
-      return;
-    }
-    listEl.addEventListener("click", async (ev) => {
-      const btn = ev.target.closest("button[data-node-action]");
-      if (!btn) {
-        return;
-      }
-      const nodeId = btn.dataset.nodeId;
-      const action = btn.dataset.nodeAction;
-      if (!nodeId || !action) {
-        return;
-      }
-      setRosNodeButtonsDisabled(true);
-      if (rosNodesError) {
-        rosNodesError.textContent = "";
-      }
-      try {
-        await controlRosNode(nodeId, action);
-        appendLog(`ROS节点 ${nodeId} ${action} 成功`);
-      } catch (err) {
-        if (rosNodesError) {
-          rosNodesError.textContent = err.message || String(err);
-        }
-        appendLog(`ROS节点 ${nodeId} ${action} 失败: ${err.message || err}`);
-      } finally {
-        setRosNodeButtonsDisabled(false);
-        refreshRosNodesStatus().catch(() => {});
-      }
-    });
-  };
-  bindNodeActions(rosNodesPersistentList);
-  bindNodeActions(rosNodesCreatedList);
-  rosNodesDiscoveredList.addEventListener("click", async (ev) => {
-    const btn = ev.target.closest("button[data-discovered-kill]");
-    if (!btn) {
-      return;
-    }
-    const nodeName = String(btn.dataset.nodeName || "").trim();
-    if (!nodeName) {
-      return;
-    }
-    const yes = window.confirm(`确认 Kill 节点 ${nodeName} ?`);
-    if (!yes) {
-      return;
-    }
+  rosRobotGroups.addEventListener("click", async (ev) => {
+    const lifeBtn = ev.target.closest("button[data-node-lifecycle]");
+    const killBtn = ev.target.closest("button[data-node-kill]");
+    if (!lifeBtn && !killBtn) return;
     setRosNodeButtonsDisabled(true);
     if (rosNodesError) {
       rosNodesError.textContent = "";
     }
     try {
-      await killDiscoveredRosNode(nodeName);
-      appendLog(`Kill discovered 节点 ${nodeName} 请求已发送`);
+      if (lifeBtn) {
+        const nodeName = String(lifeBtn.dataset.nodeName || "").trim();
+        const transition = String(lifeBtn.dataset.transition || "").trim();
+        if (!nodeName || !transition) return;
+        await setNodeLifecycle(nodeName, transition);
+        appendLog(`${nodeName} -> ${transition} 成功`);
+      } else if (killBtn) {
+        const nodeName = String(killBtn.dataset.nodeName || "").trim();
+        if (!nodeName) return;
+        await killDiscoveredRosNode(nodeName);
+        appendLog(`kill ${nodeName} 成功`);
+      }
     } catch (err) {
       if (rosNodesError) {
         rosNodesError.textContent = err.message || String(err);
       }
-      appendLog(`Kill discovered 节点失败: ${err.message || err}`);
+      appendLog(`ROS 调试操作失败: ${err.message || err}`);
     } finally {
       setRosNodeButtonsDisabled(false);
       refreshRosNodesStatus().catch(() => {});
     }
   });
-
   refreshRosNodesStatus().catch(() => {});
-  if (rosNodeCreateForm) {
-    rosNodeCreateForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-
-      const nodeType = rosNodeCreateTypeSelect ? rosNodeCreateTypeSelect.value : "";
-      if (!nodeType) {
-        if (rosNodesError) {
-          rosNodesError.textContent = "请选择节点类型";
-        }
-        return;
-      }
-
-      let params = {};
-      if (nodeType === "fake_pub") {
-        const rn = (rosNodeRobotName && rosNodeRobotName.value ? rosNodeRobotName.value : "")
-          .trim();
-        const cm = (rosNodeCurrentMap && rosNodeCurrentMap.value ? rosNodeCurrentMap.value : "")
-          .trim();
-        if (!rn || !cm) {
-          if (rosNodesError) {
-            rosNodesError.textContent = "请填写 robot_name 与初始楼层 id";
-          }
-          return;
-        }
-        params = { robot_name: rn, initial_floor: cm };
-      } else if (nodeType === "slam_bringup_mapping") {
-        const rn = (
-          rosNodeSlamRobotName && rosNodeSlamRobotName.value
-            ? rosNodeSlamRobotName.value
-            : ""
-        ).trim();
-        params = { robot_name: rn || "sim_robot" };
-      }
-
-      if (btnRosNodeCreate) {
-        btnRosNodeCreate.disabled = true;
-      }
-      if (rosNodesError) {
-        rosNodesError.textContent = "";
-      }
-
-      try {
-        const payload = await createRosNode(nodeType, params);
-        appendLog(`创建节点 ${payload.node_id || ""} 并启动`);
-        await refreshRosNodesStatus();
-      } catch (err) {
-        if (rosNodesError) {
-          rosNodesError.textContent = err.message || String(err);
-        }
-        appendLog(`创建节点失败: ${err.message || err}`);
-      } finally {
-        if (btnRosNodeCreate) {
-          btnRosNodeCreate.disabled = false;
-        }
-      }
-    });
-
-    const syncFields = () => {
-      const nodeType = rosNodeCreateTypeSelect ? rosNodeCreateTypeSelect.value : "";
-      const showFake = nodeType === "fake_pub";
-      if (rosNodeFieldsFakePub) {
-        rosNodeFieldsFakePub.style.display = showFake ? "" : "none";
-      }
-      if (rosNodeFieldsSlamMapping) {
-        rosNodeFieldsSlamMapping.style.display = showFake ? "none" : "";
-      }
-    };
-
-    if (rosNodeFieldsFakePub && rosNodeFieldsSlamMapping) {
-      syncFields();
-      if (rosNodeCreateTypeSelect) {
-        rosNodeCreateTypeSelect.addEventListener("change", () => syncFields());
-      }
-    }
-  }
   if (rosNodesPollTimer) {
     clearInterval(rosNodesPollTimer);
   }
@@ -1230,6 +1346,25 @@ async function fetchRobotStatusCache() {
 }
 
 function mergePresenceRows() {
+  if (robotStatusCacheItems.length > 0 && robotStatusCacheItems.some((x) => x && x.id)) {
+    const rows = robotStatusCacheItems
+      .map((it) => {
+        const id = String((it && it.id) || "").trim();
+        if (!id) return null;
+        return {
+          id,
+          name: String((it && it.name) || id),
+          floor: String((it && it.floor) || ""),
+          online: !!(it && it.online),
+          persistedRobotStatus: String((it && it.persisted_robot_status) || "").trim(),
+          persistedIsSim: !!(it && it.persisted_is_simulation),
+          simButton: it && it.sim_button ? it.sim_button : null,
+        };
+      })
+      .filter(Boolean);
+    rows.sort((a, b) => a.id.localeCompare(b.id));
+    return rows;
+  }
   const live =
     latestSnapshot && Array.isArray(latestSnapshot.robots) ? latestSnapshot.robots : [];
   const liveById = new Map(live.map((r) => [String(r.id), r]));
@@ -1251,7 +1386,16 @@ function mergePresenceRows() {
       (liveR && snapshotRobotFloor(liveR)) ||
       (cache && String(cache.current_map || "").trim()) ||
       "";
-    rows.push({ id, name, floor, online });
+    const persistedRobotStatus = cache ? String(cache.robot_status || "").trim() : "";
+    const persistedIsSim = !!(cache && cache.is_simulation);
+    rows.push({
+      id,
+      name,
+      floor,
+      online,
+      persistedRobotStatus,
+      persistedIsSim,
+    });
   });
   rows.sort((a, b) => a.id.localeCompare(b.id));
   return rows;
@@ -1289,24 +1433,115 @@ function renderRobotPresencePanel() {
     return;
   }
   robotPresenceEmpty.hidden = true;
+  const nowMs = Date.now();
+  Object.keys(simPostOfflineButtonUntilByRobot).forEach((k) => {
+    if (simPostOfflineButtonUntilByRobot[k] <= nowMs) {
+      delete simPostOfflineButtonUntilByRobot[k];
+    }
+  });
+  rows.forEach((r) => {
+    if (r.simButton) {
+      return;
+    }
+    const id = r.id;
+    if (r.online) {
+      delete simPostOfflineButtonUntilByRobot[id];
+    }
+    if (simBringupPhaseByRobot[id] === "starting" && r.online) {
+      simBringupPhaseByRobot[id] = "sim_online";
+      if (simBringupGlobalStartingId === id) {
+        simBringupGlobalStartingId = "";
+      }
+    }
+    // sessionStorage 可能残留 sim_online；当前已无 /…/robot_status 时不应再显示「仿真离线」
+    pruneStaleSimOnlinePhaseIfNeeded(id);
+  });
   robotPresenceList.innerHTML = rows
     .map((r) => {
+      const selectedCls = selectedPresenceRobotId === r.id ? " robot-presence-item--selected" : "";
       const badge = r.online
         ? '<span class="robot-presence-badge robot-presence-badge--online">在线</span>'
         : '<span class="robot-presence-badge robot-presence-badge--offline">离线</span>';
       const floorLine = r.floor
         ? `<div class="robot-presence-list__meta">${escapeHtml(r.floor)}</div>`
         : "";
-      return `<li>
+      let historyLine = "";
+      if (r.persistedRobotStatus) {
+        const simTag = r.persistedIsSim ? " · 上次仿真" : "";
+        const rs = escapeHtml(r.persistedRobotStatus);
+        const mapHint =
+          String(r.persistedRobotStatus).toLowerCase() === "mapping"
+            ? " · 仿真上线将尝试自动拉起建图"
+            : " · 建图需在 ROS 页手动 start";
+        historyLine = `<div class="robot-presence-list__hint">历史 robot_status: <code>${rs}</code>${simTag}${mapHint}</div>`;
+      }
+      const phase = simBringupPhaseByRobot[r.id] || "idle";
+      let simLabel = "仿真上线";
+      let simAction = "bringup";
+      let simDisabled = false;
+      let simTitle = "";
+      let simExtraClass = "";
+      if (r.simButton) {
+        const sb = r.simButton || {};
+        simLabel = String(sb.label || simLabel);
+        simAction = String(sb.action || simAction);
+        simDisabled = !!sb.disabled;
+        simTitle = String(sb.title || "");
+        simExtraClass = sb.extra_class ? ` ${String(sb.extra_class)}` : "";
+      } else if (phase === "starting") {
+        simLabel = "仿真上线...";
+        simAction = "pending";
+        simDisabled = true;
+      } else if (phase === "sim_online") {
+        simExtraClass = " btn-sim-bringup--offline";
+        if (simShutdownBusyByRobot[r.id]) {
+          simLabel = "仿真离线...";
+          simAction = "pending";
+          simDisabled = true;
+        } else {
+          simLabel = "仿真离线";
+          simAction = "shutdown";
+          simDisabled = false;
+        }
+      } else if (phase === "idle" && r.online) {
+        simLabel = "仿真上线";
+        simAction = "bringup";
+        simDisabled = true;
+        simTitle = "已检测到 /…/robot_status，避免重复上线";
+      } else if (
+        phase === "idle" &&
+        !r.online &&
+        simPostOfflineButtonUntilByRobot[r.id] &&
+        nowMs < simPostOfflineButtonUntilByRobot[r.id]
+      ) {
+        simLabel = "离线";
+        simAction = "pending";
+        simDisabled = true;
+        simExtraClass = " btn-sim-bringup--offline";
+      } else if (phase === "idle" && !r.online && simBringupGlobalStartingId && simBringupGlobalStartingId !== r.id) {
+        simDisabled = true;
+        simTitle = "另一台机器人正在仿真上线中";
+      }
+      const simBtn = `<button type="button" class="btn-sim-bringup${simExtraClass}" data-sim-bringup="1" data-sim-action="${simAction}" data-robot-id="${escapeHtml(
+        r.id
+      )}"${simDisabled ? " disabled" : ""}${simTitle ? ` title="${escapeHtml(simTitle)}"` : ""}>${escapeHtml(
+        simLabel
+      )}</button>`;
+      return `<li class="${selectedCls.trim()}" data-presence-robot-id="${escapeHtml(r.id)}">
         <div>
           <div class="robot-presence-list__id">${escapeHtml(r.name)}</div>
           <div class="robot-presence-list__meta">${escapeHtml(r.id)}</div>
           ${floorLine}
+          ${historyLine}
         </div>
-        ${badge}
+        <div class="robot-presence-row__tail">
+          ${badge}
+          ${simBtn}
+        </div>
       </li>`;
     })
     .join("");
+  persistSimBringupPhasesToSession();
 }
 
 function setRobotPresenceOpen(open) {
@@ -1360,6 +1595,58 @@ function initRobotPresenceUi() {
     }
   });
   updateRobotPresenceTriggerSummary();
+  if (robotPresenceList) {
+    robotPresenceList.addEventListener("click", async (ev) => {
+      const simBtn = ev.target.closest("button[data-sim-bringup]");
+      if (simBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const rid = String(simBtn.dataset.robotId || "").trim();
+        const action = String(simBtn.dataset.simAction || "").trim();
+        if (!rid || simBtn.disabled) {
+          return;
+        }
+        if (action === "pending") {
+          return;
+        }
+        if (action === "shutdown") {
+          if (simShutdownBusyByRobot[rid]) {
+            return;
+          }
+          simShutdownBusyByRobot[rid] = true;
+          renderRobotPresencePanel();
+          try {
+            await shutdownSelectedRobot(rid);
+            simBringupPhaseByRobot[rid] = "idle";
+            simPostOfflineButtonUntilByRobot[rid] = Date.now() + 4000;
+            appendLog(`仿真离线 ${rid} 完成`);
+          } catch (err) {
+            appendLog(`仿真离线失败: ${err.message || err}`);
+          } finally {
+            simShutdownBusyByRobot[rid] = false;
+            renderRobotPresencePanel();
+            refreshRosNodesStatus().catch(() => {});
+          }
+          return;
+        }
+        if (action === "bringup") {
+          try {
+            await runSimBringupForRobot(rid);
+          } catch (err) {
+            appendLog(`仿真上线失败: ${err.message || err}`);
+            renderRobotPresencePanel();
+          }
+        }
+        return;
+      }
+      const li = ev.target.closest("li[data-presence-robot-id]");
+      if (!li) {
+        return;
+      }
+      selectedPresenceRobotId = String(li.dataset.presenceRobotId || "").trim();
+      renderRobotPresencePanel();
+    });
+  }
 }
 
 function getRobotsOnCurrentMap() {
@@ -2745,6 +3032,7 @@ function initGazeboPage() {
 async function bootstrap() {
   initSettings();
   initLogs();
+  loadSimBringupPhasesFromSession();
   initRosNodesPage();
   initRobotPresenceUi();
   fetchRobotStatusCache()

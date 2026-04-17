@@ -26,6 +26,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("current_map", default_value="nh_102"),
             DeclareLaunchArgument("robot_status", default_value="normal"),
+            DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument(
                 "mapping_mode",
                 default_value="false",
@@ -45,6 +46,7 @@ def generate_launch_description():
                                 "robot_name": LaunchConfiguration("namespace"),
                                 "current_map": LaunchConfiguration("current_map"),
                                 "robot_status": LaunchConfiguration("robot_status"),
+                                "sim_mode": LaunchConfiguration("sim_mode"),
                                 "mapping_mode": LaunchConfiguration("mapping_mode"),
                                 "publish_rate": LaunchConfiguration("publish_rate"),
                             }

@@ -22,6 +22,7 @@ from ros_sensor_store import (
     get_scan,
     get_topdown_image,
 )
+from robot_lifecycle import RobotLifecycleOrchestrator
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -386,14 +387,56 @@ class RosNodeManager:
         if not start_cmd:
             raise RuntimeError(f"node {node_id} has no start_cmd")
         full_cmd = self._bash_prefix() + start_cmd
-        proc = subprocess.Popen(
-            ["bash", "-lc", full_cmd],
-            cwd=str(self._root_dir),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=os.environ.copy(),
-            preexec_fn=os.setsid,
-        )
+        log_dir = _BACKEND_DIR / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            log_dir = None
+        log_fp = None
+        log_path = None
+        if log_dir is not None:
+            safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(node_id))[:120] or "node"
+            log_path = log_dir / f"managed_{safe_id}.log"
+            try:
+                log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
+                log_fp.write(
+                    f"\n--- managed start {time.strftime('%Y-%m-%d %H:%M:%S')} node_id={node_id!r} ---\n"
+                )
+                log_fp.write(full_cmd + "\n")
+                log_fp.flush()
+            except OSError:
+                if log_fp:
+                    try:
+                        log_fp.close()
+                    except OSError:
+                        pass
+                log_fp = None
+                log_path = None
+        if log_path:
+            print(
+                f"[RosNodeManager] starting managed node id={node_id!r} log={log_path}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[RosNodeManager] starting managed node id={node_id!r} (no log file)",
+                flush=True,
+            )
+        try:
+            proc = subprocess.Popen(
+                ["bash", "-lc", full_cmd],
+                cwd=str(self._root_dir),
+                stdout=log_fp if log_fp else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if log_fp else subprocess.DEVNULL,
+                env=os.environ.copy(),
+                preexec_fn=os.setsid,
+            )
+        finally:
+            if log_fp:
+                try:
+                    log_fp.close()
+                except OSError:
+                    pass
         with self._lock:
             self._procs[node_id] = proc
 
@@ -427,7 +470,7 @@ class RosNodeManager:
                 ["bash", "-lc", cmd],
                 capture_output=True,
                 text=True,
-                timeout=0.8,
+                timeout=4.0,
                 env=os.environ.copy(),
             )
             if proc.returncode != 0:
@@ -538,20 +581,9 @@ def _list_mapping_floor_labels() -> list:
         from ros_tf_bridge import _load_robot_specs, list_mapping_robot_ids_from_status_store
 
         ids = [str(s["id"]) for s in _load_robot_specs()]
-        # Mapping floors: robot_status store says "mapping", entry is fresh, and (when
-        # pose snapshot lists robots) the id is still present on the ROS bridge output.
+        # Mapping floors: follow persisted robot_status store directly.
+        # Do not gate by transient live pose list, so robot*_mapping appears immediately.
         mapping_ids = set(list_mapping_robot_ids_from_status_store())
-        try:
-            snap = POSE_PROVIDER.get_pose()
-            if snap.get("source") == "ros2_tf":
-                live_ids = set()
-                for r in snap.get("robots") or []:
-                    if isinstance(r, dict) and r.get("id"):
-                        live_ids.add(str(r["id"]).strip())
-                if live_ids:
-                    mapping_ids &= live_ids
-        except Exception:
-            pass
         if mapping_ids:
             ids = [rid for rid in ids if rid in mapping_ids] + [
                 rid for rid in sorted(mapping_ids) if rid not in ids
@@ -865,6 +897,275 @@ class RobotPoseProvider:
 
 POSE_PROVIDER = RobotPoseProvider()
 ROS_NODE_MANAGER = RosNodeManager(ROOT_DIR)
+ROBOT_LIFECYCLE = RobotLifecycleOrchestrator(ROOT_DIR, ROS_NODE_MANAGER)
+
+
+class SimPresenceState:
+    """Backend-owned sim button phase table."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._phase_by_robot = {}
+        self._post_offline_until_ms = {}
+        self._shutdown_busy = {}
+        self._global_starting_robot = ""
+
+    def mark_starting(self, rid: str) -> None:
+        with self._lock:
+            self._phase_by_robot[rid] = "starting"
+            self._global_starting_robot = rid
+            self._post_offline_until_ms.pop(rid, None)
+
+    def mark_start_failed(self, rid: str) -> None:
+        with self._lock:
+            self._phase_by_robot[rid] = "idle"
+            if self._global_starting_robot == rid:
+                self._global_starting_robot = ""
+
+    def mark_online_by_status(self, rid: str) -> None:
+        with self._lock:
+            self._phase_by_robot[rid] = "sim_online"
+            if self._global_starting_robot == rid:
+                self._global_starting_robot = ""
+
+    def mark_shutdown_busy(self, rid: str, busy: bool) -> None:
+        with self._lock:
+            self._shutdown_busy[rid] = bool(busy)
+
+    def mark_shutdown_done(self, rid: str) -> None:
+        with self._lock:
+            self._shutdown_busy[rid] = False
+            self._phase_by_robot[rid] = "idle"
+            self._post_offline_until_ms[rid] = int(time.time() * 1000) + 4000
+            if self._global_starting_robot == rid:
+                self._global_starting_robot = ""
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "phase_by_robot": dict(self._phase_by_robot),
+                "post_offline_until_ms": dict(self._post_offline_until_ms),
+                "shutdown_busy": dict(self._shutdown_busy),
+                "global_starting_robot": self._global_starting_robot,
+                "now_ms": int(time.time() * 1000),
+            }
+
+    def apply_liveness(self, rows: list) -> None:
+        with self._lock:
+            now_ms = int(time.time() * 1000)
+            for rid, until in list(self._post_offline_until_ms.items()):
+                if until <= now_ms:
+                    self._post_offline_until_ms.pop(rid, None)
+            online_by_id = {str(r.get("id")): bool(r.get("online")) for r in rows}
+            for rid, online in online_by_id.items():
+                if online:
+                    self._post_offline_until_ms.pop(rid, None)
+                    if self._phase_by_robot.get(rid) == "starting":
+                        self._phase_by_robot[rid] = "sim_online"
+                        if self._global_starting_robot == rid:
+                            self._global_starting_robot = ""
+                else:
+                    if self._phase_by_robot.get(rid) == "sim_online" and not self._shutdown_busy.get(rid):
+                        self._phase_by_robot[rid] = "idle"
+                        if self._global_starting_robot == rid:
+                            self._global_starting_robot = ""
+
+
+SIM_PRESENCE = SimPresenceState()
+
+
+def _build_presence_rows() -> dict:
+    try:
+        import ros_robot_status_store
+
+        cache_items = ros_robot_status_store.list_all_last_status()
+    except Exception:
+        cache_items = []
+    cache_by_id = {}
+    for it in cache_items:
+        rid = str((it or {}).get("robot_id") or "").strip()
+        if rid:
+            cache_by_id[rid] = it
+
+    pose = POSE_PROVIDER.get_pose()
+    live = pose.get("robots") if isinstance(pose, dict) else []
+    live = live if isinstance(live, list) else []
+    live_by_id = {}
+    for r in live:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "").strip()
+        if rid:
+            live_by_id[rid] = r
+    ids = sorted(set(live_by_id.keys()) | set(cache_by_id.keys()))
+    rows = []
+    for rid in ids:
+        lr = live_by_id.get(rid) or {}
+        ci = cache_by_id.get(rid) or {}
+        online = bool(lr) and (lr.get("heartbeat_online") is not False)
+        floor = str(lr.get("active_floor") or ci.get("current_map") or "").strip()
+        rows.append(
+            {
+                "id": rid,
+                "name": str(lr.get("name") or lr.get("id") or ci.get("robot_name") or rid),
+                "online": online,
+                "floor": floor,
+                "persisted_robot_status": str(ci.get("robot_status") or "").strip(),
+                "persisted_is_simulation": bool(ci.get("is_simulation")),
+                "live_is_simulation": bool(lr.get("is_simulation")),
+            }
+        )
+    SIM_PRESENCE.apply_liveness(rows)
+    st = SIM_PRESENCE.snapshot()
+    for r in rows:
+        rid = str(r.get("id") or "")
+        phase = str(st["phase_by_robot"].get(rid) or "idle")
+        shutdown_busy = bool(st["shutdown_busy"].get(rid))
+        post_offline_until = int(st["post_offline_until_ms"].get(rid) or 0)
+        global_starting = str(st["global_starting_robot"] or "")
+        now_ms = int(st["now_ms"])
+        label = "仿真上线"
+        action = "bringup"
+        disabled = False
+        title = ""
+        extra_class = ""
+        is_sim = bool(r.get("persisted_is_simulation") or r.get("live_is_simulation"))
+        if phase == "starting":
+            label = "仿真上线..."
+            action = "pending"
+            disabled = True
+        elif phase == "sim_online":
+            extra_class = "btn-sim-bringup--offline"
+            if shutdown_busy:
+                label = "仿真离线..."
+                action = "pending"
+                disabled = True
+            else:
+                label = "仿真离线"
+                action = "shutdown"
+        elif (not r.get("online")) and post_offline_until and now_ms < post_offline_until:
+            label = "离线"
+            action = "pending"
+            disabled = True
+            extra_class = "btn-sim-bringup--offline"
+        elif r.get("online") and is_sim:
+            label = "仿真离线"
+            action = "shutdown"
+            disabled = False
+            extra_class = "btn-sim-bringup--offline"
+            title = "检测到仿真机器人在线，可直接执行仿真离线"
+        elif r.get("online"):
+            disabled = True
+            title = "已检测到在线 robot_status（非仿真），不提供仿真离线"
+        elif global_starting and global_starting != rid:
+            disabled = True
+            title = "另一台机器人正在仿真上线中"
+        r["sim_button"] = {
+            "phase": phase,
+            "label": label,
+            "action": action,
+            "disabled": disabled,
+            "title": title,
+            "extra_class": extra_class,
+        }
+    return {"items": rows, "timestamp": time.time()}
+
+
+def _lifecycle_get_quick(root_dir: Path, node_name: str, timeout_s: float = 1.0) -> dict:
+    ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+    install_setup = root_dir / "install" / "setup.bash"
+    install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
+    cmd = (
+        f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
+        f'cd "{root_dir}" && {install_src}; ros2 lifecycle get {shlex.quote(node_name)}'
+    )
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=os.environ.copy(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False, "state": "timeout", "raw": "timeout"}
+    txt = (proc.stdout or proc.stderr or "").strip()
+    if proc.returncode != 0:
+        return {"available": False, "state": "missing", "raw": txt}
+    m = re.search(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)", txt)
+    if not m:
+        return {"available": True, "state": "unknown", "raw": txt}
+    return {"available": True, "state": m.group(2).strip(), "id": int(m.group(1)), "raw": txt}
+
+
+def _lifecycle_set_quick(root_dir: Path, node_name: str, transition: str, timeout_s: float = 2.0) -> dict:
+    t = str(transition or "").strip().lower()
+    if t not in ("configure", "activate", "deactivate", "cleanup", "shutdown"):
+        raise ValueError("transition must be configure|activate|deactivate|cleanup|shutdown")
+    ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+    install_setup = root_dir / "install" / "setup.bash"
+    install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
+    cmd = (
+        f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
+        f'cd "{root_dir}" && {install_src}; ros2 lifecycle set {shlex.quote(node_name)} {t}'
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        env=os.environ.copy(),
+    )
+    raw = (proc.stdout or proc.stderr or "").strip()
+    if proc.returncode != 0:
+        raise RuntimeError(raw or "lifecycle set failed")
+    return {"ok": True, "raw": raw}
+
+
+def _build_debug_nodes_view() -> dict:
+    discovered = ROS_NODE_MANAGER.list_ros_nodes()
+    # DDS discovery can be jittery; one quick retry improves stability.
+    if not discovered:
+        time.sleep(0.25)
+        discovered = ROS_NODE_MANAGER.list_ros_nodes()
+    names = sorted({str(n.get("name") or "").strip() for n in discovered if isinstance(n, dict)})
+    names = [n for n in names if n]
+    
+    def _is_lifecycle_candidate(node_name: str) -> bool:
+        n = str(node_name or "")
+        hints = (
+            "/lifecycle_manager_",
+            "/bt_navigator",
+            "/controller_server",
+            "/planner_server",
+            "/recoveries_server",
+            "/waypoint_follower",
+        )
+        return any(h in n for h in hints)
+
+    nodes = []
+    for nm in names:
+        lc_capable = _is_lifecycle_candidate(nm)
+        lc = {"available": lc_capable, "state": "unknown", "raw": "deferred"}
+        nodes.append(
+            {
+                "name": nm,
+                "running": True,
+                "lifecycle": lc,
+                "can_kill": True,
+                "kill_api": "/api/ros/nodes/discovered/kill",
+                "lifecycle_transitions": (
+                    ["configure", "activate", "deactivate", "cleanup", "shutdown"]
+                    if lc_capable
+                    else []
+                ),
+            }
+        )
+    return {
+        "nodes": nodes,
+        "last_error": "",
+        "timestamp": time.time(),
+    }
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -895,6 +1196,112 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/ros/lifecycle/startup":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            robot_id = str(data.get("robot_id") or "").strip()
+            sim_mode = str(data.get("sim_mode") or "sim").strip() or "sim"
+            if not robot_id:
+                self._send_json({"error": "robot_id is required"}, 400)
+                return
+            SIM_PRESENCE.mark_starting(robot_id)
+            try:
+                out = ROBOT_LIFECYCLE.startup_selected_robot(robot_id, sim_mode=sim_mode)
+            except ValueError as err:
+                SIM_PRESENCE.mark_start_failed(robot_id)
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                SIM_PRESENCE.mark_start_failed(robot_id)
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json({"ok": True, **out})
+            return
+
+        if path == "/api/ros/lifecycle/shutdown":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            robot_id = str(data.get("robot_id") or "").strip()
+            if not robot_id:
+                self._send_json({"error": "robot_id is required"}, 400)
+                return
+            SIM_PRESENCE.mark_shutdown_busy(robot_id, True)
+            try:
+                out = ROBOT_LIFECYCLE.shutdown_selected_robot(robot_id)
+            except ValueError as err:
+                SIM_PRESENCE.mark_shutdown_busy(robot_id, False)
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                SIM_PRESENCE.mark_shutdown_busy(robot_id, False)
+                self._send_json({"error": str(err)}, 500)
+                return
+            SIM_PRESENCE.mark_shutdown_done(robot_id)
+            self._send_json({"ok": True, **out})
+            return
+
+        if path == "/api/ros/lifecycle/transition":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            robot_id = str(data.get("robot_id") or "").strip()
+            component = str(data.get("component") or "").strip()
+            transition = str(data.get("transition") or "").strip().lower()
+            if not robot_id or not component or not transition:
+                self._send_json(
+                    {"error": "robot_id, component, transition are required"},
+                    400,
+                )
+                return
+            try:
+                out = ROBOT_LIFECYCLE.transition(robot_id, component, transition)
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json({"ok": True, **out})
+            return
+
         if path == "/api/ros/nodes/create":
             length_s = self.headers.get("Content-Length")
             try:
@@ -1060,6 +1467,38 @@ class ApiHandler(BaseHTTPRequestHandler):
             else:
                 status = POSE_PROVIDER.restart_ros_threads()
             self._send_json({"ok": True, "action": action, "status": status})
+            return
+
+        if path == "/api/ros/debug/nodes/lifecycle_set":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            node_name = str(data.get("node_name") or "").strip()
+            transition = str(data.get("transition") or "").strip().lower()
+            if not node_name or not node_name.startswith("/"):
+                self._send_json({"error": "node_name (starts with /) is required"}, 400)
+                return
+            try:
+                out = _lifecycle_set_quick(ROOT_DIR, node_name, transition, timeout_s=2.5)
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json({"ok": True, **out})
             return
 
         if path == "/api/mapping/save":
@@ -1310,6 +1749,26 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/ros/lifecycle/status":
+            q = parse_qs(urlparse(self.path).query)
+            robot_id = (q.get("robot_id") or [""])[0].strip()
+            try:
+                out = ROBOT_LIFECYCLE.status(robot_id or None)
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
+        if path == "/api/ros/debug/nodes":
+            try:
+                out = _build_debug_nodes_view()
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
         if path == "/api/ros/nodes/status":
             self._send_json(ROS_NODE_MANAGER.status())
             return
@@ -1460,17 +1919,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/robot/status/cache":
-            try:
-                import ros_robot_status_store
-            except ImportError:
-                self._send_json({"items": []})
-                return
-            self._send_json(
-                {
-                    "items": ros_robot_status_store.list_all_last_status(),
-                    "timestamp": time.time(),
-                }
-            )
+            self._send_json(_build_presence_rows())
             return
 
         if path == "/api/robot/pose/stream":

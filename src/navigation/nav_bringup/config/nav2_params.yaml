@@ -121,6 +121,7 @@ local_costmap:
       resolution: 0.05
       transform_tolerance: 0.6
       robot_radius: 0.22
+      track_unknown_space: true
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -163,7 +164,11 @@ global_costmap:
       robot_radius: 0.22
       resolution: 0.05
       transform_tolerance: 0.6
-      track_unknown_space: true
+      rolling_window: @@GLOBAL_ROLLING_WINDOW@@
+      width: @@GLOBAL_WINDOW_WIDTH@@
+      height: @@GLOBAL_WINDOW_HEIGHT@@
+      track_unknown_space: @@TRACK_UNKNOWN_SPACE@@
+      unknown_cost_value: @@UNKNOWN_COST_VALUE@@
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -178,7 +183,7 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_topic: "@@OCC_GRID_TOPIC@@"
-        map_subscribe_transient_local: True
+        map_subscribe_transient_local: False
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -200,7 +205,7 @@ planner_server:
       plugin: "nav2_navfn_planner/NavfnPlanner"
       tolerance: 0.5
       use_astar: false
-      allow_unknown: true
+      allow_unknown: @@ALLOW_UNKNOWN@@
 
 planner_server_rclcpp_node:
   ros__parameters:

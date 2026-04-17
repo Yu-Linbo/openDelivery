@@ -71,18 +71,36 @@ done
 : "${ROBOT_POSE_MODE:=ros2_tf}"
 export ROBOT_POSE_MODE
 
-echo "[open-delivery] starting backend on ${BACKEND_HOST}:${BACKEND_PORT} (ROBOT_POSE_MODE=${ROBOT_POSE_MODE})"
-MAP_API_PORT="${BACKEND_PORT}" MAP_API_HOST="${BACKEND_HOST}" python3 "${BACKEND_SCRIPT}" &
-BACKEND_PID=$!
+STOP_ALL=0
+BACKEND_PID=""
+
+backend_supervisor() {
+  while [[ "${STOP_ALL}" -eq 0 ]]; do
+    echo "[open-delivery] starting backend on ${BACKEND_HOST}:${BACKEND_PORT} (ROBOT_POSE_MODE=${ROBOT_POSE_MODE})"
+    MAP_API_PORT="${BACKEND_PORT}" MAP_API_HOST="${BACKEND_HOST}" python3 "${BACKEND_SCRIPT}" &
+    BACKEND_PID=$!
+    wait "${BACKEND_PID}" || true
+    if [[ "${STOP_ALL}" -ne 0 ]]; then
+      break
+    fi
+    echo "[open-delivery] backend exited unexpectedly; respawning in 1s..."
+    sleep 1
+  done
+}
+
+backend_supervisor &
+BACKEND_SUP_PID=$!
 
 echo "[open-delivery] starting frontend on 0.0.0.0:${FRONTEND_PORT}"
 python3 -m http.server "${FRONTEND_PORT}" --directory "${WEB_DIR}" &
 FRONTEND_PID=$!
 
 cleanup() {
+  STOP_ALL=1
   echo
   echo "[open-delivery] stopping services..."
-  kill "${BACKEND_PID}" "${FRONTEND_PID}" >/dev/null 2>&1 || true
+  pkill -f "${BACKEND_SCRIPT}" >/dev/null 2>&1 || true
+  kill "${BACKEND_SUP_PID}" "${FRONTEND_PID}" >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT INT TERM
@@ -92,4 +110,4 @@ echo "  frontend: http://localhost:${FRONTEND_PORT}"
 echo "  backend : http://localhost:${BACKEND_PORT}"
 echo "Press Ctrl+C to stop."
 
-wait -n "${BACKEND_PID}" "${FRONTEND_PID}"
+wait -n "${BACKEND_SUP_PID}" "${FRONTEND_PID}"
