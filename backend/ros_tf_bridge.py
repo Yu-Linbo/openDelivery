@@ -66,10 +66,133 @@ from sensor_msgs.msg import LaserScan, Image
 from tf2_msgs.msg import TFMessage
 
 try:
-    # custom_msgs_srvs/RobotStatus: header, robot_name, current_map, robot_status, is_simulation, ...
+    # custom_msgs_srvs/RobotStatus: uint8 robot_status / task_status pseudo-enums
     from custom_msgs_srvs.msg import RobotStatus
 except Exception:  # noqa: BLE001
     RobotStatus = None
+
+_ROBOT_STATUS_LABELS = (
+    "initializing",
+    "localizing",
+    "localization_lost",
+    "ready",
+    "shutdown",
+)
+_TASK_STATUS_LABELS = ("idle", "mapping", "delivery", "cleaning", "patrolling")
+
+
+def _robot_status_label(v: Any) -> str:
+    """Uint8 code or legacy string → stable label for JSON / web."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        t = v.strip()
+        if not t:
+            return ""
+        if t.isdigit() or (t.startswith("-") and t[1:].isdigit()):
+            try:
+                i = int(t)
+                if 0 <= i < len(_ROBOT_STATUS_LABELS):
+                    return _ROBOT_STATUS_LABELS[i]
+            except ValueError:
+                return t
+        return t
+    try:
+        i = int(v)
+        if 0 <= i < len(_ROBOT_STATUS_LABELS):
+            return _ROBOT_STATUS_LABELS[i]
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
+def _task_status_label(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        t = v.strip()
+        if not t:
+            return ""
+        if t.isdigit() or (t.startswith("-") and t[1:].isdigit()):
+            try:
+                i = int(t)
+                if 0 <= i < len(_TASK_STATUS_LABELS):
+                    return _TASK_STATUS_LABELS[i]
+            except ValueError:
+                return t
+        return t
+    try:
+        i = int(v)
+        if 0 <= i < len(_TASK_STATUS_LABELS):
+            return _TASK_STATUS_LABELS[i]
+    except (TypeError, ValueError):
+        pass
+    return str(v).strip()
+
+
+def _robot_status_to_msg_code(v: Any, default: int = 0) -> int:
+    """Label / int / legacy string → RobotStatus.robot_status uint8."""
+    if RobotStatus is not None:
+        mx = int(RobotStatus.ROBOT_STATUS_SHUTDOWN)
+    else:
+        mx = len(_ROBOT_STATUS_LABELS) - 1
+    if v is None or v == "":
+        return int(default) if isinstance(default, int) else 0
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        i = int(v)
+        return i if 0 <= i <= mx else 0
+    s = str(v).strip().lower()
+    if not s:
+        return 0
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        try:
+            i = int(s)
+            return i if 0 <= i <= mx else 0
+        except ValueError:
+            return 0
+    names = {
+        "initializing": 0,
+        "localizing": 1,
+        "localization_lost": 2,
+        "ready": 3,
+        "shutdown": 4,
+        "normal": 3,
+    }
+    return int(names.get(s, 0))
+
+
+def _task_status_to_msg_code(v: Any, default: int = 0) -> int:
+    if RobotStatus is not None:
+        mx = int(RobotStatus.TASK_STATUS_PATROLLING)
+    else:
+        mx = len(_TASK_STATUS_LABELS) - 1
+    if v is None or v == "":
+        return int(default) if isinstance(default, int) else 0
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        i = int(v)
+        return i if 0 <= i <= mx else 0
+    s = str(v).strip().lower()
+    if not s:
+        return 0
+    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+        try:
+            i = int(s)
+            return i if 0 <= i <= mx else 0
+        except ValueError:
+            return 0
+    names = {
+        "idle": 0,
+        "mapping": 1,
+        "delivery": 2,
+        "cleaning": 3,
+        "patrolling": 4,
+    }
+    return int(names.get(s, 0))
+
 
 import ros_command_queue
 import ros_map_store
@@ -353,12 +476,14 @@ class OpenDeliveryTfBridgeNode(Node):
                 self._robot_status_topic_by_id[rid] = topic_name
                 robot_name = str(getattr(msg, "robot_name", "") or rid).strip() or rid
                 current_map = str(getattr(msg, "current_map", "") or "").strip()
-                robot_status = str(getattr(msg, "robot_status", "") or "").strip()
+                robot_status = _robot_status_label(getattr(msg, "robot_status", 0))
+                task_status = _task_status_label(getattr(msg, "task_status", 0))
                 is_simulation = bool(getattr(msg, "is_simulation", False))
                 payload = {
                     "robot_name": robot_name,
                     "current_map": current_map,
                     "robot_status": robot_status,
+                    "task_status": task_status,
                     "is_simulation": is_simulation,
                 }
                 self._robot_status_payload_by_id[rid] = payload
@@ -367,6 +492,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     robot_name=robot_name,
                     current_map=current_map,
                     robot_status=robot_status,
+                    task_status=task_status,
                     is_simulation=is_simulation,
                     topic=topic_name,
                     stamp_ns=last_ns,
@@ -418,6 +544,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "robot_name": str(last.get("robot_name") or rid),
                     "current_map": str(last.get("current_map") or ""),
                     "robot_status": str(last.get("robot_status") or ""),
+                    "task_status": str(last.get("task_status") or ""),
                     "is_simulation": bool(last.get("is_simulation", False)),
                 }
 
@@ -503,7 +630,8 @@ class OpenDeliveryTfBridgeNode(Node):
                     st.header.frame_id = mf
                     st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
                     st.current_map = str(mn).strip()
-                    st.robot_status = str(payload.get("robot_status") or "").strip()
+                    st.robot_status = _robot_status_to_msg_code(payload.get("robot_status"), 3)
+                    st.task_status = _task_status_to_msg_code(payload.get("task_status"), 0)
                     st.is_simulation = bool(payload.get("is_simulation", False))
                     self._robot_status_cmd_pubs[rid].publish(st)
                     self.get_logger().info(f"publish robot_status {rid} current_map -> {st.current_map!r}")
@@ -762,7 +890,13 @@ class OpenDeliveryTfBridgeNode(Node):
             robot_name = str(status_payload.get("robot_name") or name or rid)
             robot_status = str(status_payload.get("robot_status") or "").strip()
             is_simulation = bool(status_payload.get("is_simulation", False))
-            task_status = robot_status if robot_status else str(spec.get("task_status") or "Running")
+            task_status = str(status_payload.get("task_status") or "").strip()
+            if not task_status:
+                task_status = (
+                    robot_status
+                    if is_robot_status_mapping(robot_status)
+                    else str(spec.get("task_status") or "Running")
+                )
             try:
                 tr = self._buffer.lookup_transform(mf, bf, Time(), timeout=Duration(seconds=0.05))
                 x = float(tr.transform.translation.x)
@@ -864,7 +998,7 @@ def request_ros_shutdown() -> None:
 
 
 def is_robot_status_mapping(robot_status: str) -> bool:
-    """True when heartbeat / stack indicates SLAM 建图 (not localization-only)."""
+    """True when legacy heartbeat put mapping in ``robot_status`` (pre task_status split)."""
     s = (robot_status or "").strip()
     if not s:
         return False
@@ -872,6 +1006,18 @@ def is_robot_status_mapping(robot_status: str) -> bool:
         return True
     if s in ("建图", "建图状态"):
         return True
+    return False
+
+
+def is_task_status_mapping(task_status: str) -> bool:
+    s = (task_status or "").strip().lower()
+    if s == "mapping":
+        return True
+    if s.isdigit():
+        try:
+            return int(s) == 1
+        except ValueError:
+            return False
     return False
 
 
@@ -894,10 +1040,11 @@ def list_mapping_robot_ids_from_status_store(
     out: List[str] = []
     for item in ros_robot_status_store.list_all_last_status():
         rid = str(item.get("robot_id") or "").strip()
+        ts_raw = str(item.get("task_status") or "").strip()
         st_raw = str(item.get("robot_status") or "").strip()
         if not rid:
             continue
-        if not is_robot_status_mapping(st_raw):
+        if not (is_task_status_mapping(ts_raw) or is_robot_status_mapping(st_raw)):
             continue
         if max_status_age_sec < float("inf"):
             updated_at = float(item.get("updated_at") or 0.0)

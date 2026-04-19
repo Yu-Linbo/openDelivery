@@ -194,7 +194,7 @@ sudo apt-get install -y ros-foxy-nav2-map-server
 
 主入口 **`simulate.launch.py`**：`robot_state_publisher` 与 `spawn_entity` 在 **`PushRosNamespace`** 下；**Gazebo** 进程全局；第二台车不重起 `gzserver` 时用 **`start_gazebo:=false namespace:=<其他>`**。
 
-`params/launch/simulate/` 与包内 `launch/` 同步，由 `open_delivery_system` 安装到 **`bringup_launch/simulate/`**。
+`params/launch/simulate/` 与包内 `launch/` 同步，由 `system` 包安装到 **`bringup_launch/simulate/`**。
 
 ```bash
 cd /path/to/openDelivery
@@ -204,7 +204,7 @@ source install/setup.bash
 
 ros2 launch simulate simulate.launch.py
 # ros2 launch simulate simulate.launch.py namespace:=robot2
-# ros2 launch open_delivery_system bringup_launch/simulate/simulate.launch.py
+# ros2 launch system bringup_launch/simulate/simulate.launch.py
 ros2 launch simulate test.launch.py
 ```
 

@@ -143,7 +143,7 @@ body {
   margin-top: 8px;
   min-width: 280px;
   max-width: min(360px, calc(100vw - 32px));
-  max-height: min(420px, 70vh);
+  max-height: min(520px, 78vh);
   overflow: auto;
   border-radius: 14px;
   border: 1px solid var(--line);
@@ -182,7 +182,7 @@ body {
 
 .robot-presence-list li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 10px 8px;
@@ -249,6 +249,7 @@ body {
 .robot-presence-row__tail {
   display: flex;
   flex-shrink: 0;
+  align-self: center;
   align-items: center;
   gap: 8px;
 }
@@ -290,6 +291,111 @@ body {
 .robot-presence-empty code {
   font-size: 11px;
   color: #93c5fd;
+}
+
+.robot-presence-status {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.robot-presence-status__row {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 6px 8px;
+  align-items: baseline;
+}
+
+.robot-presence-status__k {
+  color: #64748b;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.robot-presence-status__v code {
+  font-size: 11px;
+  color: #e2e8f0;
+  font-weight: 500;
+}
+
+.robot-presence-status__src {
+  font-size: 9px;
+  color: #64748b;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.robot-presence-sim-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #7dd3fc;
+  vertical-align: middle;
+}
+
+.robot-presence-footer {
+  margin-top: 8px;
+  padding: 12px 14px 4px;
+  border-top: 1px solid var(--line);
+}
+
+.robot-presence-footer__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.robot-presence-footer__hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.robot-presence-footer__hint code {
+  font-size: 10px;
+  color: #93c5fd;
+}
+
+.robot-presence-footer__row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+
+.robot-presence-new-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(51, 65, 85, 0.9);
+  background: rgba(15, 23, 42, 0.9);
+  color: #f1f5f9;
+  font-size: 12px;
+}
+
+.robot-presence-new-input::placeholder {
+  color: #64748b;
+}
+
+.robot-presence-new-input:focus {
+  outline: none;
+  border-color: rgba(34, 197, 94, 0.55);
+}
+
+.robot-presence-new-msg {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+  min-height: 1.35em;
+}
+
+.btn-sim-bringup--new {
+  flex-shrink: 0;
 }
 
 .sidebar-header {
@@ -765,6 +871,12 @@ button {
   opacity: 0.68;
 }
 
+.ros-node-card--stale {
+  opacity: 0.55;
+  border-color: #6b7280;
+  background: rgba(31, 41, 55, 0.65);
+}
+
 .ros-robot-groups {
   display: grid;
   gap: 14px;
@@ -1076,6 +1188,7 @@ button {
 }
 
 .gazebo-camera-wrap {
+  position: relative;
   flex: 1 1 auto;
   width: 100%;
   height: 360px;
@@ -1085,6 +1198,75 @@ button {
   background: #ffffff;
   min-height: 420px;
   margin: 0;
+}
+
+.gazebo-camera-wrap--fresh {
+  border-color: rgba(34, 197, 94, 0.45);
+}
+
+.gazebo-camera-wrap--aging {
+  border-color: rgba(251, 191, 36, 0.55);
+}
+
+.gazebo-camera-wrap--stale {
+  border-color: rgba(248, 113, 113, 0.55);
+}
+
+.gazebo-camera-wrap--stale #gazebo-top-camera {
+  opacity: 0.72;
+}
+
+.gazebo-camera-wrap--offline {
+  border-color: rgba(71, 85, 105, 0.75);
+  background: #0f172a;
+}
+
+.gazebo-camera-wrap--offline #gazebo-top-camera {
+  opacity: 1;
+}
+
+.gazebo-top-camera-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  padding: 8px 10px 10px;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.82) 0%, rgba(15, 23, 42, 0.2) 100%);
+  border-radius: 10px 10px 0 0;
+}
+
+.gazebo-top-camera-overlay__main {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.gazebo-top-camera-overlay__main--fresh {
+  color: #86efac;
+}
+
+.gazebo-top-camera-overlay__main--aging {
+  color: #fde047;
+}
+
+.gazebo-top-camera-overlay__main--stale {
+  color: #fca5a5;
+}
+
+.gazebo-top-camera-overlay__stamp {
+  font-size: 11px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.gazebo-top-camera-overlay__hint {
+  font-size: 10px;
+  color: #cbd5e1;
+  margin-top: 2px;
 }
 
 .gazebo-camera-stage {

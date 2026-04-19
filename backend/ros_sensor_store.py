@@ -12,8 +12,6 @@ _scans: Dict[str, Dict[str, Any]] = {}
 _paths: Dict[str, Dict[str, Any]] = {}
 _gazebo_models: Dict[str, Any] = {}
 _topdown_image: Dict[str, Any] = {}
-_gazebo_models: Dict[str, Any] = {}
-_topdown_image: Dict[str, Any] = {}
 
 
 def set_scan(robot_id: str, payload: Dict[str, Any]) -> None:
@@ -60,6 +58,7 @@ def get_gazebo_models() -> Optional[Dict[str, Any]]:
 
 
 def set_topdown_image(payload: Dict[str, Any]) -> None:
+    """Store latest topdown frame; ``_cached_at`` is wall time when the bridge received the message."""
     with _lock:
         _topdown_image.clear()
         _topdown_image.update({**payload, "_cached_at": time.time()})
@@ -70,31 +69,51 @@ def get_topdown_image() -> Optional[Dict[str, Any]]:
         if not _topdown_image:
             return None
         return json.loads(json.dumps(_topdown_image))
-        _gazebo_models.clear()
-        _topdown_image.clear()
 
 
-def set_gazebo_models(payload: Dict[str, Any]) -> None:
-    with _lock:
-        _gazebo_models.clear()
-        _gazebo_models.update({**payload, "_cached_at": time.time()})
+def augment_topdown_for_api(frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach ``received_at`` / ``age_received_sec`` / ``stale_tier``; strip ``_cached_at``."""
+    out = dict(frame)
+    received = float(out.pop("_cached_at", 0) or 0)
+    now = time.time()
+    age = max(0.0, now - received) if received else None
+    out["received_at"] = received
+    out["age_received_sec"] = round(age, 3) if age is not None else None
+    out["stale_tier"] = _topdown_stale_tier(age)
+    return out
 
 
-def get_gazebo_models() -> Optional[Dict[str, Any]]:
-    with _lock:
-        if not _gazebo_models:
-            return None
-        return json.loads(json.dumps(_gazebo_models))
+def _topdown_stale_tier(age_sec: Optional[float]) -> int:
+    """0: fresh <10s, 1: aging 10–30s, 2: stale >=30s (wall time since last frame)."""
+    if age_sec is None:
+        return 0
+    if age_sec >= 30.0:
+        return 2
+    if age_sec >= 10.0:
+        return 1
+    return 0
 
 
-def set_topdown_image(payload: Dict[str, Any]) -> None:
-    with _lock:
-        _topdown_image.clear()
-        _topdown_image.update({**payload, "_cached_at": time.time()})
-
-
-def get_topdown_image() -> Optional[Dict[str, Any]]:
+def get_topdown_image_status() -> Dict[str, Any]:
+    """Metadata only (no ``data_b64``) for cheap polling."""
     with _lock:
         if not _topdown_image:
-            return None
-        return json.loads(json.dumps(_topdown_image))
+            return {"available": False, "reason": "no topdown camera frame yet"}
+        snap = json.loads(json.dumps(_topdown_image))
+    snap.pop("data_b64", None)
+    received = float(snap.pop("_cached_at", 0) or 0)
+    now = time.time()
+    age = max(0.0, now - received) if received else None
+    tier = _topdown_stale_tier(age)
+    return {
+        "available": True,
+        "width": snap.get("width"),
+        "height": snap.get("height"),
+        "encoding": snap.get("encoding"),
+        "frame_id": snap.get("frame_id"),
+        "stamp_sec": snap.get("stamp_sec"),
+        "stamp_nanosec": snap.get("stamp_nanosec"),
+        "received_at": received,
+        "age_received_sec": round(age, 3) if age is not None else None,
+        "stale_tier": tier,
+    }

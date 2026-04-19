@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.5)
-project(open_delivery_system)
+project(system)
 
 find_package(ament_cmake REQUIRED)
 
-# Repo-root params/ — install so `ros2 launch open_delivery_system startup.launch.py` works on Foxy.
+# Repo-root params/ — install so `ros2 launch system startup.launch.py` works on Foxy.
 set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
 install(
   FILES "${_PARAMS_ROOT}/startup.launch.py"
@@ -27,9 +27,8 @@ install(
 
 install(
   PROGRAMS
-    scripts/start_open_delivery.sh
-    scripts/sim_bringup.sh
-    scripts/sim_shutdown.sh
+  scripts/start_open_delivery.sh
+  scripts/sim_bringup.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

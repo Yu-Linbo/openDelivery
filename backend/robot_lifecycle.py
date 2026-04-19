@@ -5,9 +5,11 @@ Per-robot stack orchestration for the web console.
 **Component model** (see ``_component_catalog``; one row per logical slice):
 
 - **仿真上线**：仅启动一个托管进程（id = ``robot_id``），运行 ``sim_bringup.sh``；脚本内依次拉起
-  Gazebo/仿真、心跳、定位、（按磁盘缓存可选）建图、导航，并做 lifecycle configure/activate。
-- **仿真离线**：先 best-effort lifecycle shutdown，再运行 ``sim_shutdown.sh``（按命名空间结束各 launch；
-  若已无任意 ``/*/robot_status`` 话题则关闭 Gazebo），最后 ``pause`` 各托管项。
+  Gazebo/仿真、heartbeat、manager（health_monitor + task_manager）、定位、（按磁盘缓存可选）建图、导航，
+  并对 heartbeat / slam lifecycle 做 configure/activate。
+- **仿真离线**：向 ``/<robot>/set_heartbeat_params`` 写入 ``robot_status=SHUTDOWN``（``RobotStatus.msg`` 中
+  ``ROBOT_STATUS_SHUTDOWN=4``），供各节点订阅 ``/<robot>/robot_status`` 后自行收尾；再对 navigation / heartbeat
+  做 best-effort lifecycle shutdown，最后 ``pause`` 各托管项（已废弃 ``sim_shutdown.sh``）。
 - ``heartbeat`` / ``navigation``：ROS 2 lifecycle；``localization`` / ``mapping``：脚本内 ``ros2 launch``，
   Web 侧另注册同名托管项（不二次 start）以便展示与 start/pause。
 - **建图**：是否启动由 ``sim_bringup.sh`` 读取 ``backend/data/robot_status_last.json`` 决定（与历史
@@ -29,7 +31,11 @@ LIFECYCLE_STATE_RE = re.compile(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)")
 
 
 def _persisted_auto_mapping(last: Optional[Dict[str, Any]]) -> bool:
-    return str((last or {}).get("robot_status") or "").strip().lower() == "mapping"
+    if not last:
+        return False
+    if str(last.get("task_status") or "").strip().lower() == "mapping":
+        return True
+    return str(last.get("robot_status") or "").strip().lower() == "mapping"
 
 
 class RobotLifecycleOrchestrator:
@@ -202,44 +208,40 @@ class RobotLifecycleOrchestrator:
             self._root_dir
             / "src"
             / "system"
-            / "open_delivery_system"
+            / "system"
             / "scripts"
             / "sim_bringup.sh",
             self._root_dir
             / "install"
-            / "open_delivery_system"
+            / "system"
             / "lib"
-            / "open_delivery_system"
+            / "system"
             / "sim_bringup.sh",
         ]
         for p in candidates:
             if p.is_file():
                 return p
         raise RuntimeError(
-            "sim_bringup.sh not found; build/install package open_delivery_system."
+            "sim_bringup.sh not found; build/install ROS package system."
         )
 
-    def _sim_shutdown_script_path(self) -> Path:
-        candidates = [
-            self._root_dir
-            / "src"
-            / "system"
-            / "open_delivery_system"
-            / "scripts"
-            / "sim_shutdown.sh",
-            self._root_dir
-            / "install"
-            / "open_delivery_system"
-            / "lib"
-            / "open_delivery_system"
-            / "sim_shutdown.sh",
-        ]
-        for p in candidates:
-            if p.is_file():
-                return p
-        raise RuntimeError(
-            "sim_shutdown.sh not found; build/install package open_delivery_system."
+    def _signal_shutdown_via_heartbeat(self, rid: str) -> None:
+        """Publish SHUTDOWN by updating heartbeat params (``robot_status=4``)."""
+        # SetHeartbeatParams: empty strings leave name/map; 255 leaves task_status; rate_hz<=0 unchanged.
+        yaml_req = '{robot_name: "", current_map: "", robot_status: 4, task_status: 255, rate_hz: 0.0}'
+        cmd = (
+            f"ros2 service call /{rid}/set_heartbeat_params "
+            f"custom_msgs_srvs/srv/SetHeartbeatParams {shlex.quote(yaml_req)}"
         )
+        try:
+            proc = self._run_shell(cmd, timeout=15.0)
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                if err:
+                    # Non-fatal: stack may already be down.
+                    pass
+        except Exception:
+            pass
 
     def _start_if_needed(
         self,
@@ -379,21 +381,13 @@ class RobotLifecycleOrchestrator:
         rid = self._ensure_robot(robot_id)
         hb = f"/{rid}/heartbeat"
         nav_mgr = f"/{rid}/lifecycle_manager_navigation"
+        # Let subscribers see SHUTDOWN on /{rid}/robot_status before tearing down lifecycle nodes.
+        self._signal_shutdown_via_heartbeat(rid)
+        time.sleep(0.5)
         for t in ("deactivate", "cleanup", "shutdown"):
             self._lifecycle_try(nav_mgr, t)
         for t in ("deactivate", "cleanup", "shutdown"):
             self._lifecycle_try(hb, t)
-        try:
-            sd = self._sim_shutdown_script_path()
-            root_q = shlex.quote(str(self._root_dir.resolve()))
-            sd_q = shlex.quote(str(sd.resolve()))
-            rid_q = shlex.quote(rid)
-            self._run_shell(
-                f"OPEN_DELIVERY_ROOT={root_q} bash {sd_q} {rid_q}",
-                timeout=90.0,
-            )
-        except Exception:
-            pass
         for node_id in (
             f"navigation_{rid}",
             f"mapping_{rid}",

@@ -35,7 +35,8 @@ def _launch_setup(context, *_args, **_kwargs):
     )
     # Node FQN: /<robot_ns>/slam_bringup/mapping
     node_ns = f"{robot_ns}/slam_bringup"
-    map_frame = LaunchConfiguration("map_frame").perform(context).strip().lstrip("/") or "map"
+    # Keep map frame global (no robot namespace): always "map".
+    map_frame = "map"
     odom_frame = _frame_with_namespace(
         robot_ns, LaunchConfiguration("odom_frame").perform(context)
     )
@@ -51,14 +52,17 @@ def _launch_setup(context, *_args, **_kwargs):
     map_name = map_name_arg if map_name_arg else f"/{robot_ns}/mapping"
 
     slam_node = Node(
-        package="slam_toolbox",
-        executable="sync_slam_toolbox_node",
+        package="slam_bringup",
+        executable="managed_slam_lifecycle",
         name="mapping",
         namespace=node_ns,
         output="screen",
         parameters=[
-            params_file,
             {
+                "slam_executable": "sync_slam_toolbox_node",
+                "child_node_name": "mapping_worker",
+                "child_namespace": f"/{node_ns}",
+                "params_file": params_file,
                 "use_sim_time": use_sim_time,
                 "mode": "mapping",
                 "map_frame": map_frame,
@@ -82,7 +86,6 @@ def generate_launch_description():
                 default_value=LaunchConfiguration("robot_name"),
                 description="Robot prefix for TF/sensors; node FQN /<namespace>/slam_bringup/mapping.",
             ),
-            DeclareLaunchArgument("map_frame", default_value="map"),
             DeclareLaunchArgument("odom_frame", default_value="odom"),
             DeclareLaunchArgument("base_frame", default_value="base_footprint"),
             DeclareLaunchArgument(

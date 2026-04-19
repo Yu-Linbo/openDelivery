@@ -40,8 +40,29 @@
           </div>
           <ul id="robot-presence-list" class="robot-presence-list"></ul>
           <p id="robot-presence-empty" class="robot-presence-empty" hidden>
-            暂无机器人数据；请确认 ROS 桥与 <code>/*/robot_status</code> 已发布。
+            暂无机器人数据；请确认 ROS 桥与 <code>/*/robot_status</code> 已发布。仍可直接在下方填写新 ID 做仿真上线。
           </p>
+          <div class="robot-presence-footer">
+            <div class="robot-presence-footer__title">新机器人仿真上线</div>
+            <p class="robot-presence-footer__hint">
+              填写命名空间 ID（与 Gazebo spawn 一致，如 <code>robot3</code>），无需事先有历史缓存。
+            </p>
+            <div class="robot-presence-footer__row">
+              <input
+                id="robot-presence-new-id"
+                type="text"
+                class="robot-presence-new-input"
+                placeholder="robot3"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="新机器人 ID"
+              />
+              <button type="button" id="btn-robot-presence-bringup-new" class="btn-sim-bringup btn-sim-bringup--new">
+                仿真上线
+              </button>
+            </div>
+            <p id="robot-presence-new-msg" class="robot-presence-new-msg" role="status"></p>
+          </div>
         </div>
       </div>
 
@@ -223,8 +244,17 @@
                 左侧画面用于观察与取点。单击画面会把目标位置换算到 world 坐标并填入右侧表单。
               </p>
               <div class="gazebo-camera-stage">
-                <div class="gazebo-camera-wrap">
+                <div class="gazebo-camera-wrap" id="gazebo-camera-wrap">
                   <canvas id="gazebo-top-camera"></canvas>
+                  <div
+                    id="gazebo-top-camera-overlay"
+                    class="gazebo-top-camera-overlay"
+                    aria-live="polite"
+                  >
+                    <div id="gazebo-top-camera-line-main" class="gazebo-top-camera-overlay__main"></div>
+                    <div id="gazebo-top-camera-line-stamp" class="gazebo-top-camera-overlay__stamp"></div>
+                    <div id="gazebo-top-camera-line-hint" class="gazebo-top-camera-overlay__hint"></div>
+                  </div>
                 </div>
                 <div class="gazebo-camera-pad">
                   <div class="gazebo-camera-controls__title">俯视相机控制</div>

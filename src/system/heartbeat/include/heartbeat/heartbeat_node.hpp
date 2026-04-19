@@ -1,6 +1,7 @@
 #ifndef HEARTBEAT__HEARTBEAT_NODE_HPP_
 #define HEARTBEAT__HEARTBEAT_NODE_HPP_
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,7 +21,10 @@ private:
   using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
   std::string effective_robot_name() const;
   bool slam_mapping_node_present();
-  std::string resolved_robot_status_string();
+  static uint8_t clamp_robot_status(int v);
+  static uint8_t clamp_task_status(int v);
+  uint8_t resolved_robot_status_value();
+  uint8_t resolved_task_status_value();
   void recreate_timer_locked();
   void tick();
   void on_set_params(

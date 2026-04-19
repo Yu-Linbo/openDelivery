@@ -6,6 +6,7 @@
     "robot_name": "robot1",
     "robot_status": "mapping",
     "stamp_ns": 1776392948346746120,
+    "task_status": "",
     "topic": "/robot1/robot_status",
     "updated_at": 1776392948.3478508
   },
@@ -16,6 +17,7 @@
     "robot_name": "robot110",
     "robot_status": "normal",
     "stamp_ns": 1776394434030045953,
+    "task_status": "",
     "topic": "/robot110/robot_status",
     "updated_at": 1776394434.0977662
   },
@@ -24,10 +26,11 @@
     "is_simulation": true,
     "robot_id": "robot2",
     "robot_name": "robot2",
-    "robot_status": "mapping",
-    "stamp_ns": 1776416191587509775,
+    "robot_status": "shutdown",
+    "stamp_ns": 1776589941231814711,
+    "task_status": "mapping",
     "topic": "/robot2/robot_status",
-    "updated_at": 1776416191.5916736
+    "updated_at": 1776589941.2327943
   },
   "robot4": {
     "current_map": "",
@@ -36,6 +39,7 @@
     "robot_name": "robot4",
     "robot_status": "",
     "stamp_ns": 1774602253027925040,
+    "task_status": "",
     "topic": "/robot4/robot_status",
     "updated_at": 1774602253.0328443
   }

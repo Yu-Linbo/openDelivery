@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>open_delivery_system</name>
+  <name>system</name>
   <version>0.0.1</version>
   <description>Installed params launches, start scripts, and fake_pub runner for openDelivery stack.</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
@@ -10,6 +10,7 @@
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>heartbeat</exec_depend>
+  <exec_depend>manager</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>custom_msgs_srvs</exec_depend>

@@ -1,8 +1,12 @@
-# Empty string for robot_name / current_map / robot_status means "leave unchanged".
+# robot_name / current_map: empty string = leave unchanged.
+# robot_status / task_status: use *_LEAVE_UNCHANGED (255) to leave unchanged (must set explicitly).
 # rate_hz <= 0 means leave publish_rate unchanged.
 string robot_name
 string current_map
-string robot_status
+uint8 ROBOT_STATUS_LEAVE_UNCHANGED=255
+uint8 TASK_STATUS_LEAVE_UNCHANGED=255
+uint8 robot_status
+uint8 task_status
 float64 rate_hz
 ---
 bool success

@@ -11,6 +11,9 @@ const robotPresencePanel = document.getElementById("robot-presence-panel");
 const robotPresenceList = document.getElementById("robot-presence-list");
 const robotPresenceEmpty = document.getElementById("robot-presence-empty");
 const robotPresenceSummary = document.getElementById("robot-presence-summary");
+const robotPresenceNewId = document.getElementById("robot-presence-new-id");
+const btnRobotPresenceBringupNew = document.getElementById("btn-robot-presence-bringup-new");
+const robotPresenceNewMsg = document.getElementById("robot-presence-new-msg");
 const views = {
   monitor: document.getElementById("view-monitor"),
   gazebo: document.getElementById("view-gazebo"),
@@ -51,6 +54,19 @@ const robotStatus = document.getElementById("robot-status");
 const mapWrapper = document.querySelector(".map-wrapper");
 const canvas = document.getElementById("map-canvas");
 const ctx = canvas.getContext("2d");
+
+/** Coalesce high-frequency pose/sensor updates to one paint per animation frame (reduces map flicker). */
+let mapPaintRaf = 0;
+function scheduleMapPaint() {
+  if (mapPaintRaf) {
+    return;
+  }
+  mapPaintRaf = requestAnimationFrame(() => {
+    mapPaintRaf = 0;
+    renderScene();
+    refreshMetaPanel();
+  });
+}
 
 const settingsForm = document.getElementById("settings-form");
 const settingsMessage = document.getElementById("settings-message");
@@ -444,6 +460,7 @@ function getCanvasCssSize() {
   return { w, h };
 }
 
+let mapResizeDebounceTimer = null;
 function resizeCanvasToDisplay() {
   if (!mapWrapper) {
     return;
@@ -456,12 +473,33 @@ function resizeCanvasToDisplay() {
   })();
 
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.floor(w * dpr);
-  canvas.height = Math.floor(h * dpr);
+  const nextW = Math.floor(w * dpr);
+  const nextH = Math.floor(h * dpr);
+  // Changing canvas width/height clears the buffer; skip if layout size unchanged to avoid visible flash.
+  if (
+    canvas.width === nextW &&
+    canvas.height === nextH &&
+    canvas.style.width === `${w}px` &&
+    canvas.style.height === `${h}px`
+  ) {
+    return;
+  }
+  canvas.width = nextW;
+  canvas.height = nextH;
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   renderScene();
+}
+
+function scheduleResizeCanvasToDisplay() {
+  if (mapResizeDebounceTimer) {
+    clearTimeout(mapResizeDebounceTimer);
+  }
+  mapResizeDebounceTimer = setTimeout(() => {
+    mapResizeDebounceTimer = null;
+    resizeCanvasToDisplay();
+  }, 80);
 }
 
 /**
@@ -931,6 +969,8 @@ function renderRosNodesStatus(data) {
   }
 
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+  const nowSec = Date.now() / 1000;
+  const staleThresholdSec = 10;
   const packageLabel = {
     simulate: "仿真",
     slam: "slam",
@@ -987,10 +1027,20 @@ function renderRosNodesStatus(data) {
     g.count += 1;
   });
   const robotGroups = Array.from(robotMap.values()).sort((a, b) => a.id.localeCompare(b.id));
-  rosNodesSummary.textContent = `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length}`;
+  const staleCount = nodes.filter((n) => {
+    const ts = Number(n && n.table_ts ? n.table_ts : 0);
+    return ts > 0 && nowSec - ts > staleThresholdSec;
+  }).length;
+  rosNodesSummary.textContent =
+    staleCount > 0
+      ? `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length} · 延迟节点: ${staleCount}`
+      : `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length}`;
 
   const renderNodeCard = (n) => {
     const name = String(n && n.name ? n.name : "");
+    const tableTs = Number(n && n.table_ts ? n.table_ts : 0);
+    const ageSec = tableTs > 0 ? Math.max(0, nowSec - tableTs) : 0;
+    const isStale = tableTs > 0 && ageSec > staleThresholdSec;
     const lifecycle = n && n.lifecycle ? n.lifecycle : {};
     const lcAvailable = !!lifecycle.available;
     const lcState = String(lifecycle.state || (lcAvailable ? "unknown" : "missing"));
@@ -1017,8 +1067,15 @@ function renderRosNodesStatus(data) {
           ${lcButtons || '<button type="button" disabled>lifecycle 不可用</button>'}
         </div>`
       : "";
+    const freshnessMeta = tableTs
+      ? `<div class="ros-node-meta">采样时间: <code>${ageSec.toFixed(1)}s 前</code>${
+          isStale ? "（已延迟）" : ""
+        }</div>`
+      : `<div class="ros-node-meta">采样时间: <code>unknown</code></div>`;
     return `
-      <article class="ros-node-card ${n && n.running ? "" : "ros-node-card--missing"}">
+      <article class="ros-node-card ${n && n.running ? "" : "ros-node-card--missing"}${
+        isStale ? " ros-node-card--stale" : ""
+      }">
         <div class="ros-node-head">
           <div class="ros-node-head__titles">
             <strong><code>${escapeHtml(name)}</code></strong>
@@ -1026,6 +1083,7 @@ function renderRosNodesStatus(data) {
           <span class="ros-node-badge ${statusClass}">${n && n.running ? "运行中" : "未运行"}</span>
         </div>
         ${lifecycleMeta}
+        ${freshnessMeta}
         <div class="ros-node-controls">
           ${lifecycleActions}
           <div class="ros-node-actions">
@@ -1335,6 +1393,45 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/** 在线优先用话题实时值，否则用持久化缓存（robot_status / task_status 展示用） */
+function pickPresenceStatusField(r, liveKey, persistedKey) {
+  const live = String((r && r[liveKey]) || "").trim();
+  const persisted = String((r && r[persistedKey]) || "").trim();
+  if (r && r.online && live) {
+    return { value: live, src: "实时" };
+  }
+  if (persisted) {
+    return { value: persisted, src: "持久化" };
+  }
+  if (live) {
+    return { value: live, src: "实时" };
+  }
+  return { value: "—", src: "" };
+}
+
+function renderPresenceStatusBlock(r) {
+  const rs = pickPresenceStatusField(r, "liveRobotStatus", "persistedRobotStatus");
+  const ts = pickPresenceStatusField(r, "liveTaskStatus", "persistedTaskStatus");
+  const src = (x) =>
+    x.src ? `<span class="robot-presence-status__src">${escapeHtml(x.src)}</span>` : "";
+  return `<div class="robot-presence-status" aria-label="robot_status 与 task_status">
+    <div class="robot-presence-status__row">
+      <span class="robot-presence-status__k">robot_status</span>
+      <span class="robot-presence-status__v"><code>${escapeHtml(rs.value)}</code>${src(rs)}</span>
+    </div>
+    <div class="robot-presence-status__row">
+      <span class="robot-presence-status__k">task_status</span>
+      <span class="robot-presence-status__v"><code>${escapeHtml(ts.value)}</code>${src(ts)}</span>
+    </div>
+  </div>`;
+}
+
+function normalizeNewPresenceRobotId(raw) {
+  let s = String(raw || "").trim();
+  s = s.replace(/^\/+|\/+$/g, "");
+  return s;
+}
+
 async function fetchRobotStatusCache() {
   try {
     const data = await fetchJson(`${API_BASE_URL}/api/robot/status/cache`);
@@ -1357,6 +1454,9 @@ function mergePresenceRows() {
           floor: String((it && it.floor) || ""),
           online: !!(it && it.online),
           persistedRobotStatus: String((it && it.persisted_robot_status) || "").trim(),
+          persistedTaskStatus: String((it && it.persisted_task_status) || "").trim(),
+          liveRobotStatus: String((it && it.live_robot_status) || "").trim(),
+          liveTaskStatus: String((it && it.live_task_status) || "").trim(),
           persistedIsSim: !!(it && it.persisted_is_simulation),
           simButton: it && it.sim_button ? it.sim_button : null,
         };
@@ -1387,13 +1487,19 @@ function mergePresenceRows() {
       (cache && String(cache.current_map || "").trim()) ||
       "";
     const persistedRobotStatus = cache ? String(cache.robot_status || "").trim() : "";
+    const persistedTaskStatus = cache ? String(cache.task_status || "").trim() : "";
     const persistedIsSim = !!(cache && cache.is_simulation);
+    const liveRobotStatus = liveR ? String(liveR.robot_status || "").trim() : "";
+    const liveTaskStatus = liveR ? String(liveR.task_status || "").trim() : "";
     rows.push({
       id,
       name,
       floor,
       online,
       persistedRobotStatus,
+      persistedTaskStatus,
+      liveRobotStatus,
+      liveTaskStatus,
       persistedIsSim,
     });
   });
@@ -1463,18 +1569,12 @@ function renderRobotPresencePanel() {
         ? '<span class="robot-presence-badge robot-presence-badge--online">在线</span>'
         : '<span class="robot-presence-badge robot-presence-badge--offline">离线</span>';
       const floorLine = r.floor
-        ? `<div class="robot-presence-list__meta">${escapeHtml(r.floor)}</div>`
+        ? `<div class="robot-presence-list__meta">地图: ${escapeHtml(r.floor)}</div>`
         : "";
-      let historyLine = "";
-      if (r.persistedRobotStatus) {
-        const simTag = r.persistedIsSim ? " · 上次仿真" : "";
-        const rs = escapeHtml(r.persistedRobotStatus);
-        const mapHint =
-          String(r.persistedRobotStatus).toLowerCase() === "mapping"
-            ? " · 仿真上线将尝试自动拉起建图"
-            : " · 建图需在 ROS 页手动 start";
-        historyLine = `<div class="robot-presence-list__hint">历史 robot_status: <code>${rs}</code>${simTag}${mapHint}</div>`;
-      }
+      const simTag = r.persistedIsSim
+        ? '<span class="robot-presence-sim-tag" title="持久化记录曾标记为仿真">上次仿真</span>'
+        : "";
+      const statusBlock = renderPresenceStatusBlock(r);
       const phase = simBringupPhaseByRobot[r.id] || "idle";
       let simLabel = "仿真上线";
       let simAction = "bringup";
@@ -1529,10 +1629,10 @@ function renderRobotPresencePanel() {
       )}</button>`;
       return `<li class="${selectedCls.trim()}" data-presence-robot-id="${escapeHtml(r.id)}">
         <div>
-          <div class="robot-presence-list__id">${escapeHtml(r.name)}</div>
+          <div class="robot-presence-list__id">${escapeHtml(r.name)}${simTag}</div>
           <div class="robot-presence-list__meta">${escapeHtml(r.id)}</div>
           ${floorLine}
-          ${historyLine}
+          ${statusBlock}
         </div>
         <div class="robot-presence-row__tail">
           ${badge}
@@ -1556,6 +1656,9 @@ function setRobotPresenceOpen(open) {
     robotPresenceCacheTimer = null;
   }
   if (open) {
+    if (robotPresenceNewMsg) {
+      robotPresenceNewMsg.textContent = "";
+    }
     fetchRobotStatusCache()
       .then(() => {
         renderRobotPresencePanel();
@@ -1595,6 +1698,65 @@ function initRobotPresenceUi() {
     }
   });
   updateRobotPresenceTriggerSummary();
+  if (btnRobotPresenceBringupNew && robotPresenceNewId) {
+    robotPresenceNewId.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        btnRobotPresenceBringupNew.click();
+      }
+    });
+    btnRobotPresenceBringupNew.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const rid = normalizeNewPresenceRobotId(robotPresenceNewId.value);
+      if (!rid) {
+        if (robotPresenceNewMsg) {
+          robotPresenceNewMsg.textContent = "请填写机器人 ID";
+        }
+        return;
+      }
+      if (!/^[\w-]+$/.test(rid)) {
+        if (robotPresenceNewMsg) {
+          robotPresenceNewMsg.textContent = "仅允许字母、数字、下划线与连字符";
+        }
+        return;
+      }
+      const rows = mergePresenceRows();
+      if (rows.some((x) => x.id === rid)) {
+        if (robotPresenceNewMsg) {
+          robotPresenceNewMsg.textContent = "该 ID 已在上方列表中，请用对应行的按钮";
+        }
+        return;
+      }
+      if (robotPresenceNewMsg) {
+        robotPresenceNewMsg.textContent = `正在上线 ${rid}…`;
+      }
+      btnRobotPresenceBringupNew.disabled = true;
+      try {
+        await runSimBringupForRobot(rid);
+        if (robotPresenceNewMsg) {
+          robotPresenceNewMsg.textContent = "已下发启动脚本，等待 /…/robot_status";
+        }
+        robotPresenceNewId.value = "";
+        await fetchRobotStatusCache();
+        try {
+          latestSnapshot = await fetchJson(`${API_BASE_URL}/api/robot/pose`);
+        } catch {
+          /* ignore */
+        }
+        renderRobotPresencePanel();
+        updateRobotStatus();
+        scheduleMapPaint();
+      } catch (err) {
+        if (robotPresenceNewMsg) {
+          robotPresenceNewMsg.textContent = err.message || String(err);
+        }
+        appendLog(`新机器人仿真上线失败: ${err.message || err}`);
+      } finally {
+        btnRobotPresenceBringupNew.disabled = false;
+      }
+    });
+  }
   if (robotPresenceList) {
     robotPresenceList.addEventListener("click", async (ev) => {
       const simBtn = ev.target.closest("button[data-sim-bringup]");
@@ -1887,8 +2049,7 @@ async function fetchPoseOnce() {
   try {
     latestSnapshot = await fetchJson(`${API_BASE_URL}/api/robot/pose`);
     updateRobotStatus();
-    renderScene();
-    refreshMetaPanel();
+    scheduleMapPaint();
   } catch (err) {
     latestSnapshot = null;
     updateRobotStatus();
@@ -1900,8 +2061,7 @@ function startPoseStream() {
   eventSource.onmessage = (event) => {
     latestSnapshot = JSON.parse(event.data);
     updateRobotStatus();
-    renderScene();
-    refreshMetaPanel();
+    scheduleMapPaint();
   };
   eventSource.onerror = () => {
     eventSource.close();
@@ -2103,7 +2263,7 @@ function startSensorPolling() {
         }
       })
     );
-    renderScene();
+    scheduleMapPaint();
   }, 250);
 }
 
@@ -2301,11 +2461,11 @@ async function initMonitor() {
 
   if (typeof ResizeObserver !== "undefined" && mapWrapper) {
     const ro = new ResizeObserver(() => {
-      resizeCanvasToDisplay();
+      scheduleResizeCanvasToDisplay();
     });
     ro.observe(mapWrapper);
   } else {
-    window.addEventListener("resize", resizeCanvasToDisplay);
+    window.addEventListener("resize", scheduleResizeCanvasToDisplay);
   }
 
   await fetchFloors();
@@ -2444,14 +2604,22 @@ function initGazeboPage() {
   const camDriveKey = { up: false, down: false, left: false, right: false };
   let lastCameraDriveSendMs = 0;
   let cameraDriveTimer = null;
-  let topCameraRefreshTimer = null;
+  let topCameraPollTimer = null;
+  let topCameraTelemetryTimer = null;
   let topCameraRefreshInFlight = false;
+  let topCameraImageSkip = 0;
   let camZoomDir = 0;
+  /** @type {Record<string, unknown> | null} */
+  let lastTopCameraStatusSnap = null;
+
+  const gazeboCameraWrap = document.getElementById("gazebo-camera-wrap");
+  const elTopCamMain = document.getElementById("gazebo-top-camera-line-main");
+  const elTopCamStamp = document.getElementById("gazebo-top-camera-line-stamp");
+  const elTopCamHint = document.getElementById("gazebo-top-camera-line-hint");
 
   const CAMERA_Z_MIN = 6.0;
   const CAMERA_Z_MAX = 80.0;
   const CAMERA_FRAME_SIZE = 20.0;
-  const CAMERA_REFRESH_MS = 40;
   const CAMERA_ZONE_CENTERS = {
     1: { x: -10.0, y: 10.0 },
     2: { x: 10.0, y: 10.0 },
@@ -2695,7 +2863,7 @@ function initGazeboPage() {
     }
   }
 
-  function fitTopCameraCanvas(w, h) {
+  function fitTopCameraCanvas() {
     if (!topCameraCanvas || !topCameraCtx) {
       return;
     }
@@ -2708,11 +2876,131 @@ function initGazeboPage() {
     topCameraCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     topCameraCtx.fillStyle = "#ffffff";
     topCameraCtx.fillRect(0, 0, vw, vh);
-    if (w && h) {
-      topCameraCtx.fillStyle = "#475569";
-      topCameraCtx.font = "12px sans-serif";
-      topCameraCtx.fillText(`${w}x${h}`, 8, 16);
+  }
+
+  function applyGazeboCameraWrapTier(tier) {
+    if (!gazeboCameraWrap) {
+      return;
     }
+    gazeboCameraWrap.classList.remove(
+      "gazebo-camera-wrap--fresh",
+      "gazebo-camera-wrap--aging",
+      "gazebo-camera-wrap--stale",
+      "gazebo-camera-wrap--offline"
+    );
+    if (tier < 0) {
+      gazeboCameraWrap.classList.add("gazebo-camera-wrap--offline");
+      return;
+    }
+    if (tier === 0) {
+      gazeboCameraWrap.classList.add("gazebo-camera-wrap--fresh");
+    } else if (tier === 1) {
+      gazeboCameraWrap.classList.add("gazebo-camera-wrap--aging");
+    } else {
+      gazeboCameraWrap.classList.add("gazebo-camera-wrap--stale");
+    }
+  }
+
+  function paintTopCameraOverlay(ageSec, tier, st) {
+    if (!elTopCamMain || !elTopCamStamp || !elTopCamHint) {
+      return;
+    }
+    if (!st || st.available === false) {
+      elTopCamMain.className =
+        "gazebo-top-camera-overlay__main gazebo-top-camera-overlay__main--stale";
+      elTopCamMain.textContent = "未连接 · 无 topdown 图像";
+      elTopCamStamp.textContent = "桥未缓存帧（检查 Gazebo、ros_tf_bridge 与图像 topic）";
+      elTopCamHint.textContent = "";
+      return;
+    }
+    const tierCls = tier === 0 ? "fresh" : tier === 1 ? "aging" : "stale";
+    elTopCamMain.className = `gazebo-top-camera-overlay__main gazebo-top-camera-overlay__main--${tierCls}`;
+    let ageLabel =
+      ageSec < 120
+        ? `${ageSec.toFixed(1)}s`
+        : `${Math.floor(ageSec / 60)}m${Math.floor(ageSec % 60)}s`;
+    let head = `距上次收到帧: ${ageLabel}`;
+    if (tier === 2) {
+      head += " · 历史画面 / 可能已离线 (≥30s)";
+    } else if (tier === 1) {
+      head += " · 帧偏旧 (≥10s)";
+    } else {
+      head += " · 新鲜 (<10s)";
+    }
+    elTopCamMain.textContent = head;
+    const sec = st.stamp_sec != null ? Number(st.stamp_sec) : null;
+    const nsec = st.stamp_nanosec != null ? Number(st.stamp_nanosec) : null;
+    const wh =
+      st.width && st.height
+        ? `${Number(st.width)}×${Number(st.height)}`
+        : cameraFrame.width && cameraFrame.height
+          ? `${cameraFrame.width}×${cameraFrame.height}`
+          : "—";
+    const fid = st.frame_id ? String(st.frame_id) : "";
+    if (sec != null && Number.isFinite(sec) && nsec != null && Number.isFinite(nsec)) {
+      const nsPad = String(Math.max(0, Math.floor(nsec))).padStart(9, "0");
+      elTopCamStamp.textContent = `ROS 时间戳: ${sec}.${nsPad} · ${wh}${fid ? ` · ${fid}` : ""}`;
+    } else {
+      elTopCamStamp.textContent = `分辨率: ${wh}${fid ? ` · ${fid}` : ""}`;
+    }
+    if (tier === 2) {
+      elTopCamHint.textContent = "超过 30s 未更新：仍显示最后一帧，取点可能不准；恢复 topic 后将自动回到高频刷新。";
+    } else if (tier === 1) {
+      elTopCamHint.textContent = "超过 10s 未更新：请确认仿真与相机插件仍在发布。";
+    } else {
+      elTopCamHint.textContent = "";
+    }
+  }
+
+  function tickTopCameraOverlayClock() {
+    if (!gazeboViewActive()) {
+      return;
+    }
+    if (!lastTopCameraStatusSnap || lastTopCameraStatusSnap.available === false) {
+      return;
+    }
+    const recv = Number(lastTopCameraStatusSnap.received_at || 0);
+    if (!recv) {
+      return;
+    }
+    const age = Math.max(0, Date.now() / 1000 - recv);
+    let tier = 0;
+    if (age >= 30) {
+      tier = 2;
+    } else if (age >= 10) {
+      tier = 1;
+    }
+    paintTopCameraOverlay(age, tier, lastTopCameraStatusSnap);
+    applyGazeboCameraWrapTier(tier);
+  }
+
+  function updateTopCameraOverlayFromStatus(st) {
+    lastTopCameraStatusSnap = st && typeof st === "object" ? { ...st } : null;
+    if (!lastTopCameraStatusSnap || lastTopCameraStatusSnap.available === false) {
+      paintTopCameraOverlay(0, -1, lastTopCameraStatusSnap);
+      return;
+    }
+    const age = Number(lastTopCameraStatusSnap.age_received_sec ?? 0);
+    const tier = Number(lastTopCameraStatusSnap.stale_tier ?? 0);
+    paintTopCameraOverlay(Number.isFinite(age) ? age : 0, tier, lastTopCameraStatusSnap);
+  }
+
+  function clearTopCameraNoSignal() {
+    lastTopCameraStatusSnap = { available: false };
+    if (!topCameraCanvas || !topCameraCtx) {
+      return;
+    }
+    fitTopCameraCanvas();
+    const vw = topCameraCanvas.clientWidth || 320;
+    const vh = topCameraCanvas.clientHeight || 240;
+    topCameraCtx.fillStyle = "#0f172a";
+    topCameraCtx.fillRect(0, 0, vw, vh);
+    topCameraCtx.fillStyle = "#94a3b8";
+    topCameraCtx.font = "13px sans-serif";
+    topCameraCtx.fillText("无图像（桥未收到 topdown 相机 topic）", 14, 28);
+    cameraFrame.width = 0;
+    cameraFrame.height = 0;
+    updateTopCameraOverlayFromStatus({ available: false });
   }
 
   function rotateVectorByQuaternion(vec, quat) {
@@ -2859,7 +3147,7 @@ function initGazeboPage() {
           rgba[j + 2] = rgb[i + 2];
           rgba[j + 3] = 255;
         }
-        fitTopCameraCanvas(width, height);
+        fitTopCameraCanvas();
         const vw = topCameraCanvas.clientWidth || width;
         const vh = topCameraCanvas.clientHeight || height;
         const off = document.createElement("canvas");
@@ -2869,11 +3157,76 @@ function initGazeboPage() {
         offCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
         topCameraCtx.clearRect(0, 0, vw, vh);
         topCameraCtx.drawImage(off, 0, 0, vw, vh);
+        lastTopCameraStatusSnap = {
+          available: true,
+          received_at: data.received_at,
+          age_received_sec: data.age_received_sec,
+          stale_tier: data.stale_tier,
+          stamp_sec: data.stamp_sec,
+          stamp_nanosec: data.stamp_nanosec,
+          width: data.width,
+          height: data.height,
+          frame_id: data.frame_id,
+        };
+        tickTopCameraOverlayClock();
+      } else if (!data || data.available === false) {
+        clearTopCameraNoSignal();
       }
     } catch {
       /* ignore */
     } finally {
       topCameraRefreshInFlight = false;
+    }
+  }
+
+  function stopTopCameraAdaptiveLoop() {
+    if (topCameraPollTimer) {
+      clearTimeout(topCameraPollTimer);
+      topCameraPollTimer = null;
+    }
+  }
+
+  async function runTopCameraPollCycle() {
+    if (!gazeboViewActive()) {
+      return;
+    }
+    let nextMs = 4500;
+    try {
+      const st = await fetchJson(`${API_BASE_URL}/api/gazebo/top_camera/status`);
+      lastTopCameraStatusSnap = st && typeof st === "object" ? { ...st } : { available: false };
+      updateTopCameraOverlayFromStatus(lastTopCameraStatusSnap);
+      if (!st || st.available === false) {
+        applyGazeboCameraWrapTier(-1);
+        clearTopCameraNoSignal();
+        topCameraImageSkip = 0;
+        nextMs = 5000;
+      } else {
+        const tier = Number(st.stale_tier || 0);
+        const age = Number(st.age_received_sec ?? 0);
+        applyGazeboCameraWrapTier(tier);
+        let fetchImg = false;
+        if (tier === 0 && age < 2.5) {
+          fetchImg = true;
+          nextMs = 100;
+        } else if (tier === 0) {
+          fetchImg = topCameraImageSkip++ % 2 === 0;
+          nextMs = 400;
+        } else if (tier === 1) {
+          fetchImg = topCameraImageSkip++ % 3 === 0;
+          nextMs = 900;
+        } else {
+          fetchImg = topCameraImageSkip++ % 5 === 0;
+          nextMs = 2200;
+        }
+        if (fetchImg) {
+          await refreshTopCameraFrame();
+        }
+      }
+    } catch {
+      nextMs = 5000;
+    }
+    if (gazeboViewActive()) {
+      topCameraPollTimer = window.setTimeout(runTopCameraPollCycle, nextMs);
     }
   }
 
@@ -3013,19 +3366,60 @@ function initGazeboPage() {
   }
 
   if (topCameraCanvas) {
-    fillTopdownCameraPoseFromGazebo().catch(() => {});
-    fitTopCameraCanvas();
     topCameraCanvas.addEventListener("click", handleTopCameraPick);
-    cameraDriveTimer = window.setInterval(() => {
-      tickTopdownCameraDrive();
-    }, 33);
-    window.addEventListener("resize", () => {
+    let gazeboCameraLoopsActive = false;
+    function startGazeboCameraLoops() {
+      if (gazeboCameraLoopsActive) {
+        return;
+      }
+      gazeboCameraLoopsActive = true;
+      topCameraImageSkip = 0;
+      fillTopdownCameraPoseFromGazebo().catch(() => {});
       fitTopCameraCanvas();
+      stopTopCameraAdaptiveLoop();
+      runTopCameraPollCycle();
+      if (!topCameraTelemetryTimer) {
+        topCameraTelemetryTimer = window.setInterval(tickTopCameraOverlayClock, 1000);
+      }
+      if (!cameraDriveTimer) {
+        cameraDriveTimer = window.setInterval(() => {
+          tickTopdownCameraDrive();
+        }, 33);
+      }
+    }
+    function stopGazeboCameraLoops() {
+      if (!gazeboCameraLoopsActive) {
+        return;
+      }
+      gazeboCameraLoopsActive = false;
+      stopTopCameraAdaptiveLoop();
+      if (topCameraTelemetryTimer) {
+        clearInterval(topCameraTelemetryTimer);
+        topCameraTelemetryTimer = null;
+      }
+      if (cameraDriveTimer) {
+        clearInterval(cameraDriveTimer);
+        cameraDriveTimer = null;
+      }
+      clearCamDriveKeys();
+    }
+    function syncGazeboCameraLoopsFromView() {
+      if (gazeboViewActive()) {
+        startGazeboCameraLoops();
+      } else {
+        stopGazeboCameraLoops();
+      }
+    }
+    if (views.gazebo) {
+      const mo = new MutationObserver(() => syncGazeboCameraLoopsFromView());
+      mo.observe(views.gazebo, { attributes: true, attributeFilter: ["class"] });
+    }
+    syncGazeboCameraLoopsFromView();
+    window.addEventListener("resize", () => {
+      if (gazeboViewActive()) {
+        fitTopCameraCanvas();
+      }
     });
-    refreshTopCameraFrame().catch(() => {});
-    topCameraRefreshTimer = window.setInterval(() => {
-      refreshTopCameraFrame().catch(() => {});
-    }, CAMERA_REFRESH_MS);
   }
 }
 

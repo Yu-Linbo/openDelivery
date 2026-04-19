@@ -9,7 +9,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
-    root = get_package_share_directory("open_delivery_system")
+    root = get_package_share_directory("system")
     return LaunchDescription(
         [
             LogInfo(msg="[debug_test_stack.launch.py] including startup.launch.py"),

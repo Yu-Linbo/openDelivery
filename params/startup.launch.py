@@ -8,7 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg = FindPackageShare("open_delivery_system")
+    pkg = FindPackageShare("system")
     return LaunchDescription(
         [
             DeclareLaunchArgument("robot_name", default_value="robot2"),

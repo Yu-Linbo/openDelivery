@@ -24,7 +24,7 @@ def generate_launch_description():
                 actions=[
                     PushRosNamespace(LaunchConfiguration("namespace")),
                     Node(
-                        package="open_delivery_system",
+                        package="system",
                         executable="fake_pub_node",
                         name="fake",
                         output="screen",

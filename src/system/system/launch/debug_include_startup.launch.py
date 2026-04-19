@@ -1,4 +1,4 @@
-"""Debug: same as `ros2 launch open_delivery_system startup.launch.py` via IncludeLaunchDescription."""
+"""Debug: same as `ros2 launch system startup.launch.py` via IncludeLaunchDescription."""
 
 import os
 
@@ -9,7 +9,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
-    root = get_package_share_directory("open_delivery_system")
+    root = get_package_share_directory("system")
     return LaunchDescription(
         [
             IncludeLaunchDescription(

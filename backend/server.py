@@ -20,7 +20,9 @@ from ros_sensor_store import (
     get_gazebo_models,
     get_planned_path,
     get_scan,
+    augment_topdown_for_api,
     get_topdown_image,
+    get_topdown_image_status,
 )
 from robot_lifecycle import RobotLifecycleOrchestrator
 
@@ -1011,6 +1013,9 @@ def _build_presence_rows() -> dict:
                 "online": online,
                 "floor": floor,
                 "persisted_robot_status": str(ci.get("robot_status") or "").strip(),
+                "persisted_task_status": str(ci.get("task_status") or "").strip(),
+                "live_robot_status": str(lr.get("robot_status") or "").strip(),
+                "live_task_status": str(lr.get("task_status") or "").strip(),
                 "persisted_is_simulation": bool(ci.get("is_simulation")),
                 "live_is_simulation": bool(lr.get("is_simulation")),
             }
@@ -1088,14 +1093,22 @@ def _lifecycle_get_quick(root_dir: Path, node_name: str, timeout_s: float = 1.0)
             env=os.environ.copy(),
         )
     except subprocess.TimeoutExpired:
-        return {"available": False, "state": "timeout", "raw": "timeout"}
+        return {"available": True, "state": "timeout", "raw": "timeout"}
     txt = (proc.stdout or proc.stderr or "").strip()
+    # Remove ANSI escape sequences from ros2 CLI output before parsing.
+    txt_clean = re.sub(r"\x1B\[[0-9;]*[A-Za-z]", "", txt)
     if proc.returncode != 0:
-        return {"available": False, "state": "missing", "raw": txt}
-    m = re.search(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)", txt)
-    if not m:
-        return {"available": True, "state": "unknown", "raw": txt}
-    return {"available": True, "state": m.group(2).strip(), "id": int(m.group(1)), "raw": txt}
+        return {"available": False, "state": "missing", "raw": txt_clean}
+    # ros2 lifecycle get output differs across distros/plugins:
+    # - "state: [3] active"
+    # - "active [3]"
+    m = re.search(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)", txt_clean, re.IGNORECASE)
+    if m:
+        return {"available": True, "state": m.group(2).strip().lower(), "id": int(m.group(1)), "raw": txt_clean}
+    m2 = re.search(r"\b([A-Za-z_]+)\s*\[\s*(\d+)\s*\]", txt_clean)
+    if m2:
+        return {"available": True, "state": m2.group(1).strip().lower(), "id": int(m2.group(2)), "raw": txt_clean}
+    return {"available": True, "state": "unknown", "raw": txt_clean}
 
 
 def _lifecycle_set_quick(root_dir: Path, node_name: str, transition: str, timeout_s: float = 2.0) -> dict:
@@ -1134,6 +1147,9 @@ def _build_debug_nodes_view() -> dict:
     def _is_lifecycle_candidate(node_name: str) -> bool:
         n = str(node_name or "")
         hints = (
+            "/slam_bringup/localization",
+            "/slam_bringup/mapping",
+            "/heartbeat",
             "/lifecycle_manager_",
             "/bt_navigator",
             "/controller_server",
@@ -1143,10 +1159,28 @@ def _build_debug_nodes_view() -> dict:
         )
         return any(h in n for h in hints)
 
+    def _should_probe_lifecycle_now(node_name: str) -> bool:
+        # Keep this endpoint responsive for the Web ROS panel.
+        # Probe only key orchestration nodes every poll; other candidates still
+        # keep lifecycle action buttons but skip per-request state probing.
+        n = str(node_name or "")
+        return (
+            "/slam_bringup/localization" in n
+            or "/slam_bringup/mapping" in n
+            or "/heartbeat" in n
+            or "/lifecycle_manager_navigation" in n
+        )
+
     nodes = []
     for nm in names:
         lc_capable = _is_lifecycle_candidate(nm)
-        lc = {"available": lc_capable, "state": "unknown", "raw": "deferred"}
+        lc = (
+            _lifecycle_get_quick(ROOT_DIR, nm, timeout_s=3.0)
+            if lc_capable and _should_probe_lifecycle_now(nm)
+            else {"available": False, "state": "missing", "raw": "not-lifecycle-candidate"}
+        )
+        if lc_capable and not _should_probe_lifecycle_now(nm):
+            lc = {"available": True, "state": "unknown", "raw": "deferred"}
         nodes.append(
             {
                 "name": nm,
@@ -1166,6 +1200,87 @@ def _build_debug_nodes_view() -> dict:
         "last_error": "",
         "timestamp": time.time(),
     }
+
+
+class RosDebugNodesTable:
+    """Background-maintained table for ROS debug node cards."""
+
+    def __init__(self, refresh_sec: float = 2.0):
+        self._refresh_sec = max(0.5, float(refresh_sec))
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._table = {
+            "nodes": [],
+            "last_error": "",
+            "timestamp": 0.0,
+            "table_timestamp": 0.0,
+        }
+        self.refresh_once()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="ros-debug-nodes-table")
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._refresh_sec):
+            self.refresh_once()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        t = getattr(self, "_thread", None)
+        if t and t.is_alive():
+            t.join(timeout=1.0)
+
+    def refresh_once(self) -> None:
+        stamp = time.time()
+        try:
+            data = _build_debug_nodes_view()
+            if not isinstance(data, dict):
+                raise RuntimeError("invalid debug nodes payload")
+            nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else []
+            with self._lock:
+                prev_nodes = self._table.get("nodes") if isinstance(self._table.get("nodes"), list) else []
+            prev_by_name = {}
+            for p in prev_nodes:
+                if not isinstance(p, dict):
+                    continue
+                pn = str(p.get("name") or "").strip()
+                if pn:
+                    prev_by_name[pn] = p
+            for node in nodes:
+                if isinstance(node, dict):
+                    nn = str(node.get("name") or "").strip()
+                    lc = node.get("lifecycle") if isinstance(node.get("lifecycle"), dict) else {}
+                    if lc.get("state") == "timeout" and nn in prev_by_name:
+                        prev_lc = prev_by_name[nn].get("lifecycle")
+                        if isinstance(prev_lc, dict):
+                            prev_state = str(prev_lc.get("state") or "").strip().lower()
+                            if prev_state not in ("", "timeout", "missing", "unknown"):
+                                merged = dict(prev_lc)
+                                merged["raw"] = "timeout; using previous cached lifecycle state"
+                                merged["from_cache"] = True
+                                node["lifecycle"] = merged
+                    node["table_ts"] = stamp
+            table = {
+                "nodes": nodes,
+                "last_error": str(data.get("last_error") or ""),
+                "timestamp": float(data.get("timestamp") or stamp),
+                "table_timestamp": stamp,
+            }
+            with self._lock:
+                self._table = table
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                # Preserve last successful rows; only update error + table timestamp.
+                self._table["last_error"] = str(exc)
+                self._table["table_timestamp"] = stamp
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return json.loads(json.dumps(self._table))
+
+
+ROS_DEBUG_NODES_TABLE = RosDebugNodesTable(
+    refresh_sec=float(os.environ.get("ROS_DEBUG_NODES_REFRESH_SEC") or 2.0)
+)
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -1762,7 +1877,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/ros/debug/nodes":
             try:
-                out = _build_debug_nodes_view()
+                out = ROS_DEBUG_NODES_TABLE.snapshot()
             except Exception as err:  # noqa: BLE001
                 self._send_json({"error": str(err)}, 500)
                 return
@@ -1859,6 +1974,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(snap, 200)
             return
 
+        if path == "/api/gazebo/top_camera/status":
+            self._send_json(get_topdown_image_status(), 200)
+            return
+
         if path == "/api/gazebo/top_camera":
             frame = get_topdown_image()
             if not frame:
@@ -1867,7 +1986,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     200,
                 )
                 return
-            self._send_json(frame, 200)
+            self._send_json(augment_topdown_for_api(frame), 200)
             return
 
         m_scan = re.match(r"^/api/robot/([^/]+)/scan_2d$", path)
