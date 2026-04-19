@@ -20,6 +20,7 @@
 #   OPEN_DELIVERY_ROOT=/path/to/openDelivery SIM_MODE=sim sim_bringup.sh <robot_id>
 # 可选环境变量:
 #   SIM_BRINGUP_VERBOSE=1          打开 bash -x
+#   SIM_BRINGUP_MANAGER_ONLY=1     仅起 simulate + heartbeat + manager（health_monitor/task_manager），跳过 slam/nav（测 manager 用）
 #   SIM_BRINGUP_MANAGER_WAIT=2   heartbeat 就绪后等待秒数再拉 manager（默认 2）
 #   SIM_BRINGUP_MANAGER_POSE_TOPIC=amcl_pose   传给 health_monitor；置空则关闭位姿判定 ready
 #
@@ -175,6 +176,12 @@ ros2 launch manager manager.launch.py \
   "localization_pose_topic:=${MANAGER_POSE_TOPIC}" &
 log "started manager.launch.py (health_monitor+task_manager, pid $!) namespace=${RID} pose_topic=${MANAGER_POSE_TOPIC}"
 sleep "${MANAGER_WAIT}"
+
+if [[ "${SIM_BRINGUP_MANAGER_ONLY:-0}" == "1" ]]; then
+  log "SIM_BRINGUP_MANAGER_ONLY=1: skip slam + nav; background jobs = simulate + heartbeat + manager"
+  wait
+  exit 0
+fi
 
 # --- 3) 定位 + 建图（同时启动，按 lifecycle 切换 active/inactive）---
 ros2 launch slam_bringup localization.launch.py \

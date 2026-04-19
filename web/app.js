@@ -1453,6 +1453,7 @@ function mergePresenceRows() {
           name: String((it && it.name) || id),
           floor: String((it && it.floor) || ""),
           online: !!(it && it.online),
+          persistedCurrentMap: String((it && it.persisted_current_map) || "").trim(),
           persistedRobotStatus: String((it && it.persisted_robot_status) || "").trim(),
           persistedTaskStatus: String((it && it.persisted_task_status) || "").trim(),
           liveRobotStatus: String((it && it.live_robot_status) || "").trim(),
@@ -1488,6 +1489,7 @@ function mergePresenceRows() {
       "";
     const persistedRobotStatus = cache ? String(cache.robot_status || "").trim() : "";
     const persistedTaskStatus = cache ? String(cache.task_status || "").trim() : "";
+    const persistedCurrentMap = cache ? String(cache.current_map || "").trim() : "";
     const persistedIsSim = !!(cache && cache.is_simulation);
     const liveRobotStatus = liveR ? String(liveR.robot_status || "").trim() : "";
     const liveTaskStatus = liveR ? String(liveR.task_status || "").trim() : "";
@@ -1496,6 +1498,7 @@ function mergePresenceRows() {
       name,
       floor,
       online,
+      persistedCurrentMap,
       persistedRobotStatus,
       persistedTaskStatus,
       liveRobotStatus,
@@ -1571,6 +1574,11 @@ function renderRobotPresencePanel() {
       const floorLine = r.floor
         ? `<div class="robot-presence-list__meta">地图: ${escapeHtml(r.floor)}</div>`
         : "";
+      const lastCurrentMapLine = r.persistedCurrentMap
+        ? `<div class="robot-presence-list__lastmap"><span class="robot-presence-lastmap__k">上次 current_map</span> <code>${escapeHtml(
+            r.persistedCurrentMap
+          )}</code></div>`
+        : "";
       const simTag = r.persistedIsSim
         ? '<span class="robot-presence-sim-tag" title="持久化记录曾标记为仿真">上次仿真</span>'
         : "";
@@ -1604,10 +1612,10 @@ function renderRobotPresencePanel() {
           simDisabled = false;
         }
       } else if (phase === "idle" && r.online) {
-        simLabel = "仿真上线";
-        simAction = "bringup";
+        simLabel = "已在线";
+        simAction = "pending";
         simDisabled = true;
-        simTitle = "已检测到 /…/robot_status，避免重复上线";
+        simTitle = "已检测到 /…/robot_status，避免重复仿真上线";
       } else if (
         phase === "idle" &&
         !r.online &&
@@ -1632,6 +1640,7 @@ function renderRobotPresencePanel() {
           <div class="robot-presence-list__id">${escapeHtml(r.name)}${simTag}</div>
           <div class="robot-presence-list__meta">${escapeHtml(r.id)}</div>
           ${floorLine}
+          ${lastCurrentMapLine}
           ${statusBlock}
         </div>
         <div class="robot-presence-row__tail">
@@ -2210,11 +2219,16 @@ function startMapLivePolling() {
   }, 400);
 }
 
-async function postSaveMap(mapName) {
+async function postSaveMap(mapName, robotIdForMapping = "") {
+  const body = { map_name: mapName };
+  const rid = String(robotIdForMapping || "").trim();
+  if (rid) {
+    body.robot_id = rid;
+  }
   const res = await fetch(`${API_BASE_URL}/api/mapping/save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ map_name: mapName }),
+    body: JSON.stringify(body),
   });
   let payload = {};
   try {
@@ -2415,13 +2429,22 @@ async function initMonitor() {
       relocMessage.textContent = "请填写机器人 ID";
       return;
     }
-    const payload = { mode, robot_id: rid };
+    /** Aligns with ``LocalizeNavCommand.msg`` / POST ``type: localize_nav_command`` (task_manager → 切图/重定位). */
+    const payload = {
+      type: "localize_nav_command",
+      robot_id: rid,
+      map_name: "",
+      set_initial_pose: mode === "pose_only" || mode === "both",
+      x: 0,
+      y: 0,
+      yaw: 0,
+    };
     if (mode === "map_only" || mode === "both") {
       const mn = targetMapName();
       if (!mn) {
         relocMessage.textContent =
           isMappingFloor(floorSelect && floorSelect.value)
-            ? "建图模式下请填写「保存为」地图名（切图经 robot_status 的 current_map 字段下发）"
+            ? "建图模式下请填写「保存为」地图名（切图经 task_manager 准备后经 robot_status 下发）"
             : "请填写「保存为」地图名或选择已保存楼层";
         return;
       }
@@ -2443,7 +2466,7 @@ async function initMonitor() {
     try {
       await postRobotCommand(payload);
       relocMessage.textContent = "已下发到 ROS";
-      appendLog(`下发 ${mode} → ${rid}`);
+      appendLog(`下发 localize_nav_command (${mode}) → ${rid}`);
     } catch (err) {
       relocMessage.textContent = err.message || String(err);
     }
@@ -2495,12 +2518,19 @@ async function initMonitor() {
         return;
       }
       btnSaveMap.disabled = true;
-      mapStatus.textContent = "正在保存地图到 map/ …";
+      mapStatus.textContent = "正在调用 map_saver_cli 保存…";
       try {
-        await postSaveMap(name);
+        const mappingRid = isMappingFloor(activeFloor) ? robotIdFromMappingFloor(activeFloor) : "";
+        const payload = await postSaveMap(name, mappingRid);
         saveMapNamePreference(name);
-        mapStatus.textContent = `已保存 map/${name}/`;
-        appendLog(`地图已保存: ${name}`);
+        const dirLine =
+          payload && payload.map_dir ? ` → ${payload.map_dir}` : ` → map/${name}/`;
+        mapStatus.textContent = `已保存${dirLine}`;
+        appendLog(
+          payload && payload.map_topic
+            ? `地图已保存: ${name} · ${payload.map_topic}`
+            : `地图已保存: ${name}`
+        );
         await fetchFloors();
         addFloorOptions();
         if (floors.includes(name)) {

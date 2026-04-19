@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -222,15 +223,20 @@ void HeartbeatNode::recreate_timer_locked() {
   timer_ = rclcpp::create_timer(
     this, get_clock(), period, std::bind(&HeartbeatNode::tick, this));
 
-  const std::string fqn = fully_qualified_name(get_namespace(), get_name());
-  const std::string ns = get_namespace();
-  RCLCPP_INFO(
-    get_logger(),
-    "RobotStatus publisher relative name 'robot_status' (namespace '%s') -> effective topic under graph; "
-    "node FQN %s at %.2f Hz",
-    ns.c_str(),
-    fqn.c_str(),
-    hz);
+  const bool hz_changed =
+    std::isnan(last_logged_timer_hz_) || std::fabs(hz - last_logged_timer_hz_) > 1e-9;
+  if (hz_changed) {
+    last_logged_timer_hz_ = hz;
+    const std::string fqn = fully_qualified_name(get_namespace(), get_name());
+    const std::string ns = get_namespace();
+    RCLCPP_INFO(
+      get_logger(),
+      "RobotStatus publisher relative name 'robot_status' (namespace '%s') -> effective topic under graph; "
+      "node FQN %s at %.2f Hz",
+      ns.c_str(),
+      fqn.c_str(),
+      hz);
+  }
 }
 
 void HeartbeatNode::tick() {
@@ -274,8 +280,10 @@ void HeartbeatNode::on_set_params(
       new_params.emplace_back(
         "task_status", static_cast<int>(clamp_task_status(static_cast<int>(request->task_status))));
     }
+    bool publish_rate_changed = false;
     if (request->rate_hz > 0.0) {
       new_params.emplace_back("publish_rate", request->rate_hz);
+      publish_rate_changed = true;
     }
 
     if (!new_params.empty()) {
@@ -291,7 +299,7 @@ void HeartbeatNode::on_set_params(
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (timer_) {
+      if (timer_ && publish_rate_changed) {
         recreate_timer_locked();
       }
     }
@@ -335,6 +343,7 @@ HeartbeatNode::CallbackReturn HeartbeatNode::on_cleanup(const rclcpp_lifecycle::
   std::lock_guard<std::mutex> lock(mutex_);
   timer_.reset();
   pub_.reset();
+  last_logged_timer_hz_ = std::numeric_limits<double>::quiet_NaN();
   RCLCPP_INFO(get_logger(), "heartbeat cleaned up");
   return CallbackReturn::SUCCESS;
 }
@@ -343,6 +352,7 @@ HeartbeatNode::CallbackReturn HeartbeatNode::on_shutdown(const rclcpp_lifecycle:
   std::lock_guard<std::mutex> lock(mutex_);
   timer_.reset();
   pub_.reset();
+  last_logged_timer_hz_ = std::numeric_limits<double>::quiet_NaN();
   RCLCPP_INFO(get_logger(), "heartbeat shutdown");
   return CallbackReturn::SUCCESS;
 }

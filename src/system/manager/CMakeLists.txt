@@ -31,6 +31,7 @@ target_include_directories(task_manager_node PRIVATE
 ament_target_dependencies(task_manager_node
   rclcpp
   custom_msgs_srvs
+  geometry_msgs
 )
 
 install(TARGETS health_monitor_node task_manager_node

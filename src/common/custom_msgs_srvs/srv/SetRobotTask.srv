@@ -1,5 +1,8 @@
 # task_status: TASK_STATUS_* from RobotStatus.msg (0..4)
 uint8 task_status
+# robot_status: ROBOT_STATUS_* (0..4)，或 255 表示不修改（与 SetHeartbeatParams 一致）
+uint8 ROBOT_STATUS_LEAVE_UNCHANGED=255
+uint8 robot_status 255
 ---
 bool success
 string message

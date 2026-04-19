@@ -48,7 +48,62 @@ map
 
 ---
 
-## 4. 已有 ROS 2 包（当前仓库内）
+## 4. 运行时各节点与作用（概览）
+
+下文用 **`<R>`** 表示机器人命名空间（与 `robot_name` / `namespace` 一致，如 `robot2`）。**是否出现**取决于当前 launch（仅仿真、仅心跳、全栈等）。
+
+### 4.1 仿真 `simulate`（`simulate.launch.py`）
+
+| 节点 / 进程 | 作用 |
+|-------------|------|
+| **`gzserver`**（经 `gazebo_ros` 启动） | Gazebo 世界与物理仿真 |
+| **`/<R>/simulate/robot_state_publisher`** | 订阅 Gazebo 发布的 `joint_states`，按 URDF 发布 **`/<R>/odom` → `base_footprint` → `base_link`** 等 TF |
+| **`/<R>/simulate/spawn_entity`** | 将模型按 `robot_description` 生成到 Gazebo（通常很快结束） |
+| **Gazebo 插件（随 URDF）** | 差速底盘（`cmd_vel`）、**`/<R>/scan_2d`**、IMU、相机等 |
+
+### 4.2 心跳与管理器（`heartbeat.launch.py`，含 `manager`）
+
+| 节点 | 作用 |
+|------|------|
+| **`/<R>/heartbeat`**（Lifecycle） | 周期发布 **`/<R>/robot_status`**（`RobotStatus`）；提供 **`/<R>/set_heartbeat_params`** 服务，供外部/Web 改地图名、状态枚举等 |
+| **`/<R>/health_monitor`** | 监视必要节点与可选定位话题，通过 **`set_heartbeat_params`** 推进 **`robot_status`** 生命周期（如 initializing → localizing → ready） |
+| **`/<R>/task_manager`** | 提供 **`/<R>/set_robot_task`** 等接口，将任务侧 **`task_status`** 写入 heartbeat（再反映到 `robot_status`） |
+
+### 4.3 SLAM `slam_bringup`
+
+| 节点 | 作用 |
+|------|------|
+| **`/<R>/slam_bringup/mapping`**（`managed_slam_lifecycle`） | **建图**：`slam_toolbox` 在线建图，发布 **`/<R>/mapping`**（`OccupancyGrid`）与 **`map`→`/<R>/odom`** 等 TF |
+| **`/<R>/slam_bringup/localization`**（`managed_slam_lifecycle`） | **定位**：加载已有地图，发布 **`/<R>/map`** 与定位 TF；与 mapping **二选一** Lifecycle active |
+
+### 4.4 导航 `nav_bringup`（`stack.launch.py` → `navigation_namespaced.launch.py`）
+
+均在 **`/<R>/`** 下；全局代价地图通过 remap 订阅 **`/<R>/map`** 或 **`/<R>/mapping`**（由 `grid_mode` 决定）。
+
+| 节点 | 作用 |
+|------|------|
+| **`/<R>/controller_server`** | 局部规划 / DWB，输出 `cmd_vel` |
+| **`/<R>/planner_server`** | 全局路径（NavFn 等） |
+| **`/<R>/recoveries_server`** | 脱困（旋转、后退、等待等） |
+| **`/<R>/bt_navigator`** | 行为树导航（NavigateToPose 等） |
+| **`/<R>/waypoint_follower`** | 多点巡逻 / 航点跟随 |
+| **`/<R>/lifecycle_manager_navigation`** | 统一管理上述 Nav2 节点的 lifecycle |
+
+### 4.5 演示 `fake_pub`（`params/launch/fake/fake_pub.launch.py`）
+
+| 节点 | 作用 |
+|------|------|
+| **`/<R>/fake`** | 轻量假数据（位姿/话题），便于无 Gazebo 时与 Web 联调 |
+
+### 4.6 Web 后端桥（非 `src` 内 ROS 包）
+
+| 组件 | 作用 |
+|------|------|
+| **`backend/ros_tf_bridge.py`（ROS 2 节点）** | 聚合多机 TF、`/*/robot_status` 发现、激光/路径/topdown 相机等供 **HTTP** 使用；与上表节点通过话题/服务协同 |
+
+---
+
+## 5. 已有 ROS 2 包（当前仓库内）
 
 | 包名 | 路径 | 说明 |
 |------|------|------|
@@ -56,6 +111,10 @@ map
 | **slam_bringup** | `slam/slam_bringup/` | `slam_toolbox` 建图 / 定位 launch 与参数 |
 | **slam_toolbox** | `slam/slam_toolbox/` | 上游源码（通常 **`foxy-devel`** 分支，与 ROS 2 Foxy 对齐） |
 | **nav_bringup** | `navigation/nav_bringup/` | 仅 Nav2 导航；代价地图直接订 `/<robot>/map` 或 `/<robot>/mapping`（`grid_mode`）；TF 由 SLAM；见 `navigation/nav_bringup/README.md` |
+| **heartbeat** | `system/heartbeat/` | `RobotStatus` 周期发布、`set_heartbeat_params`；Lifecycle 节点 **`heartbeat`**；launch 内嵌 **manager** |
+| **manager** | `system/manager/` | **`health_monitor`**、**`task_manager`**：状态机与任务指令转发到 heartbeat |
+| **system** | `system/system/` | 元包：安装 `params/`、`sim_bringup.sh` 等；`fake_pub` 可执行安装为 **`fake_pub_node`** |
+| **custom_msgs_srvs** | `common/custom_msgs_srvs/` | `RobotStatus.msg`、`SetHeartbeatParams.srv` 等接口定义 |
 
 ### 非 colcon 包（脚本）
 
@@ -65,7 +124,7 @@ map
 
 ---
 
-## 5. 构建（`colcon`）
+## 6. 构建（`colcon`）
 
 在**工作区根** `openDelivery/`（与 `src/`、`install/` 同级）执行：
 
@@ -73,6 +132,8 @@ map
 cd /path/to/openDelivery
 source /opt/ros/$ROS_DISTRO/setup.bash
 colcon build --symlink-install --packages-up-to simulate slam_bringup
+# 含心跳、任务管理、Nav2 bringup（依赖会一并解析）：
+# colcon build --symlink-install --packages-up-to heartbeat nav_bringup
 # 若包含 slam_toolbox 源码：
 # colcon build --symlink-install --packages-select slam_toolbox simulate slam_bringup
 source install/setup.bash
@@ -82,9 +143,9 @@ source install/setup.bash
 
 ---
 
-## 6. 运行流程（简版）
+## 7. 运行流程（简版）
 
-### 6.0 一键：建图 + 心跳 + 导航（推荐）
+### 7.0 一键：建图 + 心跳 + 导航（推荐）
 
 在仓库根目录**已** `source install/setup.bash`，且 **终端 1** 已按与 `robot_name` 一致的命名空间起好仿真或真机（提供 `/clock`、`/<robot>/odom`、`/<robot>/scan_2d` 等）：
 
@@ -95,7 +156,7 @@ cd /path/to/openDelivery
 ./start_heartbeat_slam_nav.sh robot2 mapping
 ```
 
-等价拉起：`heartbeat`（`mapping_mode:=true`）+ `slam_bringup/mapping` + `nav_bringup`（`grid_mode:=mapping`，Nav2 直接订 `/<robot>/mapping`）。可选环境变量见脚本内注释（如 `USE_SIM_TIME`、`CURRENT_MAP`）。
+等价拉起：`heartbeat`（含 **health_monitor / task_manager**，`mapping_mode:=true`）+ `slam_bringup/mapping` + `nav_bringup`（`grid_mode:=mapping`，Nav2 直接订 `/<robot>/mapping`）。可选环境变量见脚本内注释（如 `USE_SIM_TIME`、`CURRENT_MAP`）。
 
 **Nav2 系统包（Foxy，`apt` 安装示例）：**
 
@@ -121,7 +182,7 @@ sudo apt-get install -y \
 ./start_heartbeat_slam_nav.sh robot2 normal /absolute/path/to/map.yaml
 ```
 
-### 6.1 仅仿真 + SLAM（不用一键脚本时）
+### 7.1 仅仿真 + SLAM（不用一键脚本时）
 
 ```bash
 # 终端 1：无头 Gazebo（若 gzserver 异常退出可先：pkill -9 gzserver）
@@ -137,32 +198,32 @@ ros2 launch slam_bringup mapping.launch.py
 ros2 run nav2_map_server map_saver_cli -f /tmp/sim_map
 ```
 
-### 6.2 定位模式（已有地图）
+### 7.2 定位模式（已有地图）
 
 ```bash
 ros2 launch slam_bringup localization.launch.py map_file:=/tmp/sim_map.yaml
 ```
 
-### 6.3 真机/实车
+### 7.3 真机/实车
 
 在 `driver/`、`system/` 中逐步接入传感器与底盘 launch，再与 `slam_bringup` 或 `navigation/` 串联（具体 launch 待后续补充）。
 
 ---
 
-## 7. 仿真包 `simulate`（路径 `simulate/simulate/`）
+## 8. 仿真包 `simulate`（路径 `simulate/simulate/`）
 
-### 7.1 目录说明
+### 8.1 目录说明
 
 - **`src/simulate/`**：容器目录，只放仿真相关 ament 包，本层不直接放 `package.xml`。
 - **包本体**：`src/simulate/simulate/`（包名 **`simulate`**）。新增仿真包时可在 `src/simulate/<包名>/` 下并列创建。
 
-### 7.2 话题与 TF（Gazebo）
+### 8.2 话题与 TF（Gazebo）
 
 命名空间由 launch **`namespace`** 决定（默认随 **`robot_name`**）。插件话题在 **`/<namespace>/...`**（激光为 **`scan_2d`**，另有 `imu/data`、`cmd_vel`、`odom`、`camera/...`），与 **`PushRosNamespace`** 一致；详见 `simulate/launch/simulate.launch.py` 与 `urdf/simple_2d_robot.urdf.xacro` 中 **`robot_namespace`**。
 
 单机 Gazebo 差速模型在 URDF 内常见链：**`robotN/odom` → `robotN/base_footprint` → `robotN/base_link`**（帧名带 **`robotN/`** 前缀）；**不含 `map`**，与 §1 中「整栈」图的区别见上节。
 
-### 7.3 系统依赖（ROS 2 Foxy 示例）
+### 8.3 系统依赖（ROS 2 Foxy 示例）
 
 ```bash
 sudo apt-get update
@@ -177,7 +238,7 @@ sudo apt-get install -y ros-foxy-nav2-map-server
 
 从源码编译 `slam_toolbox` 时，请使用与发行版匹配的分支（如 Foxy：**`foxy-devel`**），并安装 `libceres-dev`、`ros-foxy-bondcpp` 等。
 
-### 7.4 故障排除
+### 8.4 故障排除
 
 - **`gzserver` 立刻退出（exit code 255）**  
   可先结束残留进程再启动：
@@ -190,7 +251,7 @@ sudo apt-get install -y ros-foxy-nav2-map-server
 - **`robot_description` YAML 解析报错（Foxy）**  
   launch 已对 `robot_description` 使用 `ParameterValue(..., value_type=str)`；自行改写时请保留。
 
-### 7.5 启动（无头）
+### 8.5 启动（无头）
 
 主入口 **`simulate.launch.py`**：`robot_state_publisher` 与 `spawn_entity` 在 **`PushRosNamespace`** 下；**Gazebo** 进程全局；第二台车不重起 `gzserver` 时用 **`start_gazebo:=false namespace:=<其他>`**。
 
@@ -210,7 +271,7 @@ ros2 launch simulate test.launch.py
 
 `fake_pub` 不属于本包：见 **`params/launch/fake/fake_pub.launch.py`**（`bringup_launch/fake/fake_pub.launch.py`）。
 
-### 7.6 联动 slam_toolbox 建图 / 定位
+### 8.6 联动 slam_toolbox 建图 / 定位
 
 ```bash
 ros2 launch slam_bringup mapping.launch.py
@@ -220,13 +281,13 @@ ros2 launch slam_bringup mapping.launch.py
 
 ---
 
-## 8. 与 Web 栈的关系
+## 9. 与 Web 栈的关系
 
 仓库根的 `web/`、`backend/` 通过 TF 与话题与机器人交互；演示可用 `fake/scripts/fake_pub.py`。详见 **`../README.md`** 与 **`start_web_stack.sh`**。
 
 ---
 
-## 9. 其它文档
+## 10. 其它文档
 
 - 工作区总览：`../README.md`
 - 上游 **`slam_toolbox`** 包内说明：`slam/slam_toolbox/README.md`（第三方）

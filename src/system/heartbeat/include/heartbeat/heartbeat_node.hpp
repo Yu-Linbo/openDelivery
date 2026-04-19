@@ -2,6 +2,7 @@
 #define HEARTBEAT__HEARTBEAT_NODE_HPP_
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +43,8 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<custom_msgs_srvs::msg::RobotStatus>::SharedPtr pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Service<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedPtr srv_;
+  /// Last publish_rate (Hz) for which we logged timer recreation; NaN = never logged this session.
+  double last_logged_timer_hz_{std::numeric_limits<double>::quiet_NaN()};
 };
 
 }  // namespace heartbeat

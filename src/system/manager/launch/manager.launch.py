@@ -1,4 +1,4 @@
-"""Optional: health_monitor + task_manager under the same namespace as heartbeat."""
+"""health_monitor + task_manager (same namespace as heartbeat; normally included from heartbeat.launch.py)."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction

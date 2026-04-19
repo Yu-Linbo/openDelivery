@@ -31,6 +31,7 @@ def _materialize_params(
     track_unknown_space: str,
     unknown_cost_value: str,
     allow_unknown: str,
+    local_track_unknown_space: str,
 ) -> str:
     template_path = os.path.join(pkg_share, "config", "nav2_params.yaml")
     with open(template_path, "r", encoding="utf-8") as f:
@@ -43,6 +44,7 @@ def _materialize_params(
     text = text.replace("@@TRACK_UNKNOWN_SPACE@@", track_unknown_space)
     text = text.replace("@@UNKNOWN_COST_VALUE@@", unknown_cost_value)
     text = text.replace("@@ALLOW_UNKNOWN@@", allow_unknown)
+    text = text.replace("@@LOCAL_TRACK_UNKNOWN_SPACE@@", local_track_unknown_space)
     data = yaml.safe_load(text)
     # Top-level keys must be node names; RewrittenYaml adds the namespace wrapper.
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="nav2_params_")
@@ -68,18 +70,21 @@ def _launch_setup(context, *_args, **_kwargs):
         global_rolling_window = "true"
         global_window_width = "80"
         global_window_height = "80"
-        # Unknown-space policy (global): keep unknown tracked and planner-allowed.
-        track_unknown_space = "true"
+        # SLAM frontiers are mostly unknown (-1): treat unknown as FREE on global + local
+        # costmaps so paths exist and the controller is not stuck in "rotate only".
+        track_unknown_space = "false"
         unknown_cost_value = "255"
         allow_unknown = "true"
+        local_track_unknown_space = "false"
     else:
-        # Localization mode: fixed global map; unknown-space policy matches mapping mode.
+        # Localization mode: fixed global map; respect unknown boundaries on the map.
         global_rolling_window = "false"
         global_window_width = "0"
         global_window_height = "0"
         track_unknown_space = "true"
         unknown_cost_value = "255"
         allow_unknown = "true"
+        local_track_unknown_space = "true"
 
     pkg_nav = get_package_share_directory("nav_bringup")
     params_path = _materialize_params(
@@ -92,6 +97,7 @@ def _launch_setup(context, *_args, **_kwargs):
         track_unknown_space=track_unknown_space,
         unknown_cost_value=unknown_cost_value,
         allow_unknown=allow_unknown,
+        local_track_unknown_space=local_track_unknown_space,
     )
     bt_xml = os.path.join(
         get_package_share_directory("nav2_bt_navigator"),

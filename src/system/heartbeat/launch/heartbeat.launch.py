@@ -1,8 +1,8 @@
-"""Debug: keep in sync with openDelivery/params/launch/system/heartbeat.launch.py.
+"""Keep in sync with openDelivery/params/launch/system/heartbeat.launch.py.
 
-Isolation model: PushRosNamespace so publisher/service use relative names and appear as
-/<namespace>/robot_status and /<namespace>/set_heartbeat_params. Multiple instances:
-repeat the GroupAction with a different namespace (or include this launch twice).
+Isolation: PushRosNamespace so publisher/service use relative names under /<namespace>/.
+health_monitor + task_manager are started by sim_bringup.sh (after heartbeat lifecycle
+activate), not from this file, to avoid duplicate nodes and to fix service order.
 """
 
 from launch import LaunchDescription

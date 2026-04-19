@@ -13,7 +13,7 @@ import time
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ros_sensor_store import (
@@ -667,6 +667,24 @@ def parse_pgm(raw):
 
 
 _MAP_NAME_VALID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+# Absolute OccupancyGrid topic, e.g. /robot1/mapping or /nh_119/mapping (nav2 map_saver_cli -t).
+_MAP_TOPIC_VALID = re.compile(
+    r"^/[A-Za-z0-9][A-Za-z0-9_-]*(?:/[A-Za-z0-9][A-Za-z0-9_-]*)*/mapping$"
+)
+
+
+def _sanitize_map_topic(raw: str) -> str:
+    t = (raw or "").strip()
+    if not t:
+        return ""
+    if len(t) > 256 or ".." in t or "//" in t:
+        raise ValueError("map_topic invalid or too long")
+    if not _MAP_TOPIC_VALID.match(t):
+        raise ValueError(
+            "map_topic must be an absolute topic ending with /mapping, "
+            "e.g. /robot1/mapping (only letters, digits, _ and - in each segment)"
+        )
+    return t
 
 
 def _sanitize_map_name(name: str) -> str:
@@ -676,6 +694,31 @@ def _sanitize_map_name(name: str) -> str:
             "map_name must be 1–64 chars: letter/digit start, then [a-zA-Z0-9_-]"
         )
     return s
+
+
+def _normalize_saved_map_yaml_image(yaml_path: Path) -> None:
+    """Rewrite ``image:`` to the PGM basename only (portable; same directory as the yaml)."""
+    raw = yaml_path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    new_lines: List[str] = []
+    replaced = False
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("image:"):
+            indent = line[: len(line) - len(stripped)]
+            value = stripped[len("image:") :].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            basename = Path(value).name
+            new_lines.append(f"{indent}image: {basename}")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if replaced:
+        text = "\n".join(new_lines)
+        if not text.endswith("\n"):
+            text += "\n"
+        yaml_path.write_text(text, encoding="utf-8")
 
 
 def read_floor_map(floor):
@@ -1012,6 +1055,7 @@ def _build_presence_rows() -> dict:
                 "name": str(lr.get("name") or lr.get("id") or ci.get("robot_name") or rid),
                 "online": online,
                 "floor": floor,
+                "persisted_current_map": str(ci.get("current_map") or "").strip(),
                 "persisted_robot_status": str(ci.get("robot_status") or "").strip(),
                 "persisted_task_status": str(ci.get("task_status") or "").strip(),
                 "live_robot_status": str(lr.get("robot_status") or "").strip(),
@@ -1060,8 +1104,11 @@ def _build_presence_rows() -> dict:
             extra_class = "btn-sim-bringup--offline"
             title = "检测到仿真机器人在线，可直接执行仿真离线"
         elif r.get("online"):
+            # 仍显示「仿真上线」会误导用户以为可点；明确为已在线且非仿真栈。
+            label = "已在线(非仿真)"
+            action = "pending"
             disabled = True
-            title = "已检测到在线 robot_status（非仿真），不提供仿真离线"
+            title = "非仿真机器人已在线；此处仅用于仿真栈上下线"
         elif global_starting and global_starting != rid:
             disabled = True
             title = "另一台机器人正在仿真上线中"
@@ -1641,23 +1688,41 @@ class ApiHandler(BaseHTTPRequestHandler):
             except ValueError as err:
                 self._send_json({"error": str(err)}, 400)
                 return
-            out_dir = MAP_DIR / safe_name
+            map_topic = ""
+            raw_topic = data.get("map_topic")
+            if raw_topic is not None and str(raw_topic).strip():
+                try:
+                    map_topic = _sanitize_map_topic(str(raw_topic))
+                except ValueError as err:
+                    self._send_json({"error": str(err)}, 400)
+                    return
+            else:
+                robot_id = str(data.get("robot_id") or "").strip()
+                if robot_id:
+                    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", robot_id):
+                        self._send_json({"error": "robot_id must match safe namespace id"}, 400)
+                        return
+                    map_topic = f"/{robot_id}/mapping"
+            map_topic_args = f"-t {shlex.quote(map_topic)} " if map_topic else ""
+            out_dir = (MAP_DIR / safe_name).resolve()
+            prefix = (out_dir / safe_name).resolve()
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
             except OSError as err:
                 self._send_json({"error": f"cannot create map dir: {err}"}, 500)
                 return
-            prefix = out_dir / safe_name
-            root = str(ROOT_DIR)
+            root = str(ROOT_DIR.resolve())
+            out_dir_q = shlex.quote(str(out_dir))
+            prefix_q = shlex.quote(str(prefix))
             ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
             install_setup = Path(root) / "install" / "setup.bash"
             install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
             bash_cmd = (
                 f'set -eo pipefail; '
                 f'source "/opt/ros/{ros_distro}/setup.bash"; '
-                f'cd "{root}" && {install_src}; '
-                f'cd "{out_dir}" && '
-                f'ros2 run nav2_map_server map_saver_cli -f "{prefix}"'
+                f'cd {shlex.quote(root)} && {install_src}; '
+                f'cd {out_dir_q} && '
+                f'ros2 run nav2_map_server map_saver_cli {map_topic_args}-f {prefix_q}'
             )
             try:
                 proc = subprocess.run(
@@ -1685,12 +1750,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                     500,
                 )
                 return
+            try:
+                _normalize_saved_map_yaml_image(yaml_path)
+            except OSError as err:
+                self._send_json({"error": f"cannot normalize map yaml: {err}"}, 500)
+                return
             self._send_json(
                 {
                     "ok": True,
                     "map_name": safe_name,
-                    "yaml": str(yaml_path),
-                    "pgm": str(pgm_path),
+                    "map_dir": str(out_dir),
+                    "yaml": str(yaml_path.resolve()),
+                    "pgm": str(pgm_path.resolve()),
+                    "map_topic": map_topic or "/map",
                 }
             )
             return
@@ -1801,14 +1873,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "body must be a JSON object"}, 400)
             return
 
-        mode = str(data.get("mode") or "").strip()
-        if mode not in ("map_only", "pose_only", "both"):
-            self._send_json(
-                {"error": "mode must be map_only, pose_only, or both"},
-                400,
-            )
-            return
-
+        ctype = str(data.get("type") or "").strip()
         robot_id = str(data.get("robot_id") or "").strip()
         if not robot_id:
             self._send_json({"error": "robot_id is required"}, 400)
@@ -1821,37 +1886,78 @@ class ApiHandler(BaseHTTPRequestHandler):
         y = data.get("y")
         yaw = data.get("yaw")
 
-        if mode in ("map_only", "both"):
-            if not map_name:
-                self._send_json({"error": "map_name is required for this mode"}, 400)
-                return
-        if mode in ("pose_only", "both"):
-            try:
-                xf = float(x)
-                yf = float(y)
-                yawf = float(yaw if yaw is not None else 0.0)
-            except (TypeError, ValueError):
+        if ctype == "localize_nav_command":
+            set_initial_pose = bool(data.get("set_initial_pose"))
+            if not map_name and not set_initial_pose:
                 self._send_json(
-                    {"error": "x, y and yaw (number, rad) are required for pose"},
+                    {"error": "map_name and/or set_initial_pose is required"},
                     400,
                 )
                 return
-        else:
             xf = yf = yawf = 0.0
+            if set_initial_pose:
+                try:
+                    xf = float(x)
+                    yf = float(y)
+                    yawf = float(yaw if yaw is not None else 0.0)
+                except (TypeError, ValueError):
+                    self._send_json(
+                        {"error": "x, y and yaw (number, rad) are required when set_initial_pose is true"},
+                        400,
+                    )
+                    return
+            cmd = {
+                "type": "localize_nav_command",
+                "robot_id": robot_id,
+                "map_name": map_name or "",
+                "set_initial_pose": set_initial_pose,
+                "x": xf,
+                "y": yf,
+                "yaw": yawf,
+            }
+        else:
+            mode = str(data.get("mode") or "").strip()
+            if mode not in ("map_only", "pose_only", "both"):
+                self._send_json(
+                    {
+                        "error": "use type localize_nav_command (see LocalizeNavCommand.msg) "
+                        "or legacy mode map_only / pose_only / both"
+                    },
+                    400,
+                )
+                return
+
+            if mode in ("map_only", "both"):
+                if not map_name:
+                    self._send_json({"error": "map_name is required for this mode"}, 400)
+                    return
+            if mode in ("pose_only", "both"):
+                try:
+                    xf = float(x)
+                    yf = float(y)
+                    yawf = float(yaw if yaw is not None else 0.0)
+                except (TypeError, ValueError):
+                    self._send_json(
+                        {"error": "x, y and yaw (number, rad) are required for pose"},
+                        400,
+                    )
+                    return
+            else:
+                xf = yf = yawf = 0.0
+
+            cmd = {"mode": mode, "robot_id": robot_id}
+            if mode in ("map_only", "both"):
+                cmd["map_name"] = map_name
+            if mode in ("pose_only", "both"):
+                cmd["x"] = xf
+                cmd["y"] = yf
+                cmd["yaw"] = yawf
 
         try:
             import ros_command_queue as rcq
         except ImportError:
             self._send_json({"error": "ros_command_queue not available"}, 500)
             return
-
-        cmd = {"mode": mode, "robot_id": robot_id}
-        if mode in ("map_only", "both"):
-            cmd["map_name"] = map_name
-        if mode in ("pose_only", "both"):
-            cmd["x"] = xf
-            cmd["y"] = yf
-            cmd["yaw"] = yawf
 
         try:
             rcq.enqueue_command(cmd)

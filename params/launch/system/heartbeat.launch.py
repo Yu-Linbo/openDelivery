@@ -1,4 +1,7 @@
-"""Bring up robot_status heartbeat node (package: src/system/heartbeat; installed to bringup_launch/system/heartbeat.launch.py)."""
+"""Bring up robot_status heartbeat only (install: bringup_launch/system/heartbeat.launch.py).
+
+Manager nodes are started from sim_bringup.sh after heartbeat activate, not here.
+"""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction
@@ -30,6 +33,7 @@ def generate_launch_description():
                 default_value="0",
                 description="RobotStatus.task_status enum int (0=IDLE .. 4=PATROLLING).",
             ),
+            DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument(
                 "mapping_mode",
                 default_value="false",
@@ -50,6 +54,7 @@ def generate_launch_description():
                                 "current_map": LaunchConfiguration("current_map"),
                                 "robot_status": LaunchConfiguration("robot_status"),
                                 "task_status": LaunchConfiguration("task_status"),
+                                "sim_mode": LaunchConfiguration("sim_mode"),
                                 "mapping_mode": LaunchConfiguration("mapping_mode"),
                                 "publish_rate": LaunchConfiguration("publish_rate"),
                             }

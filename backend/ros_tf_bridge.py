@@ -33,10 +33,13 @@ When JSON is **not** set: the bridge discovers robots only from ``/*/robot_statu
 
 Web commands (HTTP ``POST /api/robot/command`` → queue → this node):
 
+- **``type: localize_nav_command``**：发布 ``/{robot_id}/localize_nav_command``（``LocalizeNavCommand``），由
+  **task_manager** 顺序写 heartbeat（task idle → ``current_map`` → ``ROBOT_STATUS_LOCALIZATION_LOST``）并发布 ``initial``。
+- **Legacy** ``mode``: ``map_only`` / ``pose_only`` / ``both`` — 直接发布 ``robot_status`` / ``initial``（不经 task_manager）。
 - Publish ``geometry_msgs/PoseWithCovarianceStamped`` on ``/{robot_id}/initial`` (template:
   ``ROS_INITIAL_POSE_TOPIC_TEMPLATE`` default ``/{id}/initial``).
 - Publish ``custom_msgs_srvs/RobotStatus`` on ``/{robot_id}/robot_status`` with updated
-  ``current_map`` (switch floor; preserves ``robot_name`` / ``robot_status`` from last status when known).
+  ``current_map`` (switch floor; for ``localize_nav_command`` 同步为 localizing + idle)。
 
 Lost TF behavior:
   ROS_TF_LOST_POSE=hold   # default: keep last good x,y,yaw
@@ -67,8 +70,10 @@ from tf2_msgs.msg import TFMessage
 
 try:
     # custom_msgs_srvs/RobotStatus: uint8 robot_status / task_status pseudo-enums
+    from custom_msgs_srvs.msg import LocalizeNavCommand
     from custom_msgs_srvs.msg import RobotStatus
 except Exception:  # noqa: BLE001
+    LocalizeNavCommand = None
     RobotStatus = None
 
 _ROBOT_STATUS_LABELS = (
@@ -243,6 +248,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._last_good: Dict[str, Dict[str, Any]] = {}
         self._initial_pubs: Dict[str, Any] = {}
         self._robot_status_cmd_pubs: Dict[str, Any] = {}
+        self._localize_nav_pubs: Dict[str, Any] = {}
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
         # When enabled, web-side identity is derived from discovered robot_status topics.
@@ -597,6 +603,15 @@ class OpenDeliveryTfBridgeNode(Node):
         else:
             self.get_logger().info(f"cmd publishers: {topic_i} (RobotStatus unavailable; map switch disabled)")
 
+    def _ensure_localize_nav_pub(self, rid: str) -> None:
+        if LocalizeNavCommand is None:
+            return
+        if rid in self._localize_nav_pubs:
+            return
+        topic = f"/{rid}/localize_nav_command"
+        self._localize_nav_pubs[rid] = self.create_publisher(LocalizeNavCommand, topic, 10)
+        self.get_logger().info(f"cmd publisher: {topic} (LocalizeNavCommand)")
+
     def _process_commands(self) -> None:
         for cmd in ros_command_queue.drain_commands():
             try:
@@ -604,59 +619,132 @@ class OpenDeliveryTfBridgeNode(Node):
             except Exception as ex:  # noqa: BLE001
                 self.get_logger().error(f"web command failed: {ex}")
 
+    def _publish_robot_status_current_map(
+        self,
+        rid: str,
+        map_name: str,
+        *,
+        robot_status_code: Optional[int] = None,
+        task_status_code: Optional[int] = None,
+    ) -> None:
+        if not map_name:
+            return
+        if not self._robot_status_enabled or rid not in self._robot_status_cmd_pubs:
+            self.get_logger().warning(
+                f"skip map switch for {rid}: RobotStatus publisher not available"
+            )
+            return
+        mf = self._map_frame_for_robot(rid)
+        payload = self._robot_status_payload_by_id.get(rid) or {}
+        st = RobotStatus()
+        st.header.stamp = self.get_clock().now().to_msg()
+        st.header.frame_id = mf
+        st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
+        st.current_map = str(map_name).strip()
+        st.robot_status = (
+            int(robot_status_code)
+            if robot_status_code is not None
+            else _robot_status_to_msg_code(payload.get("robot_status"), 3)
+        )
+        st.task_status = (
+            int(task_status_code)
+            if task_status_code is not None
+            else _task_status_to_msg_code(payload.get("task_status"), 0)
+        )
+        st.is_simulation = bool(payload.get("is_simulation", False))
+        self._robot_status_cmd_pubs[rid].publish(st)
+        self.get_logger().info(f"publish robot_status {rid} current_map -> {st.current_map!r}")
+
+    def _publish_initial_pose_cmd(
+        self,
+        rid: str,
+        x: float,
+        y: float,
+        yaw: float,
+        z: float = 0.0,
+    ) -> None:
+        mf = self._map_frame_for_robot(rid)
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = mf
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.position.z = float(z)
+        yawf = float(yaw)
+        msg.pose.pose.orientation.x = 0.0
+        msg.pose.pose.orientation.y = 0.0
+        msg.pose.pose.orientation.z = math.sin(yawf / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yawf / 2.0)
+        cov = [0.0] * 36
+        cov[0] = 0.25
+        cov[7] = 0.25
+        cov[35] = 0.068
+        msg.pose.covariance = cov
+        self._initial_pubs[rid].publish(msg)
+        self.get_logger().info(
+            f"publish initial pose {rid} map={mf} x={msg.pose.pose.position.x} "
+            f"y={msg.pose.pose.position.y} yaw={yawf}"
+        )
+
+    def _handle_localize_nav_command(self, cmd: Dict[str, Any]) -> None:
+        """Publish ``LocalizeNavCommand`` for task_manager (no direct heartbeat / initial here)."""
+        if LocalizeNavCommand is None:
+            self.get_logger().error("LocalizeNavCommand type unavailable; rebuild custom_msgs_srvs")
+            return
+        rid = str(cmd.get("robot_id") or "").strip()
+        if not rid:
+            self.get_logger().warning("ignore localize_nav_command: empty robot_id")
+            return
+        map_name = str(cmd.get("map_name") or "").strip()
+        set_pose = bool(cmd.get("set_initial_pose"))
+        if not map_name and not set_pose:
+            self.get_logger().warning("ignore localize_nav_command: need map_name and/or set_initial_pose")
+            return
+        self._ensure_localize_nav_pub(rid)
+        if rid not in self._localize_nav_pubs:
+            return
+        msg = LocalizeNavCommand()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._map_frame_for_robot(rid)
+        msg.robot_id = rid
+        msg.map_name = map_name
+        msg.set_initial_pose = set_pose
+        msg.x = float(cmd.get("x") or 0.0)
+        msg.y = float(cmd.get("y") or 0.0)
+        msg.yaw = float(cmd.get("yaw") or 0.0)
+        self._localize_nav_pubs[rid].publish(msg)
+        self.get_logger().info(
+            f"publish localize_nav_command {rid} map={map_name!r} set_initial_pose={set_pose}"
+        )
+
     def _handle_web_command(self, cmd: Dict[str, Any]) -> None:
+        ctype = str(cmd.get("type") or "").strip()
+        if ctype == "localize_nav_command":
+            self._handle_localize_nav_command(cmd)
+            return
+
         mode = str(cmd.get("mode") or "").strip()
         if mode not in ("map_only", "pose_only", "both"):
-            self.get_logger().warning(f"ignore command: bad mode {mode!r}")
+            self.get_logger().warning(f"ignore command: bad mode/type {mode!r} / {ctype!r}")
             return
         rid = str(cmd.get("robot_id") or "").strip()
         if not rid:
             self.get_logger().warning("ignore command: empty robot_id")
             return
         self._ensure_cmd_pubs(rid)
-        mf = self._map_frame_for_robot(rid)
 
         if mode in ("map_only", "both"):
             mn = cmd.get("map_name")
             if mn is not None and str(mn).strip():
-                if not self._robot_status_enabled or rid not in self._robot_status_cmd_pubs:
-                    self.get_logger().warning(
-                        f"skip map switch for {rid}: RobotStatus publisher not available"
-                    )
-                else:
-                    payload = self._robot_status_payload_by_id.get(rid) or {}
-                    st = RobotStatus()
-                    st.header.stamp = self.get_clock().now().to_msg()
-                    st.header.frame_id = mf
-                    st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
-                    st.current_map = str(mn).strip()
-                    st.robot_status = _robot_status_to_msg_code(payload.get("robot_status"), 3)
-                    st.task_status = _task_status_to_msg_code(payload.get("task_status"), 0)
-                    st.is_simulation = bool(payload.get("is_simulation", False))
-                    self._robot_status_cmd_pubs[rid].publish(st)
-                    self.get_logger().info(f"publish robot_status {rid} current_map -> {st.current_map!r}")
+                self._publish_robot_status_current_map(rid, str(mn).strip())
 
         if mode in ("pose_only", "both"):
-            msg = PoseWithCovarianceStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = mf
-            msg.pose.pose.position.x = float(cmd["x"])
-            msg.pose.pose.position.y = float(cmd["y"])
-            msg.pose.pose.position.z = float(cmd.get("z") or 0.0)
-            yaw = float(cmd.get("yaw") or 0.0)
-            msg.pose.pose.orientation.x = 0.0
-            msg.pose.pose.orientation.y = 0.0
-            msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
-            msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
-            cov = [0.0] * 36
-            cov[0] = 0.25
-            cov[7] = 0.25
-            cov[35] = 0.068
-            msg.pose.covariance = cov
-            self._initial_pubs[rid].publish(msg)
-            self.get_logger().info(
-                f"publish initial pose {rid} map={mf} x={msg.pose.pose.position.x} "
-                f"y={msg.pose.pose.position.y} yaw={yaw}"
+            self._publish_initial_pose_cmd(
+                rid,
+                float(cmd["x"]),
+                float(cmd["y"]),
+                float(cmd.get("yaw") or 0.0),
+                float(cmd.get("z") or 0.0),
             )
 
     def _make_mapping_grid_cb(self, robot_id: str):

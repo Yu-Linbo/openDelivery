@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <thread>
+
+#include "rclcpp/executor.hpp"
 
 #include "custom_msgs_srvs/srv/set_heartbeat_params.hpp"
 #include "rclcpp/executors/multi_threaded_executor.hpp"
@@ -42,6 +45,28 @@ bool cov_localized(const geometry_msgs::msg::PoseWithCovariance & p, double max_
   return cx <= max_xy && cy <= max_xy;
 }
 
+/// Wait on an async client future without ``spin_until_future_complete`` (node is already on an executor).
+template<typename FutureT>
+bool wait_client_future(
+  const FutureT & fut,
+  std::chrono::nanoseconds wall_timeout,
+  rclcpp::Executor * pump_exec) {
+  const auto step = std::chrono::milliseconds(20);
+  const auto step_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(step);
+  const auto deadline = std::chrono::steady_clock::now() + wall_timeout;
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+    if (fut.wait_for(step) == std::future_status::ready) {
+      return true;
+    }
+    if (pump_exec != nullptr) {
+      pump_exec->spin_some(step_ns);
+    } else {
+      std::this_thread::sleep_for(step);
+    }
+  }
+  return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+}
+
 }  // namespace
 
 namespace manager {
@@ -52,7 +77,7 @@ HealthMonitorNode::HealthMonitorNode()
     "required_nodes", std::vector<std::string>{"heartbeat"});
   declare_parameter<std::string>("localization_pose_topic", "amcl_pose");
   declare_parameter<double>("position_covariance_max", 0.45);
-  declare_parameter<bool>("allow_ready_from_localizing", true);
+  declare_parameter<bool>("allow_ready_from_localizing", false);
   declare_parameter<double>("poll_period_sec", 1.0);
 
   required_nodes_ = get_parameter("required_nodes").as_string_array();
@@ -90,7 +115,7 @@ void HealthMonitorNode::set_self(std::shared_ptr<HealthMonitorNode> self) {
   self_ = std::move(self);
 }
 
-void HealthMonitorNode::best_effort_shutdown_after_spin() {
+void HealthMonitorNode::best_effort_shutdown_after_spin(rclcpp::Executor * exec) {
   {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     if (phase_ == Phase::ShutdownSent) {
@@ -98,17 +123,13 @@ void HealthMonitorNode::best_effort_shutdown_after_spin() {
     }
     phase_ = Phase::ShutdownSent;
   }
-  (void)call_set_params(custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_SHUTDOWN, "");
-  if (!self_) {
-    return;
-  }
-  for (int i = 0; i < 30 && rclcpp::ok(); ++i) {
-    rclcpp::spin_some(self_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  }
+  (void)call_set_params(
+    custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_SHUTDOWN, "", exec);
 }
 
-bool HealthMonitorNode::call_set_params(uint8_t robot_status, const std::string & current_map) {
+bool HealthMonitorNode::call_set_params(
+  uint8_t robot_status, const std::string & current_map,
+  rclcpp::Executor * pump_exec) {
   if (!self_) {
     return false;
   }
@@ -119,14 +140,15 @@ bool HealthMonitorNode::call_set_params(uint8_t robot_status, const std::string 
     return false;
   }
   auto req = std::make_shared<custom_msgs_srvs::srv::SetHeartbeatParams::Request>();
+  req->robot_name = "";
   req->robot_status = robot_status;
   req->task_status = custom_msgs_srvs::srv::SetHeartbeatParams::Request::TASK_STATUS_LEAVE_UNCHANGED;
   if (!current_map.empty()) {
     req->current_map = current_map;
   }
+  req->rate_hz = 0.0;
   auto fut = hb_client_->async_send_request(req);
-  if (rclcpp::spin_until_future_complete(self_, fut, std::chrono::seconds(3)) !=
-    rclcpp::FutureReturnCode::SUCCESS) {
+  if (!wait_client_future(fut, std::chrono::seconds(3), pump_exec)) {
     return false;
   }
   return fut.get()->success;
@@ -178,23 +200,31 @@ void HealthMonitorNode::on_poll() {
 
 void HealthMonitorNode::on_robot_status(const custom_msgs_srvs::msg::RobotStatus::SharedPtr msg) {
   std::lock_guard<std::recursive_mutex> lock(mtx_);
-  if (phase_ != Phase::Localizing) {
+  if (phase_ == Phase::ShutdownSent) {
     return;
   }
-  const std::string m = strip(msg->current_map);
-  if (m.empty()) {
-    return;
-  }
-  if (!have_map_baseline_) {
-    map_baseline_ = m;
-    have_map_baseline_ = true;
-    return;
-  }
-  if (m != map_baseline_) {
-    if (call_set_params(custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_LOCALIZATION_LOST, m)) {
+  // task_manager sets LOCALIZATION_LOST after Web relocate; adopt phase (do not re-send LOST).
+  if (msg->robot_status == custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_LOCALIZATION_LOST) {
+    if (phase_ == Phase::Localizing || phase_ == Phase::Ready) {
       phase_ = Phase::LocalizationLost;
+      const std::string m = strip(msg->current_map);
+      if (!m.empty()) {
+        map_baseline_ = m;
+        have_map_baseline_ = true;
+      }
+      RCLCPP_INFO(
+        get_logger(),
+        "adopted localization_lost from robot_status (map=%s)",
+        map_baseline_.c_str());
+    }
+    return;
+  }
+  // Baseline map name while localizing (no LOST here; task_manager owns relocate).
+  if (phase_ == Phase::Localizing) {
+    const std::string m = strip(msg->current_map);
+    if (!m.empty() && !have_map_baseline_) {
       map_baseline_ = m;
-      RCLCPP_INFO(get_logger(), "robot_status -> localization_lost (map change)");
+      have_map_baseline_ = true;
     }
   }
 }
@@ -228,7 +258,7 @@ int main(int argc, char ** argv) {
   rclcpp::executors::MultiThreadedExecutor exec(rclcpp::ExecutorOptions(), 3u);
   exec.add_node(node);
   exec.spin();
-  node->best_effort_shutdown_after_spin();
+  node->best_effort_shutdown_after_spin(&exec);
   if (rclcpp::ok()) {
     rclcpp::shutdown();
   }

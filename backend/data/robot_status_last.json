@@ -26,11 +26,11 @@
     "is_simulation": true,
     "robot_id": "robot2",
     "robot_name": "robot2",
-    "robot_status": "shutdown",
-    "stamp_ns": 1776589941231814711,
+    "robot_status": "localizing",
+    "stamp_ns": 1776605187572249286,
     "task_status": "mapping",
     "topic": "/robot2/robot_status",
-    "updated_at": 1776589941.2327943
+    "updated_at": 1776605187.5728028
   },
   "robot4": {
     "current_map": "",

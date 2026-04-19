@@ -10,6 +10,7 @@
 #include "custom_msgs_srvs/msg/robot_status.hpp"
 #include "custom_msgs_srvs/srv/set_heartbeat_params.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
+#include "rclcpp/executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 
 namespace manager {
@@ -18,7 +19,8 @@ class HealthMonitorNode : public rclcpp::Node {
 public:
   HealthMonitorNode();
   void set_self(std::shared_ptr<HealthMonitorNode> self);
-  void best_effort_shutdown_after_spin();
+  /// Call after ``exec.spin()`` returns; pass the same executor so pending service work can drain.
+  void best_effort_shutdown_after_spin(rclcpp::Executor * exec);
 
 private:
   enum class Phase {
@@ -29,7 +31,10 @@ private:
     ShutdownSent,
   };
 
-  bool call_set_params(uint8_t robot_status, const std::string & current_map);
+  /// ``pump_exec``: when non-null, ``spin_some`` is used while waiting (e.g. after main ``spin`` returns).
+  bool call_set_params(
+    uint8_t robot_status, const std::string & current_map,
+    rclcpp::Executor * pump_exec = nullptr);
   bool required_satisfied();
   void reset_map_baseline();
   void on_poll();

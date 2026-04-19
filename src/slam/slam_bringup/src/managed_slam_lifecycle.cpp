@@ -119,6 +119,7 @@ protected:
 private:
   bool start_child_process()
   {
+    // Empty "-p key:=" is invalid on Foxy (RCLInvalidROSArgsError); mapping mode has no map_file_name.
     std::vector<std::string> args = {
       slam_toolbox_exec_path_,
       "--ros-args",
@@ -127,13 +128,21 @@ private:
       "--params-file", params_file_,
       "-p", "use_sim_time:=" + std::string(use_sim_time_ ? "true" : "false"),
       "-p", "mode:=" + mode_,
-      "-p", "map_file_name:=" + map_file_name_,
-      "-p", "map_frame:=" + map_frame_,
-      "-p", "odom_frame:=" + odom_frame_,
-      "-p", "base_frame:=" + base_frame_,
-      "-p", "scan_topic:=" + scan_topic_,
-      "-p", "map_name:=" + map_name_,
     };
+    if (!map_file_name_.empty()) {
+      args.push_back("-p");
+      args.push_back("map_file_name:=" + map_file_name_);
+    }
+    args.push_back("-p");
+    args.push_back("map_frame:=" + map_frame_);
+    args.push_back("-p");
+    args.push_back("odom_frame:=" + odom_frame_);
+    args.push_back("-p");
+    args.push_back("base_frame:=" + base_frame_);
+    args.push_back("-p");
+    args.push_back("scan_topic:=" + scan_topic_);
+    args.push_back("-p");
+    args.push_back("map_name:=" + map_name_);
 
     std::vector<char *> argv;
     argv.reserve(args.size() + 1);
