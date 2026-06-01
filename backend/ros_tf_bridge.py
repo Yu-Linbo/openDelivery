@@ -485,12 +485,15 @@ class OpenDeliveryTfBridgeNode(Node):
                 robot_status = _robot_status_label(getattr(msg, "robot_status", 0))
                 task_status = _task_status_label(getattr(msg, "task_status", 0))
                 is_simulation = bool(getattr(msg, "is_simulation", False))
+                raw_progress = float(getattr(msg, "task_progress", -1.0))
+                task_progress = raw_progress if 0.0 <= raw_progress <= 1.0 else -1.0
                 payload = {
                     "robot_name": robot_name,
                     "current_map": current_map,
                     "robot_status": robot_status,
                     "task_status": task_status,
                     "is_simulation": is_simulation,
+                    "task_progress": task_progress,
                 }
                 self._robot_status_payload_by_id[rid] = payload
                 ros_robot_status_store.set_last_status(
@@ -500,6 +503,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     robot_status=robot_status,
                     task_status=task_status,
                     is_simulation=is_simulation,
+                    task_progress=task_progress,
                     topic=topic_name,
                     stamp_ns=last_ns,
                 )
@@ -552,6 +556,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "robot_status": str(last.get("robot_status") or ""),
                     "task_status": str(last.get("task_status") or ""),
                     "is_simulation": bool(last.get("is_simulation", False)),
+                    "task_progress": float(last.get("task_progress", -1.0)),
                 }
 
     def _discover_robot_status_topics(self) -> None:
@@ -979,6 +984,7 @@ class OpenDeliveryTfBridgeNode(Node):
             robot_status = str(status_payload.get("robot_status") or "").strip()
             is_simulation = bool(status_payload.get("is_simulation", False))
             task_status = str(status_payload.get("task_status") or "").strip()
+            task_progress = float(status_payload.get("task_progress", -1.0))
             if not task_status:
                 task_status = (
                     robot_status
@@ -1005,6 +1011,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "ok",
                         "task_status": task_status,
+                        "task_progress": task_progress,
                         "robot_status": robot_status,
                         "robot_status_topic": robot_status_topic,
                         "heartbeat_online": hb_online,
@@ -1031,6 +1038,7 @@ class OpenDeliveryTfBridgeNode(Node):
                         "velocity": {"linear": 0.0, "angular": 0.0},
                         "localization": "lost",
                         "task_status": task_status,
+                        "task_progress": task_progress,
                         "robot_status": robot_status,
                         "robot_status_topic": robot_status_topic,
                         "heartbeat_online": hb_online,

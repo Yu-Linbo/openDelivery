@@ -115,6 +115,7 @@ bool TaskManagerNode::send_heartbeat(
   req->task_status = task_status;
   req->current_map = current_map;
   req->rate_hz = 0.0;
+  req->task_progress = -1.0;
   auto fut = hb_client_->async_send_request(req);
   if (!self_) {
     return false;
@@ -154,6 +155,7 @@ void TaskManagerNode::on_set_task(
   hb_req->task_status = t;
   hb_req->robot_name = "";
   hb_req->rate_hz = 0.0;
+  hb_req->task_progress = -1.0;
   auto future = hb_client_->async_send_request(hb_req);
   if (!self_) {
     res->success = false;

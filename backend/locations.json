@@ -1,0 +1,7 @@
+{
+  "zone_1": { "x": -10.0, "y":  10.0, "yaw": 0.0, "label": "Zone 1 (NW)" },
+  "zone_2": { "x":  10.0, "y":  10.0, "yaw": 0.0, "label": "Zone 2 (NE)" },
+  "zone_3": { "x": -10.0, "y": -10.0, "yaw": 0.0, "label": "Zone 3 (SW)" },
+  "zone_4": { "x":  10.0, "y": -10.0, "yaw": 0.0, "label": "Zone 4 (SE)" },
+  "center": { "x":   0.0, "y":   0.0, "yaw": 0.0, "label": "Center" }
+}

@@ -179,6 +179,8 @@ function pruneStaleSimOnlinePhaseIfNeeded(rid) {
 /** 全局仅允许一台机器人处于「上线中」 */
 let simBringupGlobalStartingId = "";
 const simShutdownBusyByRobot = {};
+/** 防止重复点击导致并发 startup 请求 */
+const simBringupInFlightByRobot = {};
 /** 仿真离线成功后，按钮短暂显示「离线」直到该时间戳（ms） */
 const simPostOfflineButtonUntilByRobot = {};
 
@@ -886,11 +888,37 @@ async function shutdownSelectedRobot(robotId) {
   return payload;
 }
 
+async function cancelSimBringupForRobot(robotId) {
+  const rid = String(robotId || "").trim();
+  if (!rid) {
+    return;
+  }
+  try {
+    await fetch(`${API_BASE_URL}/api/ros/lifecycle/startup-cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ robot_id: rid }),
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function runSimBringupForRobot(rid) {
   if (!rid) {
     return;
   }
+  if (simBringupInFlightByRobot[rid]) {
+    return;
+  }
   const backendOwnedPresence = robotStatusCacheItems.some((x) => x && x.id && x.sim_button);
+  if (backendOwnedPresence) {
+    const cacheRow = robotStatusCacheItems.find((x) => x && x.id === rid);
+    const sb = cacheRow && cacheRow.sim_button ? cacheRow.sim_button : null;
+    if (sb && (sb.disabled || sb.action === "pending")) {
+      return;
+    }
+  }
   if (pruneStaleSimOnlinePhaseIfNeeded(rid)) {
     persistSimBringupPhasesToSession();
   }
@@ -903,6 +931,7 @@ async function runSimBringupForRobot(rid) {
   if (!backendOwnedPresence && simBringupGlobalStartingId) {
     return;
   }
+  simBringupInFlightByRobot[rid] = true;
   delete simPostOfflineButtonUntilByRobot[rid];
   simBringupPhaseByRobot[rid] = "starting";
   simBringupGlobalStartingId = rid;
@@ -943,14 +972,17 @@ async function runSimBringupForRobot(rid) {
     }
     if (simBringupPhaseByRobot[rid] === "starting") {
       simBringupPhaseByRobot[rid] = "idle";
+      await cancelSimBringupForRobot(rid);
       appendLog(
         `仿真 ${rid}：120s 内未收到 robot_status，已恢复按钮；请查看 backend/logs/managed_${rid}.log 与 sim_bringup.sh 日志`
       );
     }
   } catch (e) {
     simBringupPhaseByRobot[rid] = "idle";
+    await cancelSimBringupForRobot(rid);
     throw e;
   } finally {
+    simBringupInFlightByRobot[rid] = false;
     simBringupGlobalStartingId = "";
     renderRobotPresencePanel();
     refreshRosNodesStatus().catch(() => {});
@@ -1414,6 +1446,19 @@ function renderPresenceStatusBlock(r) {
   const ts = pickPresenceStatusField(r, "liveTaskStatus", "persistedTaskStatus");
   const src = (x) =>
     x.src ? `<span class="robot-presence-status__src">${escapeHtml(x.src)}</span>` : "";
+  const progress = typeof r.taskProgress === "number" ? r.taskProgress : -1;
+  const progressHtml =
+    progress >= 0 && progress <= 1
+      ? `<div class="robot-presence-status__row">
+      <span class="robot-presence-status__k">progress</span>
+      <span class="robot-presence-status__v">
+        <span class="task-progress-bar" title="${Math.round(progress * 100)}%">
+          <span class="task-progress-bar__fill" style="width:${Math.round(progress * 100)}%"></span>
+        </span>
+        <span class="task-progress-bar__label">${Math.round(progress * 100)}%</span>
+      </span>
+    </div>`
+      : "";
   return `<div class="robot-presence-status" aria-label="robot_status 与 task_status">
     <div class="robot-presence-status__row">
       <span class="robot-presence-status__k">robot_status</span>
@@ -1423,6 +1468,7 @@ function renderPresenceStatusBlock(r) {
       <span class="robot-presence-status__k">task_status</span>
       <span class="robot-presence-status__v"><code>${escapeHtml(ts.value)}</code>${src(ts)}</span>
     </div>
+    ${progressHtml}
   </div>`;
 }
 
@@ -1460,6 +1506,7 @@ function mergePresenceRows() {
           liveTaskStatus: String((it && it.live_task_status) || "").trim(),
           persistedIsSim: !!(it && it.persisted_is_simulation),
           simButton: it && it.sim_button ? it.sim_button : null,
+          taskProgress: typeof (it && it.task_progress) === "number" ? it.task_progress : -1,
         };
       })
       .filter(Boolean);
@@ -1493,6 +1540,8 @@ function mergePresenceRows() {
     const persistedIsSim = !!(cache && cache.is_simulation);
     const liveRobotStatus = liveR ? String(liveR.robot_status || "").trim() : "";
     const liveTaskStatus = liveR ? String(liveR.task_status || "").trim() : "";
+    const taskProgress =
+      liveR && typeof liveR.task_progress === "number" ? liveR.task_progress : -1;
     rows.push({
       id,
       name,
@@ -1504,6 +1553,7 @@ function mergePresenceRows() {
       liveRobotStatus,
       liveTaskStatus,
       persistedIsSim,
+      taskProgress,
     });
   });
   rows.sort((a, b) => a.id.localeCompare(b.id));
@@ -2612,6 +2662,36 @@ function initGazeboPage() {
   const topCameraCtx = topCameraCanvas ? topCameraCanvas.getContext("2d") : null;
   const gazeboMessage = document.getElementById("gazebo-message");
   const btnGazeboTeleport = document.getElementById("btn-gazebo-set-model-state");
+  const locationsPanel = document.getElementById("locations-quick-fill");
+  const locationsBtnContainer = document.getElementById("locations-quick-fill-btns");
+
+  async function loadLocations() {
+    if (!locationsPanel || !locationsBtnContainer) return;
+    try {
+      const data = await fetchJson(`${API_BASE_URL}/api/locations`);
+      const locs = (data && Array.isArray(data.locations)) ? data.locations : [];
+      if (!locs.length) return;
+      locationsBtnContainer.innerHTML = "";
+      locs.forEach((loc) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "locations-quick-fill__btn";
+        btn.textContent = String(loc.label || loc.id);
+        btn.title = `X: ${loc.x}, Y: ${loc.y}, Yaw: ${loc.yaw}°`;
+        btn.addEventListener("click", () => {
+          if (gazeboX) gazeboX.value = String(loc.x);
+          if (gazeboY) gazeboY.value = String(loc.y);
+          if (gazeboYaw) gazeboYaw.value = String(loc.yaw);
+          if (gazeboMessage) gazeboMessage.textContent = `已填入：${loc.label || loc.id}`;
+        });
+        locationsBtnContainer.appendChild(btn);
+      });
+      locationsPanel.style.display = "";
+    } catch {
+      /* locations.json unavailable — hide the panel silently */
+    }
+  }
+  loadLocations();
   // World-frame position; orientation matches drawn_model.world topdown_camera
   // (look down, then rotate counterclockwise 90 deg in the ground plane).
   const cameraDefaultPose = {

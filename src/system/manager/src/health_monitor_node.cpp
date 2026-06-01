@@ -147,6 +147,7 @@ bool HealthMonitorNode::call_set_params(
     req->current_map = current_map;
   }
   req->rate_hz = 0.0;
+  req->task_progress = -1.0;
   auto fut = hb_client_->async_send_request(req);
   if (!wait_client_future(fut, std::chrono::seconds(3), pump_exec)) {
     return false;

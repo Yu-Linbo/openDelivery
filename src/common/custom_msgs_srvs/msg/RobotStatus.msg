@@ -20,3 +20,7 @@ uint8 task_status
 
 # true: 来自仿真栈；false: 真机或未知（旧节点未填时桥接侧按 false 处理）
 bool is_simulation
+
+# --- task_progress: 当前任务进度（task_manager / 外部写入 set_heartbeat_params）---
+# 范围 0.0-1.0；-1.0 表示不适用（无任务或未支持）
+float32 task_progress

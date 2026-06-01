@@ -954,16 +954,28 @@ class SimPresenceState:
         self._post_offline_until_ms = {}
         self._shutdown_busy = {}
         self._global_starting_robot = ""
+        self._starting_at_ms = {}
 
     def mark_starting(self, rid: str) -> None:
         with self._lock:
+            was_starting = self._phase_by_robot.get(rid) == "starting"
             self._phase_by_robot[rid] = "starting"
             self._global_starting_robot = rid
+            if not was_starting:
+                self._starting_at_ms[rid] = int(time.time() * 1000)
             self._post_offline_until_ms.pop(rid, None)
+
+    def starting_age_sec(self, rid: str):
+        with self._lock:
+            started = self._starting_at_ms.get(rid)
+        if not started:
+            return None
+        return max(0.0, (time.time() * 1000 - started) / 1000.0)
 
     def mark_start_failed(self, rid: str) -> None:
         with self._lock:
             self._phase_by_robot[rid] = "idle"
+            self._starting_at_ms.pop(rid, None)
             if self._global_starting_robot == rid:
                 self._global_starting_robot = ""
 
@@ -995,7 +1007,8 @@ class SimPresenceState:
                 "now_ms": int(time.time() * 1000),
             }
 
-    def apply_liveness(self, rows: list) -> None:
+    def apply_liveness(self, rows: list, managed_by_id=None) -> None:
+        managed_by_id = managed_by_id or {}
         with self._lock:
             now_ms = int(time.time() * 1000)
             for rid, until in list(self._post_offline_until_ms.items()):
@@ -1005,6 +1018,7 @@ class SimPresenceState:
             for rid, online in online_by_id.items():
                 if online:
                     self._post_offline_until_ms.pop(rid, None)
+                    self._starting_at_ms.pop(rid, None)
                     if self._phase_by_robot.get(rid) == "starting":
                         self._phase_by_robot[rid] = "sim_online"
                         if self._global_starting_robot == rid:
@@ -1014,9 +1028,42 @@ class SimPresenceState:
                         self._phase_by_robot[rid] = "idle"
                         if self._global_starting_robot == rid:
                             self._global_starting_robot = ""
+                    elif self._phase_by_robot.get(rid) == "starting":
+                        mn = managed_by_id.get(rid) or {}
+                        sim_proc_running = bool(mn.get("running"))
+                        started = self._starting_at_ms.get(rid)
+                        stale_ms = 120_000
+                        if not sim_proc_running or (
+                            started and now_ms - started > stale_ms
+                        ):
+                            self._phase_by_robot[rid] = "idle"
+                            self._starting_at_ms.pop(rid, None)
+                            if self._global_starting_robot == rid:
+                                self._global_starting_robot = ""
 
 
 SIM_PRESENCE = SimPresenceState()
+
+
+SIM_BOOT_GRACE_SEC = 90.0
+
+
+def _robot_live_online(rid: str) -> bool:
+    """True when /<rid>/robot_status is live in the pose bridge or recent in store."""
+    for r in POSE_PROVIDER.get_pose().get("robots") or []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("id") or "").strip() == rid and r.get("heartbeat_online") is not False:
+            return True
+    try:
+        import ros_robot_status_store
+
+        last = ros_robot_status_store.get_last_status(rid)
+        if last and time.time() - float(last.get("updated_at") or 0) < 3.0:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _build_presence_rows() -> dict:
@@ -1062,9 +1109,17 @@ def _build_presence_rows() -> dict:
                 "live_task_status": str(lr.get("task_status") or "").strip(),
                 "persisted_is_simulation": bool(ci.get("is_simulation")),
                 "live_is_simulation": bool(lr.get("is_simulation")),
+                "task_progress": float(
+                    lr.get("task_progress") if lr.get("task_progress") is not None
+                    else ci.get("task_progress", -1.0)
+                ),
             }
         )
-    SIM_PRESENCE.apply_liveness(rows)
+    managed = ROS_NODE_MANAGER.status().get("managed_nodes") or []
+    managed_by_id = {
+        str(m.get("id")): m for m in managed if isinstance(m, dict) and m.get("id")
+    }
+    SIM_PRESENCE.apply_liveness(rows, managed_by_id)
     st = SIM_PRESENCE.snapshot()
     for r in rows:
         rid = str(r.get("id") or "")
@@ -1379,9 +1434,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not robot_id:
                 self._send_json({"error": "robot_id is required"}, 400)
                 return
+            boot_age = SIM_PRESENCE.starting_age_sec(robot_id)
             SIM_PRESENCE.mark_starting(robot_id)
             try:
-                out = ROBOT_LIFECYCLE.startup_selected_robot(robot_id, sim_mode=sim_mode)
+                out = ROBOT_LIFECYCLE.startup_selected_robot(
+                    robot_id,
+                    sim_mode=sim_mode,
+                    is_online=_robot_live_online,
+                    boot_grace_sec=SIM_BOOT_GRACE_SEC,
+                    starting_age_sec=boot_age,
+                )
             except ValueError as err:
                 SIM_PRESENCE.mark_start_failed(robot_id)
                 self._send_json({"error": str(err)}, 400)
@@ -1391,6 +1453,30 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 500)
                 return
             self._send_json({"ok": True, **out})
+            return
+
+        if path == "/api/ros/lifecycle/startup-cancel":
+            length_s = self.headers.get("Content-Length")
+            try:
+                length = int(length_s) if length_s else 0
+            except ValueError:
+                self._send_json({"error": "invalid Content-Length"}, 400)
+                return
+            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, 400)
+                return
+            if not isinstance(data, dict):
+                self._send_json({"error": "body must be a JSON object"}, 400)
+                return
+            robot_id = str(data.get("robot_id") or "").strip()
+            if not robot_id:
+                self._send_json({"error": "robot_id is required"}, 400)
+                return
+            SIM_PRESENCE.mark_start_failed(robot_id)
+            self._send_json({"ok": True, "robot_id": robot_id})
             return
 
         if path == "/api/ros/lifecycle/shutdown":
@@ -1998,6 +2084,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(POSE_PROVIDER.get_ros_threads_status())
             return
 
+        if path == "/api/locations":
+            loc_path = Path(__file__).resolve().parent / "locations.json"
+            try:
+                raw = json.loads(loc_path.read_text(encoding="utf-8"))
+                locations = [
+                    {"id": k, "label": str(v.get("label") or k),
+                     "x": float(v.get("x", 0.0)), "y": float(v.get("y", 0.0)),
+                     "yaw": float(v.get("yaw", 0.0))}
+                    for k, v in raw.items()
+                    if isinstance(v, dict)
+                ]
+            except Exception:
+                locations = []
+            self._send_json({"locations": locations})
+            return
+
         if path == "/api/floors":
             self._send_json({"floors": list_floors_for_api()})
             return
@@ -2127,6 +2229,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "timestamp": snap["timestamp"],
                         "localization": primary.get("localization"),
                         "task_status": primary.get("task_status"),
+                        "task_progress": primary.get("task_progress", -1.0),
                         "active_floor": primary.get("active_floor"),
                         "robot_id": primary.get("id"),
                         "robot_name": primary.get("name"),

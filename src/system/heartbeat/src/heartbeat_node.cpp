@@ -131,6 +131,7 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
   declare_parameter<bool>("auto_mapping_status", true);
   declare_parameter<std::string>("sim_mode", "sim");
   declare_parameter<double>("publish_rate", 2.0);
+  declare_parameter<double>("task_progress", -1.0);
 
   const std::string ns = get_namespace();
   if (ns.empty() || ns == "/" || ns == "~") {
@@ -256,6 +257,9 @@ void HeartbeatNode::tick() {
     msg.current_map = get_parameter("current_map").as_string();
   }
   msg.is_simulation = parameter_indicates_simulation(get_parameter("sim_mode").as_string());
+  const double raw_progress = get_parameter("task_progress").as_double();
+  msg.task_progress = static_cast<float>(
+    (raw_progress >= 0.0 && raw_progress <= 1.0) ? raw_progress : -1.0f);
   pub_->publish(msg);
 }
 
@@ -284,6 +288,12 @@ void HeartbeatNode::on_set_params(
     if (request->rate_hz > 0.0) {
       new_params.emplace_back("publish_rate", request->rate_hz);
       publish_rate_changed = true;
+    }
+    if (request->task_progress >= 0.0) {
+      const double clamped = std::min(1.0, request->task_progress);
+      new_params.emplace_back("task_progress", clamped);
+    } else if (request->task_progress < -0.5) {
+      new_params.emplace_back("task_progress", -1.0);
     }
 
     if (!new_params.empty()) {

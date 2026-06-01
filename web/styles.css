@@ -345,6 +345,31 @@ body {
   margin-left: 4px;
 }
 
+.task-progress-bar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 80px;
+  height: 6px;
+  background: #1e293b;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-right: 5px;
+}
+
+.task-progress-bar__fill {
+  display: block;
+  height: 100%;
+  background: #38bdf8;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.task-progress-bar__label {
+  font-size: 10px;
+  color: #94a3b8;
+  vertical-align: middle;
+}
+
 .robot-presence-sim-tag {
   display: inline-block;
   margin-left: 6px;
@@ -1187,6 +1212,42 @@ button {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.locations-quick-fill {
+  margin-bottom: 12px;
+}
+
+.locations-quick-fill__label {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+  margin-bottom: 6px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.locations-quick-fill__btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.locations-quick-fill__btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: #1e293b;
+  color: #94a3b8;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.locations-quick-fill__btn:hover {
+  background: #334155;
+  color: #e2e8f0;
 }
 
 .gazebo-xyz-grid {

@@ -48,6 +48,7 @@ def _load_once() -> None:
                 "robot_status": str(item.get("robot_status") or ""),
                 "task_status": str(item.get("task_status") or ""),
                 "is_simulation": bool(item.get("is_simulation", False)),
+                "task_progress": float(item.get("task_progress", -1.0)),
                 "topic": str(item.get("topic") or ""),
                 "stamp_ns": int(item.get("stamp_ns") or 0),
                 "updated_at": float(item.get("updated_at") or 0.0),
@@ -75,6 +76,7 @@ def set_last_status(
     robot_status: str,
     task_status: str = "",
     is_simulation: bool = False,
+    task_progress: float = -1.0,
     topic: str,
     stamp_ns: int,
 ) -> None:
@@ -90,6 +92,7 @@ def set_last_status(
             "robot_status": str(robot_status or ""),
             "task_status": str(task_status or ""),
             "is_simulation": bool(is_simulation),
+            "task_progress": float(task_progress) if task_progress is not None else -1.0,
             "topic": str(topic or ""),
             "stamp_ns": int(stamp_ns or 0),
             "updated_at": time.time(),

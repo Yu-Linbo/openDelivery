@@ -252,11 +252,12 @@ class RobotLifecycleOrchestrator:
         match: Optional[str] = None,
         note: str = "lifecycle orchestrator managed",
         autostart: bool = True,
+        force: bool = False,
     ):
         status = self._ros_node_manager.status()
         managed = status.get("managed_nodes") or []
         cur = next((m for m in managed if m.get("id") == node_id), None)
-        if cur and cur.get("running"):
+        if cur and cur.get("running") and not force:
             return
         if not any((m.get("id") == node_id) for m in managed):
             with self._ros_node_manager._lock:
@@ -271,12 +272,54 @@ class RobotLifecycleOrchestrator:
                         "note": note,
                     }
                 )
+        elif cur and force:
+            with self._ros_node_manager._lock:
+                for spec in self._ros_node_manager._managed_nodes:
+                    if spec.get("id") == node_id:
+                        spec["start_cmd"] = cmd
+                        if stop_cmd:
+                            spec["stop_cmd"] = stop_cmd
+                        if match:
+                            spec["match"] = match
+                        break
         if autostart:
-            self._ros_node_manager.control(node_id, "start")
+            if cur and cur.get("running") and force:
+                self._ros_node_manager.control(node_id, "restart")
+            else:
+                self._ros_node_manager.control(node_id, "start")
 
-    def startup_selected_robot(self, robot_id: str, sim_mode: str = "sim"):
+    def _sim_managed_running(self, rid: str) -> bool:
+        status = self._ros_node_manager.status()
+        managed = status.get("managed_nodes") or []
+        cur = next((m for m in managed if m.get("id") == rid), None)
+        return bool(cur and cur.get("running"))
+
+    def startup_selected_robot(
+        self,
+        robot_id: str,
+        sim_mode: str = "sim",
+        *,
+        is_online=None,
+        boot_grace_sec: float = 90.0,
+        starting_age_sec: Optional[float] = None,
+    ):
         rid = self._ensure_robot(robot_id)
         sim_mode = (sim_mode or "sim").strip() or "sim"
+        online = bool(is_online(rid)) if callable(is_online) else False
+        if online:
+            with self._lock:
+                self._last_error = ""
+            return self.status(rid)
+
+        sim_running = self._sim_managed_running(rid)
+        boot_age = starting_age_sec if starting_age_sec is not None else 0.0
+        if sim_running and boot_age < boot_grace_sec:
+            # sim_bringup.sh still running within grace window — idempotent wait.
+            with self._lock:
+                self._last_error = ""
+            return self.status(rid)
+
+        force_restart = sim_running and boot_age >= boot_grace_sec
         last: Dict[str, Any] = {}
         try:
             import ros_robot_status_store
@@ -295,18 +338,36 @@ class RobotLifecycleOrchestrator:
             sim_q = shlex.quote(sim_mode)
             sim_cmd = f"SIM_MODE={sim_q} OPEN_DELIVERY_ROOT={root_q} bash {script_q} {rid_q}"
             stop_all = (
+                f"pkill -f 'sim_bringup.sh {rid}' || true; "
                 f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch slam_bringup mapping.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch slam_bringup localization.launch.py.*robot_name:={rid}' || true; "
+                f"pkill -f 'ros2 launch manager manager.launch.py.*namespace:={rid}' || true; "
                 f"pkill -f 'ros2 launch heartbeat heartbeat.launch.py.*namespace:={rid}' || true; "
                 f"pkill -f 'ros2 launch simulate simulate.launch.py.*robot_name:={rid}' || true"
             )
+            if force_restart:
+                try:
+                    self._ros_node_manager.control(rid, "pause")
+                    time.sleep(0.8)
+                except Exception:
+                    pass
+            elif not sim_running:
+                status = self._ros_node_manager.status()
+                managed = status.get("managed_nodes") or []
+                if any(m.get("id") == rid for m in managed):
+                    try:
+                        self._ros_node_manager.control(rid, "pause")
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
             self._start_if_needed(
                 rid,
                 sim_cmd,
                 stop_cmd=stop_all,
-                match=f"namespace:={rid}",
+                match=f"sim_bringup.sh {rid}",
                 note="full sim stack via sim_bringup.sh (managed id = robot id)",
+                force=force_restart,
             )
             # 脚本已拉起下列进程；仅注册托管项（不二次 start），便于 Web 用 ps 匹配显示与 start/pause
             loc_cmd = (

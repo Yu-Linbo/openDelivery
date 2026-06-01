@@ -1,6 +1,7 @@
 # robot_name / current_map: empty string = leave unchanged.
 # robot_status / task_status: use *_LEAVE_UNCHANGED (255) to leave unchanged (must set explicitly).
 # rate_hz <= 0 means leave publish_rate unchanged.
+# task_progress: -1.0 = leave unchanged; 0.0-1.0 sets the progress value.
 string robot_name
 string current_map
 uint8 ROBOT_STATUS_LEAVE_UNCHANGED=255
@@ -8,6 +9,7 @@ uint8 TASK_STATUS_LEAVE_UNCHANGED=255
 uint8 robot_status
 uint8 task_status
 float64 rate_hz
+float64 task_progress
 ---
 bool success
 string message
