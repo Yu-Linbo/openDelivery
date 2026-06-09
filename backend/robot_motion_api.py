@@ -1,0 +1,208 @@
+"""HTTP-backed robot motion helpers (no direct ros2 from agents)."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import shlex
+import subprocess
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+_LOCK = threading.Lock()
+_WAYPOINTS_PATH: Optional[Path] = None
+
+
+def _root_dir() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _waypoints_path() -> Path:
+    global _WAYPOINTS_PATH
+    if _WAYPOINTS_PATH is None:
+        _WAYPOINTS_PATH = Path(__file__).resolve().parent / "data" / "waypoints.json"
+    return _WAYPOINTS_PATH
+
+
+def _ros_run(cmd: str, timeout: float = 120.0) -> Dict[str, Any]:
+    root = _root_dir()
+    install = root / "install" / "setup.bash"
+    distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+    install_src = f'source "{install}"' if install.is_file() else "true"
+    full = (
+        f'set -eo pipefail; source "/opt/ros/{distro}/setup.bash"; '
+        f'cd "{root}" && {install_src}; {cmd}'
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", full],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=os.environ.copy(),
+    )
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        raise RuntimeError(err or out or "ros command failed")
+    return {"ok": True, "output": out}
+
+
+def _yaw_quat(yaw: float) -> Tuple[float, float]:
+    return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+
+
+def publish_cmd_vel_timed(
+    robot_id: str,
+    linear: float,
+    angular: float,
+    seconds: float,
+    *,
+    confirmed: bool,
+) -> Dict[str, Any]:
+    if not confirmed:
+        raise ValueError("velocity command requires user confirmation (confirmed=true)")
+    rid = str(robot_id or "").strip()
+    if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
+        raise ValueError("invalid robot_id")
+    sec = max(0.1, min(float(seconds), 30.0))
+    lin = float(linear)
+    ang = float(angular)
+    if abs(lin) > 2.0 or abs(ang) > 3.0:
+        raise ValueError("linear/angular out of safe range")
+    topic = f"/{rid}/cmd_vel"
+    msg = (
+        f"{{linear: {{x: {lin}, y: 0.0, z: 0.0}}, "
+        f"angular: {{x: 0.0, y: 0.0, z: {ang}}}}}"
+    )
+    rate_hz = 10
+    n = max(1, int(sec * rate_hz))
+    period = 1.0 / rate_hz
+    cmd = (
+        f"for i in $(seq 1 {n}); do "
+        f"ros2 topic pub -1 {shlex.quote(topic)} geometry_msgs/msg/Twist "
+        f"{shlex.quote(msg)}; sleep {period}; done"
+    )
+    return _ros_run(cmd, timeout=sec + 25.0)
+
+
+def send_navigate_to_pose(
+    robot_id: str,
+    x: float,
+    y: float,
+    yaw: float = 0.0,
+) -> Dict[str, Any]:
+    rid = str(robot_id or "").strip()
+    if not rid:
+        raise ValueError("robot_id is required")
+    z, w = _yaw_quat(float(yaw))
+    # Use rclpy action client directly to avoid ros2 CLI yaml parsing bugs
+    script = f"""
+import rclpy
+from rclpy.action import ActionClient
+from nav2_msgs.action import NavigateToPose
+from builtins import float as _float
+
+rclpy.init()
+node = rclpy.create_node("_goal_sender")
+client = ActionClient(node, NavigateToPose, "/{rid}/navigate_to_pose")
+if not client.wait_for_server(timeout_sec=10.0):
+    print("ERROR: action server not available")
+    exit(1)
+goal_msg = NavigateToPose.Goal()
+goal_msg.pose.header.frame_id = "map"
+goal_msg.pose.pose.position.x = _float({x})
+goal_msg.pose.pose.position.y = _float({y})
+goal_msg.pose.pose.orientation.z = _float({z})
+goal_msg.pose.pose.orientation.w = _float({w})
+send_goal_future = client.send_goal_async(goal_msg)
+rclpy.spin_until_future_complete(node, send_goal_future, timeout_sec=5.0)
+result = send_goal_future.result()
+if result and result.accepted:
+    print("Goal accepted")
+else:
+    print("Goal rejected")
+node.destroy_node()
+rclpy.shutdown()
+"""
+    return _ros_run(f'python3 -c {shlex.quote(script)}', timeout=300.0)
+
+
+def _load_waypoints() -> Dict[str, Dict[str, Dict[str, float]]]:
+    path = _waypoints_path()
+    if not path.is_file():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_waypoints(data: Dict[str, Any]) -> None:
+    path = _waypoints_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def list_waypoints(robot_id: str) -> Dict[str, Any]:
+    rid = str(robot_id or "").strip()
+    with _LOCK:
+        all_wp = _load_waypoints()
+    return {"robot_id": rid, "waypoints": dict(all_wp.get(rid) or {})}
+
+
+def record_waypoint(
+    robot_id: str,
+    name: str,
+    x: float,
+    y: float,
+    yaw: float = 0.0,
+) -> Dict[str, Any]:
+    rid = str(robot_id or "").strip()
+    nm = str(name or "").strip()
+    if not rid or not nm:
+        raise ValueError("robot_id and name are required")
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", nm):
+        raise ValueError("invalid waypoint name")
+    with _LOCK:
+        all_wp = _load_waypoints()
+        bucket = all_wp.setdefault(rid, {})
+        bucket[nm] = {"x": float(x), "y": float(y), "yaw": float(yaw)}
+        _save_waypoints(all_wp)
+    return {"ok": True, "robot_id": rid, "name": nm, "pose": bucket[nm]}
+
+
+def goto_waypoint(robot_id: str, name: str) -> Dict[str, Any]:
+    rid = str(robot_id or "").strip()
+    nm = str(name or "").strip()
+    with _LOCK:
+        all_wp = _load_waypoints()
+    wp = (all_wp.get(rid) or {}).get(nm)
+    if not wp:
+        raise ValueError(f"waypoint not found: {rid}/{nm}")
+    return send_navigate_to_pose(rid, wp["x"], wp["y"], wp.get("yaw", 0.0))
+
+
+def ros2_read_only(cmd: str, timeout: float = 15.0) -> Dict[str, Any]:
+    """Run read-only ros2 introspection (topic echo -n 1, node list, etc.)."""
+    allowed_prefixes = (
+        "ros2 topic echo ",
+        "ros2 topic hz ",
+        "ros2 topic info ",
+        "ros2 topic list",
+        "ros2 node list",
+        "ros2 service list",
+        "ros2 action list",
+        "ros2 lifecycle get ",
+    )
+    stripped = cmd.strip()
+    if not any(stripped.startswith(p) for p in allowed_prefixes):
+        raise ValueError("read-only ros2 command not allowed")
+    forbidden = (" pub ", " service call ", " action send_goal ", " launch ", " run ")
+    low = f" {stripped} "
+    if any(x in low for x in forbidden):
+        raise ValueError("command must not publish, call services, launch, or run nodes")
+    return _ros_run(stripped, timeout=timeout)

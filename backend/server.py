@@ -1404,6 +1404,24 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _not_found(self, message):
         self._send_json({"error": message}, status=404)
 
+    def _read_json_body(self):
+        length_s = self.headers.get("Content-Length")
+        try:
+            length = int(length_s) if length_s else 0
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return None
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json({"error": "invalid JSON body"}, 400)
+            return None
+        if not isinstance(data, dict):
+            self._send_json({"error": "body must be a JSON object"}, 400)
+            return None
+        return data
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1938,6 +1956,115 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(body_out)
             return
 
+        if path == "/api/robot/motion/velocity":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.publish_cmd_vel_timed(
+                    str(data.get("robot_id") or ""),
+                    float(data.get("linear", 0)),
+                    float(data.get("angular", 0)),
+                    float(data.get("seconds", 1)),
+                    confirmed=bool(data.get("confirmed")),
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
+        if path == "/api/robot/motion/goto":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.send_navigate_to_pose(
+                    str(data.get("robot_id") or ""),
+                    float(data.get("x")),
+                    float(data.get("y")),
+                    float(data.get("yaw", 0)),
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
+        if path == "/api/robot/waypoints/record":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.record_waypoint(
+                    str(data.get("robot_id") or ""),
+                    str(data.get("name") or ""),
+                    float(data.get("x")),
+                    float(data.get("y")),
+                    float(data.get("yaw", 0)),
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
+        if path == "/api/robot/waypoints/goto":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.goto_waypoint(
+                    str(data.get("robot_id") or ""),
+                    str(data.get("name") or ""),
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
+        if path == "/api/ros/read-only":
+            data = self._read_json_body()
+            if data is None:
+                return
+            cmd = str(data.get("cmd") or "").strip()
+            if not cmd:
+                self._send_json({"error": "cmd is required"}, 400)
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.ros2_read_only(cmd, timeout=float(data.get("timeout", 15)))
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
         if path != "/api/robot/command":
             self._not_found("endpoint not found")
             return
@@ -2248,6 +2375,20 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/robot/status/cache":
             self._send_json(_build_presence_rows())
+            return
+
+        if path == "/api/robot/waypoints":
+            q = parse_qs(urlparse(self.path).query)
+            robot_id = (q.get("robot_id") or [""])[0].strip()
+            if not robot_id:
+                self._send_json({"error": "robot_id query required"}, 400)
+                return
+            try:
+                import robot_motion_api as rma
+
+                self._send_json(rma.list_waypoints(robot_id))
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
             return
 
         if path == "/api/robot/pose/stream":
