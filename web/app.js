@@ -70,9 +70,14 @@ function scheduleMapPaint() {
 
 const settingsForm = document.getElementById("settings-form");
 const settingsMessage = document.getElementById("settings-message");
-const logList = document.getElementById("log-list");
-const addLogBtn = document.getElementById("btn-add-log");
-const clearLogBtn = document.getElementById("btn-clear-log");
+const logBagList = document.getElementById("log-bag-list");
+const logBagFileList = document.getElementById("log-bag-file-list");
+const logBagFileHint = document.getElementById("log-bag-file-hint");
+const logBagStatus = document.getElementById("log-bag-status");
+const logBagSelectionSummary = document.getElementById("log-bag-selection-summary");
+const logBagRobotSelect = document.getElementById("log-bag-robot-select");
+const btnRefreshLogBags = document.getElementById("btn-refresh-log-bags");
+const btnDownloadLogBag = document.getElementById("btn-download-log-bag");
 const btnResetView = document.getElementById("btn-reset-view");
 const scan2dToggle = document.getElementById("scan-2d-toggle");
 const plannedPathToggle = document.getElementById("planned-path-toggle");
@@ -116,6 +121,7 @@ let mapBitmap = null;
 
 /** Latest snapshot from backend: { timestamp, source, robots: [...] } */
 let latestSnapshot = null;
+let webBootstrapData = null;
 
 /** Rows from `GET /api/robot/status/cache` (merged with pose for 离线 robots). */
 let robotStatusCacheItems = [];
@@ -192,6 +198,7 @@ let sensorPollTimer = null;
 /** Live OccupancyGrid polling for floor like robot1_mapping → GET /api/mapping/live?robot_id= */
 let mapLiveTimer = null;
 let mapLiveInitializedView = false;
+let mapLiveInFlight = false;
 /** @type {string | null} */
 let activeMappingRobotId = null;
 let rosNodesPollTimer = null;
@@ -330,23 +337,46 @@ async function resolveApiBaseUrl() {
     return;
   }
 
-  const protoHost = `${window.location.protocol}//${window.location.hostname}`;
+  const hosts = [
+    window.location.hostname,
+    "127.0.0.1",
+    "localhost",
+  ].filter(Boolean);
   const originPort = Number(window.location.port || 0);
   const candidatePorts = [8001, 8002, 8003, originPort + 1, originPort + 2].filter(
     (p) => Number.isInteger(p) && p > 0
   );
   const seen = new Set();
-  for (const p of candidatePorts) {
-    if (seen.has(p)) {
-      continue;
-    }
-    seen.add(p);
-    const base = `${protoHost}:${p}`;
-    if (await canReachApi(base)) {
-      API_BASE_URL = base;
-      return;
+  for (const host of hosts) {
+    for (const p of candidatePorts) {
+      const base = `${window.location.protocol}//${host}:${p}`;
+      if (seen.has(base)) {
+        continue;
+      }
+      seen.add(base);
+      if (await canReachApi(base)) {
+        API_BASE_URL = base;
+        return;
+      }
     }
   }
+}
+
+async function fetchWebBootstrap() {
+  webBootstrapData = await fetchJson(`${API_BASE_URL}/api/web/bootstrap`, {
+    cache: "no-store",
+  });
+  if (Array.isArray(webBootstrapData.floors)) {
+    floors = webBootstrapData.floors;
+  }
+  const cache = webBootstrapData.robot_status_cache;
+  if (cache && Array.isArray(cache.items)) {
+    robotStatusCacheItems = cache.items;
+  }
+  if (webBootstrapData.pose && typeof webBootstrapData.pose === "object") {
+    latestSnapshot = webBootstrapData.pose;
+  }
+  return webBootstrapData;
 }
 
 async function postRobotCommand(payload) {
@@ -396,7 +426,10 @@ async function fetchJsonOptional(path) {
   return res.json();
 }
 
-async function fetchFloors() {
+async function fetchFloors(force = false) {
+  if (!force && Array.isArray(floors) && floors.length > 0) {
+    return;
+  }
   const ts = Date.now();
   const data = await fetchJson(`${API_BASE_URL}/api/floors?_=${ts}`, {
     cache: "no-store",
@@ -406,7 +439,7 @@ async function fetchFloors() {
 
 async function refreshFloorOptionsPreserveSelection() {
   const prev = floorSelect ? String(floorSelect.value || "") : "";
-  await fetchFloors();
+  await fetchFloors(true);
   addFloorOptions();
   if (floorSelect) {
     if (prev && floors.includes(prev)) {
@@ -2216,48 +2249,56 @@ function stopMapLivePolling() {
 }
 
 async function applyLiveMappingFrame() {
+  if (mapLiveInFlight) {
+    return;
+  }
   const rid = activeMappingRobotId;
   if (!rid) {
     return;
   }
-  const url = `${API_BASE_URL}/api/mapping/live?robot_id=${encodeURIComponent(rid)}`;
-  const data = await fetchJsonOptional(url);
-  if (!data || !data.available) {
-    mapStatus.textContent =
-      (data && data.reason) ||
-      `等待 /${rid}/mapping（需向该 topic 发布 OccupancyGrid，且 ROS 桥运行中）…`;
-    return;
+  mapLiveInFlight = true;
+  try {
+    const url = `${API_BASE_URL}/api/mapping/live?robot_id=${encodeURIComponent(rid)}`;
+    const data = await fetchJsonOptional(url);
+    if (!data || !data.available) {
+      mapStatus.textContent =
+        (data && data.reason) ||
+        `等待 /${rid}/mapping（需向该 topic 发布 OccupancyGrid，且 ROS 桥运行中）…`;
+      return;
+    }
+    const raw = atob(data.data_b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) {
+      bytes[i] = raw.charCodeAt(i);
+    }
+    const pgm = {
+      width: data.width,
+      height: data.height,
+      maxVal: 255,
+      data: Array.from(bytes),
+    };
+    activePgm = pgm;
+    activeMeta = {
+      resolution: String(data.resolution),
+      // Keep origin text format for existing renderer helpers; yaw is stored separately.
+      origin: `[${data.origin[0]}, ${data.origin[1]}, 0]`,
+      origin_yaw: String(data.origin_yaw || 0),
+      occupied_thresh: "0.65",
+      free_thresh: "0.196",
+    };
+    // OccupancyGrid data are row-major from grid (0,0) at lower-left; flip Y once
+    // during rasterization so world<->pixel conversion matches saved-map behavior.
+    mapBitmap = buildMapBitmap(pgm, { flipY: true });
+    if (!mapLiveInitializedView) {
+      resetViewToFit();
+      mapLiveInitializedView = true;
+    }
+    renderScene();
+    refreshMetaPanel();
+    mapStatus.textContent = `建图 ${rid} ${data.width}×${data.height} · res ${data.resolution} m/cell`;
+  } finally {
+    mapLiveInFlight = false;
   }
-  const raw = atob(data.data_b64);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) {
-    bytes[i] = raw.charCodeAt(i);
-  }
-  const pgm = {
-    width: data.width,
-    height: data.height,
-    maxVal: 255,
-    data: Array.from(bytes),
-  };
-  activePgm = pgm;
-  activeMeta = {
-    resolution: String(data.resolution),
-    // Keep origin text format for existing renderer helpers; yaw is stored separately.
-    origin: `[${data.origin[0]}, ${data.origin[1]}, 0]`,
-    origin_yaw: String(data.origin_yaw || 0),
-    occupied_thresh: "0.65",
-    free_thresh: "0.196",
-  };
-  // OccupancyGrid data are row-major from grid (0,0) at lower-left; flip Y once
-  // during rasterization so world<->pixel conversion matches saved-map behavior.
-  mapBitmap = buildMapBitmap(pgm, { flipY: true });
-  if (!mapLiveInitializedView) {
-    resetViewToFit();
-    mapLiveInitializedView = true;
-  }
-  renderScene();
-  refreshMetaPanel();
-  mapStatus.textContent = `建图 ${rid} ${data.width}×${data.height} · res ${data.resolution} m/cell`;
 }
 
 function startMapLivePolling() {
@@ -2378,39 +2419,307 @@ function appendLog(message) {
   const logs = getLogs();
   logs.unshift(`[${new Date().toLocaleTimeString()}] ${message}`);
   setLogs(logs.slice(0, 200));
-  renderLogs();
 }
 
-function renderLogs() {
-  const logs = getLogs();
-  logList.innerHTML = "";
-  logs.forEach((item) => {
-    const li = document.createElement("li");
-    li.textContent = item;
-    logList.appendChild(li);
+let logBagEntries = [];
+let selectedLogBagIndex = -1;
+let logBagRobotOptions = [];
+
+function flattenLogBagEntries(payload) {
+  const out = [];
+  const robots = Array.isArray(payload && payload.robots) ? payload.robots : [];
+  robots.forEach((robot) => {
+    const bags = Array.isArray(robot.bags) ? robot.bags : [];
+    bags.forEach((bag) => {
+      out.push({
+        ...bag,
+        robotName: bag.robot_name || robot.robot_name || "",
+        matchPath: robot.match_path || "",
+      });
+    });
   });
+  return out;
+}
+
+function extractLogBagRobots(payload) {
+  const robots = Array.isArray(payload && payload.robots) ? payload.robots : [];
+  return robots
+    .map((r) => String((r && r.robot_name) || "").trim())
+    .filter(Boolean);
+}
+
+async function loadLogBagRobotOptions() {
+  const names = new Set();
+  try {
+    const cache = await fetchJson(`${API_BASE_URL}/api/robot/status/cache`);
+    const items = Array.isArray(cache && cache.items) ? cache.items : [];
+    items.forEach((it) => {
+      const id = String((it && (it.id || it.robot_id || it.name)) || "").trim();
+      if (id) names.add(id);
+    });
+  } catch (e) {
+    // Robot cache can be unavailable while backend starts; match.json still works.
+  }
+  try {
+    if (webBootstrapData && webBootstrapData.log_bag) {
+      extractLogBagRobots(webBootstrapData.log_bag).forEach((name) => names.add(name));
+    } else {
+      const res = await fetch(`${API_BASE_URL}/api/log_bag/matches`, { cache: "no-store" });
+      const payload = await res.json();
+      if (res.ok) {
+        extractLogBagRobots(payload).forEach((name) => names.add(name));
+      }
+    }
+  } catch (e) {
+    // ignore; the selected robot fetch below will surface any real error
+  }
+  logBagRobotOptions = Array.from(names).sort();
+}
+
+function renderLogBagRobotSelect() {
+  if (!logBagRobotSelect) return;
+  const previous = logBagRobotSelect.value;
+  logBagRobotSelect.innerHTML = "";
+  if (logBagRobotOptions.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "暂无机器人";
+    logBagRobotSelect.appendChild(opt);
+    logBagRobotSelect.disabled = true;
+    return;
+  }
+  logBagRobotSelect.disabled = false;
+  logBagRobotOptions.forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    logBagRobotSelect.appendChild(opt);
+  });
+  if (previous && logBagRobotOptions.includes(previous)) {
+    logBagRobotSelect.value = previous;
+  }
+}
+
+function formatLogBagSize(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return "未知大小";
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+function renderLogBagList() {
+  if (!logBagList) return;
+  logBagList.innerHTML = "";
+  if (logBagEntries.length === 0) {
+    const li = document.createElement("li");
+    li.className = "log-bag-empty";
+    li.textContent = logBagRobotSelect && logBagRobotSelect.value
+      ? "无 log"
+      : "请先选择机器人";
+    logBagList.appendChild(li);
+    renderLogBagFiles();
+    return;
+  }
+  logBagEntries.forEach((entry, idx) => {
+    const li = document.createElement("li");
+    li.className = `log-bag-item${idx === selectedLogBagIndex ? " log-bag-item--selected" : ""}`;
+    li.tabIndex = 0;
+    li.dataset.index = String(idx);
+
+    const title = document.createElement("div");
+    title.className = "log-bag-item__title";
+    title.textContent = entry.bag || "(unknown bag)";
+    li.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "log-bag-item__meta";
+    meta.textContent = `${entry.robotName || "unknown"} · ${entry.ended_at || entry.started_at || "无时间"} · ${formatLogBagSize(entry.bytes)}`;
+    li.appendChild(meta);
+
+    const tags = Array.isArray(entry.tags) ? entry.tags : [];
+    const tagRow = document.createElement("div");
+    tagRow.className = "log-bag-tags";
+    if (tags.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "log-bag-tag log-bag-tag--empty";
+      empty.textContent = "no tag";
+      tagRow.appendChild(empty);
+    } else {
+      tags.forEach((tag) => {
+        const chip = document.createElement("span");
+        chip.className = "log-bag-tag";
+        chip.textContent = tag;
+        tagRow.appendChild(chip);
+      });
+    }
+    li.appendChild(tagRow);
+
+    li.addEventListener("click", () => {
+      selectedLogBagIndex = idx;
+      renderLogBagList();
+      renderLogBagFiles();
+    });
+    li.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectedLogBagIndex = idx;
+        renderLogBagList();
+        renderLogBagFiles();
+      }
+    });
+    logBagList.appendChild(li);
+  });
+}
+
+function selectedLogBagFiles() {
+  const entry = logBagEntries[selectedLogBagIndex];
+  if (!entry || !Array.isArray(entry.files)) return [];
+  return entry.files.filter((f) => f && f.path);
+}
+
+function updateLogBagDownloadState() {
+  if (!btnDownloadLogBag || !logBagSelectionSummary) return;
+  const checked = Array.from(
+    document.querySelectorAll(".log-bag-file-list input[type='checkbox']:checked")
+  ).map((el) => el.value);
+  btnDownloadLogBag.disabled = checked.length === 0;
+  logBagSelectionSummary.textContent =
+    checked.length === 0 ? "未选择文件" : `已选择 ${checked.length} 个文件`;
+}
+
+function renderLogBagFiles() {
+  if (!logBagFileList || !logBagFileHint) return;
+  logBagFileList.innerHTML = "";
+  const files = selectedLogBagFiles();
+  if (files.length === 0) {
+    logBagFileHint.hidden = false;
+    logBagFileHint.textContent =
+      selectedLogBagIndex < 0 ? "请先在左侧选择一个 bag。" : "该 bag 没有关联文件。";
+    updateLogBagDownloadState();
+    return;
+  }
+  logBagFileHint.hidden = true;
+  files.forEach((file, idx) => {
+    const id = `log-bag-file-${idx}`;
+    const row = document.createElement("label");
+    row.className = `log-bag-file${file.exists ? "" : " log-bag-file--missing"}`;
+    row.htmlFor = id;
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = id;
+    input.value = file.path;
+    input.checked = true;
+    input.disabled = !file.exists;
+    input.addEventListener("change", updateLogBagDownloadState);
+    row.appendChild(input);
+
+    const body = document.createElement("span");
+    body.className = "log-bag-file__body";
+    const name = document.createElement("span");
+    name.className = "log-bag-file__name";
+    name.textContent = file.path;
+    const meta = document.createElement("span");
+    meta.className = "log-bag-file__meta";
+    meta.textContent = `${file.kind || "file"}${file.is_dir ? " · directory" : ""}${file.exists ? "" : " · missing"}`;
+    body.appendChild(name);
+    body.appendChild(meta);
+    row.appendChild(body);
+    logBagFileList.appendChild(row);
+  });
+  updateLogBagDownloadState();
+}
+
+async function refreshLogBags() {
+  if (!logBagStatus) return;
+  logBagStatus.textContent = "正在读取机器人列表...";
+  try {
+    await loadLogBagRobotOptions();
+    renderLogBagRobotSelect();
+    const robotName = logBagRobotSelect ? String(logBagRobotSelect.value || "").trim() : "";
+    if (!robotName) {
+      logBagEntries = [];
+      selectedLogBagIndex = -1;
+      renderLogBagList();
+      renderLogBagFiles();
+      logBagStatus.textContent = "无机器人，暂无日志索引";
+      return;
+    }
+    logBagStatus.textContent = `正在读取 ${robotName} 的 match.json...`;
+    const url = `${API_BASE_URL}/api/log_bag/matches?robot_name=${encodeURIComponent(robotName)}`;
+    const res = await fetch(url, { cache: "no-store" });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || "读取日志索引失败");
+    logBagEntries = flattenLogBagEntries(payload);
+    selectedLogBagIndex = logBagEntries.length > 0 ? 0 : -1;
+    renderLogBagList();
+    renderLogBagFiles();
+    logBagStatus.textContent =
+      logBagEntries.length > 0 ? `${robotName}：已加载 ${logBagEntries.length} 个 bag` : `${robotName}：无 log`;
+  } catch (err) {
+    logBagEntries = [];
+    selectedLogBagIndex = -1;
+    renderLogBagList();
+    renderLogBagFiles();
+    logBagStatus.textContent = `读取失败：${err.message || err}`;
+  }
+}
+
+async function downloadSelectedLogBagFiles() {
+  const checked = Array.from(
+    document.querySelectorAll(".log-bag-file-list input[type='checkbox']:checked")
+  ).map((el) => el.value);
+  if (checked.length === 0) return;
+  if (btnDownloadLogBag) btnDownloadLogBag.disabled = true;
+  if (logBagStatus) logBagStatus.textContent = "正在打包下载...";
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/log_bag/download`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: checked }),
+    });
+    if (!res.ok) {
+      let message = "下载失败";
+      try {
+        const payload = await res.json();
+        message = payload.error || message;
+      } catch (e) {
+        // ignore non-json error bodies
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `openDelivery_logs_${Date.now()}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    if (logBagStatus) logBagStatus.textContent = "下载已开始";
+  } catch (err) {
+    if (logBagStatus) logBagStatus.textContent = `下载失败：${err.message || err}`;
+  } finally {
+    updateLogBagDownloadState();
+  }
 }
 
 function initLogs() {
-  if (getLogs().length === 0) {
-    appendLog("系统启动");
-    appendLog("监控模块就绪");
-  } else {
-    renderLogs();
+  if (logBagRobotSelect) {
+    logBagRobotSelect.addEventListener("change", refreshLogBags);
   }
-
-  addLogBtn.addEventListener("click", () => {
-    appendLog("收到机器人心跳，状态正常");
-  });
-
-  clearLogBtn.addEventListener("click", () => {
-    setLogs([]);
-    renderLogs();
-  });
+  if (btnRefreshLogBags) {
+    btnRefreshLogBags.addEventListener("click", refreshLogBags);
+  }
+  if (btnDownloadLogBag) {
+    btnDownloadLogBag.addEventListener("click", downloadSelectedLogBagFiles);
+  }
+  refreshLogBags();
 }
 
 async function initMonitor() {
-  await resolveApiBaseUrl();
   loadAndApplyMonitorCheckboxPrefs();
 
   bindMapInteractions();
@@ -3534,14 +3843,21 @@ function initGazeboPage() {
 }
 
 async function bootstrap() {
+  await resolveApiBaseUrl();
+  try {
+    await fetchWebBootstrap();
+  } catch (err) {
+    webBootstrapData = null;
+    if (mapStatus) {
+      mapStatus.textContent = `后端初始化失败: ${err.message || err}`;
+    }
+  }
   initSettings();
   initLogs();
   loadSimBringupPhasesFromSession();
   initRosNodesPage();
   initRobotPresenceUi();
-  fetchRobotStatusCache()
-    .then(() => updateRobotPresenceTriggerSummary())
-    .catch(() => {});
+  updateRobotPresenceTriggerSummary();
   await initMonitor();
   initGazeboPage();
 }

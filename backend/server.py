@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import signal
+import zipfile
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -32,6 +34,7 @@ if str(_BACKEND_DIR) not in sys.path:
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
+LOG_BAG_DIR = ROOT_DIR / "log_bag"
 
 
 def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
@@ -1385,12 +1388,169 @@ ROS_DEBUG_NODES_TABLE = RosDebugNodesTable(
 )
 
 
+def _safe_log_bag_path(raw_path: str) -> Path:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        raise ValueError("empty log file path")
+    p = Path(raw)
+    if not p.is_absolute():
+        p = ROOT_DIR / p
+    p = p.resolve()
+    root = LOG_BAG_DIR.resolve()
+    try:
+        p.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("path is outside log_bag") from exc
+    return p
+
+
+def _log_bag_display_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT_DIR.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict:
+    txt_raw = meta.get("txt")
+    if txt_raw is None:
+        txt_raw = meta.get("txt_paths")
+    if txt_raw is None:
+        txt_raw = meta.get("text_log")
+    if isinstance(txt_raw, str):
+        txt_paths = [txt_raw]
+    elif isinstance(txt_raw, list):
+        txt_paths = [str(x) for x in txt_raw if str(x or "").strip()]
+    else:
+        txt_paths = []
+
+    tags_raw = meta.get("tags", [])
+    if isinstance(tags_raw, list):
+        tags = [str(x) for x in tags_raw if str(x or "").strip()]
+    elif str(tags_raw or "").strip():
+        tags = [str(tags_raw)]
+    else:
+        tags = []
+
+    files = [bag_path] + txt_paths
+    normalized_files = []
+    for fp in files:
+        try:
+            p = _safe_log_bag_path(fp)
+        except ValueError:
+            continue
+        normalized_files.append(
+            {
+                "path": _log_bag_display_path(p),
+                "kind": "bag" if p.suffix == ".bag" or p.name.endswith("_terminal_bag") else "txt",
+                "exists": p.exists(),
+                "is_dir": p.is_dir(),
+            }
+        )
+
+    return {
+        "robot_name": str(meta.get("robot_name") or robot_name),
+        "bag": normalized_files[0]["path"] if normalized_files else str(bag_path),
+        "txt": [f["path"] for f in normalized_files if f["kind"] == "txt"],
+        "tags": tags,
+        "started_at": meta.get("started_at"),
+        "ended_at": meta.get("ended_at"),
+        "bytes": meta.get("bytes"),
+        "reason": meta.get("reason"),
+        "topics": meta.get("topics") or (meta.get("important_fields") or {}).get("topics") or [],
+        "files": normalized_files,
+    }
+
+
+def _list_log_bag_matches(robot_filter: Optional[str] = None) -> dict:
+    wanted = str(robot_filter or "").strip()
+    robots = []
+    if wanted:
+        match_path = LOG_BAG_DIR / wanted / "backup" / "match.json"
+        if not match_path.is_file():
+            return {
+                "robots": [
+                    {
+                        "robot_name": wanted,
+                        "match_path": _log_bag_display_path(match_path),
+                        "no_log": True,
+                        "bags": [],
+                    }
+                ],
+                "timestamp": time.time(),
+            }
+    if not LOG_BAG_DIR.is_dir():
+        return {"robots": robots, "timestamp": time.time()}
+    match_paths = [LOG_BAG_DIR / wanted / "backup" / "match.json"] if wanted else sorted(LOG_BAG_DIR.glob("*/backup/match.json"))
+    for match_path in match_paths:
+        robot_name = match_path.parent.parent.name
+        try:
+            with open(match_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:  # noqa: BLE001
+            robots.append(
+                {
+                    "robot_name": robot_name,
+                    "match_path": _log_bag_display_path(match_path),
+                    "error": str(exc),
+                    "bags": [],
+                }
+            )
+            continue
+        bags = []
+        raw_bags = data.get("bags")
+        if isinstance(raw_bags, dict):
+            for bag_path, meta in raw_bags.items():
+                if isinstance(meta, dict):
+                    bags.append(_normalize_log_bag_entry(robot_name, str(bag_path), meta))
+        raw_records = data.get("records")
+        if isinstance(raw_records, list):
+            for item in raw_records:
+                if isinstance(item, dict) and item.get("bag"):
+                    bags.append(_normalize_log_bag_entry(robot_name, str(item.get("bag")), item))
+        bags.sort(key=lambda x: str(x.get("ended_at") or x.get("started_at") or ""), reverse=True)
+        robots.append(
+            {
+                "robot_name": robot_name,
+                "match_path": _log_bag_display_path(match_path),
+                "updated_at": data.get("updated_at"),
+                "bags": bags,
+            }
+        )
+    return {"robots": robots, "timestamp": time.time()}
+
+
+def _zip_log_bag_files(raw_files: list) -> Tuple[bytes, str]:
+    if not isinstance(raw_files, list) or not raw_files:
+        raise ValueError("files must be a non-empty array")
+    paths = []
+    seen = set()
+    for raw in raw_files:
+        p = _safe_log_bag_path(str(raw))
+        if not p.exists():
+            raise ValueError(f"file does not exist: {raw}")
+        key = str(p)
+        if key not in seen:
+            paths.append(p)
+            seen.add(key)
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in paths:
+            if p.is_dir():
+                for child in sorted(x for x in p.rglob("*") if x.is_file()):
+                    zf.write(child, _log_bag_display_path(child))
+            else:
+                zf.write(p, _log_bag_display_path(p))
+    return buf.getvalue(), f"openDelivery_logs_{int(time.time())}.zip"
+
+
 class ApiHandler(BaseHTTPRequestHandler):
-    def _send_json(self, payload, status=200):
+    def _send_json(self, payload, status=200, *, content_length=True):
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
+        if content_length:
+            self.send_header("Content-Length", str(len(raw)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
@@ -1403,6 +1563,21 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _not_found(self, message):
         self._send_json({"error": message}, status=404)
+
+    def _send_zip(self, payload: bytes, filename: str):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{filename}"',
+        )
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except BrokenPipeError:
+            return
 
     def _read_json_body(self):
         length_s = self.headers.get("Content-Length")
@@ -1431,6 +1606,21 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/log_bag/download":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                payload, filename = _zip_log_bag_files(data.get("files") or [])
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_zip(payload, filename)
+            return
+
         if path == "/api/ros/lifecycle/startup":
             length_s = self.headers.get("Content-Length")
             try:
@@ -2183,6 +2373,30 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/web/bootstrap":
+            try:
+                self._send_json(
+                    {
+                        "floors": list_floors_for_api(),
+                        "robot_status_cache": _build_presence_rows(),
+                        "pose": POSE_PROVIDER.get_pose(),
+                        "log_bag": _list_log_bag_matches(),
+                        "timestamp": time.time(),
+                    }
+                )
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+            return
+
+        if path == "/api/log_bag/matches":
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                robot_name = (q.get("robot_name") or [""])[0].strip()
+                self._send_json(_list_log_bag_matches(robot_name or None))
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+            return
+
         if path == "/api/ros/lifecycle/status":
             q = parse_qs(urlparse(self.path).query)
             robot_id = (q.get("robot_id") or [""])[0].strip()
@@ -2274,7 +2488,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "frame_id": snap["frame_id"],
                     "encoding": "base64",
                     "data_b64": base64.b64encode(pix).decode("ascii"),
-                }
+                },
+                content_length=False,
             )
             return
 

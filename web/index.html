@@ -3,8 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260609-web-bootstrap" />
   </head>
   <body>
     <div class="layout">
@@ -217,14 +220,33 @@
         <section id="view-logs" class="view">
           <header class="view-header">
             <h1>日志</h1>
-            <p>系统事件与运行信息</p>
+            <p>读取 <code>log_bag/*/backup/match.json</code>，选择 bag 与关联文件后下载 zip</p>
           </header>
 
-          <div class="log-toolbar">
-            <button id="btn-add-log" type="button">新增模拟日志</button>
-            <button id="btn-clear-log" type="button">清空日志</button>
+          <div class="log-bag-toolbar">
+            <label class="log-bag-robot-select">
+              机器人
+              <select id="log-bag-robot-select"></select>
+            </label>
+            <button id="btn-refresh-log-bags" type="button">刷新日志索引</button>
+            <span id="log-bag-status" class="status">等待加载日志...</span>
           </div>
-          <ul id="log-list" class="log-list"></ul>
+          <div class="log-bag-layout">
+            <section class="log-bag-panel log-bag-panel--bags" aria-label="bag 列表">
+              <h2>.bag 与 tag</h2>
+              <ul id="log-bag-list" class="log-bag-list"></ul>
+            </section>
+            <section class="log-bag-panel log-bag-panel--files" aria-label="相关文件">
+              <h2>相关文件</h2>
+              <p id="log-bag-file-hint" class="log-bag-empty">请先在左侧选择一个 bag。</p>
+              <div id="log-bag-file-list" class="log-bag-file-list"></div>
+            </section>
+            <aside class="log-bag-download" aria-label="下载">
+              <h2>下载</h2>
+              <p id="log-bag-selection-summary">未选择文件</p>
+              <button id="btn-download-log-bag" type="button" disabled>下载 .zip</button>
+            </aside>
+          </div>
         </section>
 
         <section id="view-gazebo" class="view">
@@ -375,6 +397,6 @@
       </aside>
     </div>
 
-    <script src="./app.js"></script>
+    <script src="./app.js?v=20260609-web-bootstrap"></script>
   </body>
 </html>

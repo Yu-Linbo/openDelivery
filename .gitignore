@@ -12,3 +12,4 @@ backend/data/robot_status_last.json
 backend/logs/
 src/system/heartbeat/launch/__pycache__/heartbeat.launch.cpython-38.pyc
 params/launch/system/__pycache__/heartbeat.launch.cpython-38.pyc
+log_bag/

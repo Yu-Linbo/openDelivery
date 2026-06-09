@@ -92,7 +92,23 @@ backend_supervisor &
 BACKEND_SUP_PID=$!
 
 echo "[open-delivery] starting frontend on 0.0.0.0:${FRONTEND_PORT}"
-python3 -m http.server "${FRONTEND_PORT}" --directory "${WEB_DIR}" &
+WEB_DIR="${WEB_DIR}" FRONTEND_PORT="${FRONTEND_PORT}" python3 - <<'PY' &
+import http.server
+import os
+
+
+class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+
+os.chdir(os.environ["WEB_DIR"])
+port = int(os.environ["FRONTEND_PORT"])
+http.server.ThreadingHTTPServer(("0.0.0.0", port), NoCacheHandler).serve_forever()
+PY
 FRONTEND_PID=$!
 
 cleanup() {

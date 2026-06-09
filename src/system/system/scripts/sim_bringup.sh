@@ -125,6 +125,18 @@ if [[ "${AUTO_MAPPING}" == "1" ]]; then
 fi
 log "NAV_GRID_MODE=${NAV_GRID_MODE}"
 
+# --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/startup.launch.py 维护）---
+ros2 launch system startup.launch.py \
+  "robot_name:=${RID}" \
+  "current_map:=${RID}_mapping" \
+  "robot_status:=0" \
+  "sim_mode:=${SIM_MODE}" \
+  "mapping_mode:=false" \
+  "publish_rate:=2.0" \
+  "log_root:=${ROOT}/log_bag" \
+  "enable_fake_pub:=false" &
+log "started system startup.launch.py (log_bag+heartbeat, pid $!)"
+
 # --- 1) Gazebo + 机器人 ---
 ros2 launch simulate simulate.launch.py \
   "robot_name:=${RID}" \
@@ -135,12 +147,7 @@ ros2 launch simulate simulate.launch.py \
 log "started simulate.launch.py (pid $!)"
 sleep "${SIM_WAIT}"
 
-# --- 2) 心跳 ---
-ros2 launch heartbeat heartbeat.launch.py \
-  "namespace:=${RID}" \
-  "robot_name:=${RID}" \
-  "sim_mode:=${SIM_MODE}" &
-log "started heartbeat.launch.py (pid $!)"
+# --- 2) 心跳 lifecycle 激活（节点由 startup.launch.py 启动）---
 HB="/${RID}/heartbeat"
 # heartbeat_node is still a LifecycleNode; wait briefly for service visibility then best-effort activate.
 hb_ready=0

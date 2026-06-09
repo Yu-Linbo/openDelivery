@@ -339,11 +339,14 @@ class RobotLifecycleOrchestrator:
             sim_cmd = f"SIM_MODE={sim_q} OPEN_DELIVERY_ROOT={root_q} bash {script_q} {rid_q}"
             stop_all = (
                 f"pkill -f 'sim_bringup.sh {rid}' || true; "
+                f"pkill -f 'ros2 launch system startup.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch slam_bringup mapping.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch slam_bringup localization.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch manager manager.launch.py.*namespace:={rid}' || true; "
                 f"pkill -f 'ros2 launch heartbeat heartbeat.launch.py.*namespace:={rid}' || true; "
+                f"pkill -f 'ros2 launch log_bag log_bag.launch.py.*robot_name:={rid}' || true; "
+                f"pkill -f 'robot_log_recorder.*--robot-name {rid}' || true; "
                 f"pkill -f 'ros2 launch simulate simulate.launch.py.*robot_name:={rid}' || true"
             )
             if force_restart:
