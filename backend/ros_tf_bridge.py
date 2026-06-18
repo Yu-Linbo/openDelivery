@@ -211,6 +211,23 @@ def _yaw_from_quat(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def _ensure_fastdds_udp_transport() -> None:
+    """Prefer UDP over FastRTPS SHM (stale /dev/shm after pkill -9 breaks late subscribers)."""
+    if not os.environ.get("FASTDDS_BUILTIN_TRANSPORTS", "").strip():
+        os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = "UDPv4"
+
+
+def _mapping_qos():
+    from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+    return QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        history=HistoryPolicy.KEEP_LAST,
+    )
+
+
 def _load_robot_specs() -> List[Dict[str, Any]]:
     raw = os.environ.get("ROS_ROBOTS_TF_JSON", "").strip()
     if raw:
@@ -270,6 +287,8 @@ class OpenDeliveryTfBridgeNode(Node):
         self._sub_scan: Dict[str, Any] = {}
         self._sub_path: Dict[str, Any] = {}
         self._sub_mapping: Dict[str, Any] = {}
+        self._mapping_topic_by_rid: Dict[str, str] = {}
+        self._mapping_latch_attempts: Dict[str, int] = {}
 
         from tf2_ros import Buffer
 
@@ -335,6 +354,8 @@ class OpenDeliveryTfBridgeNode(Node):
         if self._robot_status_enabled:
             self.create_timer(1.0, self._discover_robot_status_topics)
             self.get_logger().info("enabled heartbeat topic discovery (/robot_status)")
+
+        self.create_timer(2.0, self._retry_stale_mapping_subs)
 
         # If there is *no* robot_status topic at all, do not create robot-specific
         # subscriptions (scan_2d/planned_path/mapping). Enable them once
@@ -454,23 +475,50 @@ class OpenDeliveryTfBridgeNode(Node):
             and os.environ.get("ROS_SUBSCRIBE_ROBOT_MAPPING", "1").strip()
             not in ("0", "false", "no")
         ):
-            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-
-            qos_map = QoSProfile(
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
-            )
-            tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()
-            topic = str(spec.get("mapping_topic") or tpl.replace("{id}", rid))
-            self._sub_mapping[rid] = self.create_subscription(
-                OccupancyGrid,
-                topic,
-                self._make_mapping_grid_cb(rid),
-                qos_map,
-            )
+            topic = self._mapping_topic_for_spec(spec)
+            self._subscribe_mapping(rid, topic)
             self.get_logger().info(f"subscribing OccupancyGrid (live mapping) on {topic}")
+
+    def _mapping_topic_for_spec(self, spec: Dict[str, Any]) -> str:
+        rid = str(spec["id"])
+        tpl = os.environ.get("ROS_MAPPING_TOPIC_TEMPLATE", "/{id}/mapping").strip()
+        return str(spec.get("mapping_topic") or tpl.replace("{id}", rid))
+
+    def _subscribe_mapping(self, rid: str, topic: str) -> None:
+        if rid in self._sub_mapping:
+            old = self._sub_mapping.pop(rid)
+            try:
+                self.destroy_subscription(old)
+            except Exception:  # noqa: BLE001
+                pass
+        self._mapping_topic_by_rid[rid] = topic
+        self._sub_mapping[rid] = self.create_subscription(
+            OccupancyGrid,
+            topic,
+            self._make_mapping_grid_cb(rid),
+            _mapping_qos(),
+        )
+
+    def _retry_stale_mapping_subs(self) -> None:
+        if not self._sub_mapping:
+            return
+        max_attempts = int(os.environ.get("ROS_MAPPING_LATCH_RETRIES", "15"))
+        for rid in list(self._sub_mapping.keys()):
+            if ros_map_store.get_snapshot(rid):
+                self._mapping_latch_attempts.pop(rid, None)
+                continue
+            attempts = self._mapping_latch_attempts.get(rid, 0) + 1
+            self._mapping_latch_attempts[rid] = attempts
+            if attempts > max_attempts:
+                continue
+            topic = self._mapping_topic_by_rid.get(rid)
+            if not topic:
+                continue
+            self.get_logger().info(
+                f"re-subscribing OccupancyGrid on {topic} "
+                f"(no cache for {rid!r}, attempt {attempts}/{max_attempts})"
+            )
+            self._subscribe_mapping(rid, topic)
 
     def _make_robot_status_cb(self, rid: str, topic_name: str):
         def _cb(msg: RobotStatus) -> None:
@@ -537,17 +585,19 @@ class OpenDeliveryTfBridgeNode(Node):
                 "current_map": current_map_default,
             }
             self._specs.append(spec)
-
             self.get_logger().info(f"discovered robot {rid} from {topic_name}")
-            self._ensure_cmd_pubs(rid)
-            if self._robot_specific_subs_enabled:
-                self._ensure_robot_specific_subs_for_spec(
-                    spec,
-                    os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"),
-                    os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"),
-                )
 
-            # Preload last-known status if this robot existed before restart.
+        spec = next(s for s in self._specs if str(s.get("id")) == rid)
+        self._ensure_cmd_pubs(rid)
+        # robot_status discovery implies the gate for robot-specific subs is satisfied.
+        if self._has_any_robot_status_topics():
+            self._ensure_robot_specific_subs_for_spec(
+                spec,
+                os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"),
+                os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"),
+            )
+
+        if rid not in self._robot_status_payload_by_id:
             last = ros_robot_status_store.get_last_status(rid)
             if last:
                 self._robot_status_payload_by_id[rid] = {
@@ -1055,6 +1105,7 @@ def run_ros_tf_bridge(
     publish_fn: Callable[[List[Dict[str, Any]], float], None],
     stop_event: Optional[threading.Event] = None,
 ) -> None:
+    _ensure_fastdds_udp_transport()
     specs = _load_robot_specs()
     rclpy.init(args=None)
     node = OpenDeliveryTfBridgeNode(robot_specs=specs, publish_fn=publish_fn)

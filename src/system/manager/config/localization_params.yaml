@@ -1,4 +1,4 @@
-# map_name overridden by localization.launch.py → /<namespace>/map
+# map_name set by stack_lifecycle_manager → /<namespace>/map
 /**:
   ros__parameters:
     use_sim_time: true

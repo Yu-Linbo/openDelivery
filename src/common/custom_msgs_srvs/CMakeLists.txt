@@ -12,8 +12,11 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RobotStatus.msg"
   "msg/LocalizeNavCommand.msg"
+  "msg/StackComponentState.msg"
+  "msg/StackLifecycle.msg"
   "srv/SetHeartbeatParams.srv"
   "srv/SetRobotTask.srv"
+  "srv/SetStackLifecycleTransition.srv"
   DEPENDENCIES std_msgs
 )
 

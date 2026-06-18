@@ -20,7 +20,7 @@ def generate_launch_description():
             DeclareLaunchArgument("mapping_mode", default_value="false"),
             DeclareLaunchArgument("publish_rate", default_value="2.0"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
-            DeclareLaunchArgument("max_bag_bytes", default_value="104857600"),
+            DeclareLaunchArgument("max_bag_bytes", default_value="5242880"),
             DeclareLaunchArgument("enable_fake_pub", default_value="true"),
             Node(
                 package="log_bag",

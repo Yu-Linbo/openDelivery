@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot: heartbeat + slam_bringup + nav_bringup (grid_mode localize→/<robot>/map, mapping→/<robot>/mapping; no /map relay).
+# One-shot: heartbeat + manager (stack_lifecycle_manager) + nav_bringup.
 # Modes are mutually exclusive: normal = localization, mapping = mapping (not both).
 #
 # Does NOT start Gazebo/robot/sensors — run simulate (or real stack) separately so /clock, /odom, /scan_2d exist.
@@ -8,20 +8,9 @@
 #   ./start_heartbeat_slam_nav.sh <robot_name> mapping
 #   ./start_heartbeat_slam_nav.sh <robot_name> normal [/absolute/path/to/map.yaml]
 #
-# 建图推荐：先起仿真（与 robot 同名 namespace），再
-#   ./start_heartbeat_slam_nav.sh robot2 mapping
-#
-# Debug: ros2 topic echo /robot2/robot_status
-#   default echo uses best_effort; heartbeat publishes reliable → use:
-#   ros2 topic echo /robot2/robot_status --qos-reliability reliable
-#
-# Env (optional):
-#   USE_SIM_TIME=true|false   (default: true)
-#   MAP_FILE                  used for normal mode if map yaml not passed as 3rd arg
-#   CURRENT_MAP               heartbeat current_map (default: nh_102)
-#   STARTUP_TF_WAIT_SEC       max seconds to wait for /<robot>/odom -> /<robot>/base_footprint
-#   STARTUP_REQUIRE_TF        true|false (default: true). If true and TF not ready, exit with error.
-#   OPEN_DELIVERY_ROOT        optional repo root for other tools (default: this repo root)
+# Debug: ros2 topic echo /robot2/stack_lifecycle
+#   ros2 service call /robot2/set_stack_lifecycle_transition \
+#     custom_msgs_srvs/srv/SetStackLifecycleTransition "{node_name: slam, transition: mapping}"
 
 set -euo pipefail
 
@@ -67,7 +56,6 @@ if [[ ! -f "$ROS_SETUP" ]]; then
   echo "error: missing $ROS_SETUP (set ROS_DISTRO?)" >&2
   exit 1
 fi
-# ROS/setup.bash may reference unset optional env vars (e.g. AMENT_TRACE_SETUP_FILES).
 set +u
 # shellcheck disable=SC1090
 source "$ROS_SETUP"
@@ -98,7 +86,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# heartbeat.launch.py has no use_sim_time; slam + navigation do.
 SIM_ARG="use_sim_time:=$USE_SIM_TIME"
 
 wait_for_robot_tf_ready() {
@@ -149,53 +136,57 @@ PY
   return 1
 }
 
-echo "[start_heartbeat_slam_nav] robot=${ROBOT} mode=${MODE} USE_SIM_TIME=${USE_SIM_TIME} OPEN_DELIVERY_ROOT=${OPEN_DELIVERY_ROOT}"
+stack_transition() {
+  local node_name="$1"
+  local transition="$2"
+  ros2 service call "/${ROBOT}/set_stack_lifecycle_transition" \
+    custom_msgs_srvs/srv/SetStackLifecycleTransition \
+    "{node_name: '${node_name}', transition: '${transition}'}" || true
+}
+
+echo "[start_heartbeat_slam_nav] robot=${ROBOT} mode=${MODE} USE_SIM_TIME=${USE_SIM_TIME}"
 
 if ! wait_for_robot_tf_ready "$ROBOT" "$STARTUP_TF_WAIT_SEC"; then
   if [[ "${STARTUP_REQUIRE_TF,,}" == "true" || "${STARTUP_REQUIRE_TF}" == "1" || "${STARTUP_REQUIRE_TF,,}" == "yes" ]]; then
-    echo "[start_heartbeat_slam_nav] error: required TF not ready for ${ROBOT}; this script does not start simulate. Ensure external simulate stack is running with matching namespace." >&2
+    echo "[start_heartbeat_slam_nav] error: required TF not ready for ${ROBOT}" >&2
     exit 1
   fi
 fi
 
 if [[ "$MODE" == "mapping" ]]; then
-  ros2 launch heartbeat heartbeat.launch.py \
-    "namespace:=${ROBOT}" \
-    "mapping_mode:=true" \
-    "current_map:=${CURRENT_MAP}" &
-  PIDS+=("$!")
-
-  ros2 launch slam_bringup mapping.launch.py \
-    "robot_name:=${ROBOT}" \
-    "namespace:=${ROBOT}" \
-    "${SIM_ARG}" &
-  PIDS+=("$!")
-
-  ros2 launch nav_bringup stack.launch.py \
-    "robot_name:=${ROBOT}" \
-    "grid_mode:=mapping" \
-    "${SIM_ARG}" &
-  PIDS+=("$!")
+  SLAM_MODE="mapping"
+  MAPPING_MODE="true"
+  GRID_MODE="mapping"
+  MAP_FILE_ARG=""
 else
-  ros2 launch heartbeat heartbeat.launch.py \
-    "namespace:=${ROBOT}" \
-    "mapping_mode:=false" \
-    "current_map:=${CURRENT_MAP}" &
-  PIDS+=("$!")
-
-  ros2 launch slam_bringup localization.launch.py \
-    "robot_name:=${ROBOT}" \
-    "namespace:=${ROBOT}" \
-    "map_file:=${MAP_YAML}" \
-    "${SIM_ARG}" &
-  PIDS+=("$!")
-
-  ros2 launch nav_bringup stack.launch.py \
-    "robot_name:=${ROBOT}" \
-    "grid_mode:=localize" \
-    "${SIM_ARG}" &
-  PIDS+=("$!")
+  SLAM_MODE="localize"
+  MAPPING_MODE="false"
+  GRID_MODE="localize"
+  MAP_FILE_ARG="map_file:=${MAP_YAML}"
 fi
+
+ros2 launch heartbeat heartbeat.launch.py \
+  "namespace:=${ROBOT}" \
+  "mapping_mode:=${MAPPING_MODE}" \
+  "current_map:=${CURRENT_MAP}" &
+PIDS+=("$!")
+
+ros2 launch manager manager.launch.py \
+  "namespace:=${ROBOT}" \
+  "${SIM_ARG}" \
+  "initial_slam_mode:=${SLAM_MODE}" \
+  "${MAP_FILE_ARG}" &
+PIDS+=("$!")
+
+sleep 2
+stack_transition heartbeat configure
+stack_transition heartbeat activate
+
+ros2 launch nav_bringup stack.launch.py \
+  "robot_name:=${ROBOT}" \
+  "grid_mode:=${GRID_MODE}" \
+  "${SIM_ARG}" &
+PIDS+=("$!")
 
 echo "[start_heartbeat_slam_nav] started PIDs: ${PIDS[*]} — Ctrl+C to stop all"
 wait

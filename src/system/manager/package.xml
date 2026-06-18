@@ -3,7 +3,7 @@
 <package format="3">
   <name>manager</name>
   <version>0.0.1</version>
-  <description>health_monitor (robot_status lifecycle) and task_manager (task_status) forwarding to heartbeat.</description>
+  <description>health_monitor, task_manager, and stack_lifecycle_manager (SLAM mode + ROS lifecycle proxy).</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
 
@@ -12,6 +12,8 @@
   <depend>rclcpp</depend>
   <depend>custom_msgs_srvs</depend>
   <depend>geometry_msgs</depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>ament_index_cpp</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

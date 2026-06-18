@@ -1,5 +1,4 @@
-# Applies to any node name (mapping launch FQN /<robot_ns>/slam_bringup/mapping).
-# map_name is set by mapping.launch.py to /<namespace>/mapping (not /map).
+# map_name set by stack_lifecycle_manager → /<namespace>/mapping (not /map).
 /**:
   ros__parameters:
     use_sim_time: true

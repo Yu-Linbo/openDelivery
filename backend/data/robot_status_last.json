@@ -29,11 +29,11 @@
     "robot_id": "robot2",
     "robot_name": "robot2",
     "robot_status": "localizing",
-    "stamp_ns": 1780995490082286644,
+    "stamp_ns": 1781759083737981970,
     "task_progress": -1.0,
     "task_status": "mapping",
     "topic": "/robot2/robot_status",
-    "updated_at": 1780995490.0842128
+    "updated_at": 1781759083.7621286
   },
   "robot4": {
     "current_map": "",

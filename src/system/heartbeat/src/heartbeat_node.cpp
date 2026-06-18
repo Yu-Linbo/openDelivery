@@ -178,7 +178,7 @@ bool HeartbeatNode::slam_mapping_node_present() {
     return false;
   }
   for (const auto & pr : pairs) {
-    if (pr.first == "mapping" && pr.second == expected_ns) {
+    if (pr.first == "mapping_worker" && pr.second == expected_ns) {
       return true;
     }
   }

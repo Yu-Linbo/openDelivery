@@ -9,6 +9,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(custom_msgs_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 add_executable(health_monitor_node
   src/health_monitor_node.cpp
@@ -34,10 +36,23 @@ ament_target_dependencies(task_manager_node
   geometry_msgs
 )
 
-install(TARGETS health_monitor_node task_manager_node
+add_executable(stack_lifecycle_manager_node
+  src/stack_lifecycle_manager_node.cpp
+)
+target_include_directories(stack_lifecycle_manager_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+ament_target_dependencies(stack_lifecycle_manager_node
+  rclcpp
+  custom_msgs_srvs
+  lifecycle_msgs
+  ament_index_cpp
+)
+
+install(TARGETS health_monitor_node task_manager_node stack_lifecycle_manager_node
   DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch
+install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME})
 
 ament_package()

@@ -6,8 +6,8 @@
 # 在本脚本内**顺序后台启动**同一命名空间 ${RID} 下的：
 #   1) simulate（Gazebo + 机器人）
 #   2) heartbeat（RobotStatus 发布；Lifecycle 需 configure→activate）
-#   3) manager（health_monitor + task_manager，依赖上一步的 ~/set_heartbeat_params 与 ~/robot_status）
-#   4) slam_bringup localization + mapping（lifecycle 二选一 active，由 AUTO_MAPPING 决定）
+#   3) manager（health_monitor + task_manager + stack_lifecycle_manager）
+#   4) stack_lifecycle_manager 按 initial_slam_mode 切换 slam（mapping|localize）
 #   5) nav_bringup stack
 #
 # **仿真下线**不再调用 sim_shutdown.sh：由上层将 ``RobotStatus.robot_status`` 置为 **SHUTDOWN**
@@ -23,6 +23,7 @@
 #   SIM_BRINGUP_MANAGER_ONLY=1     仅起 simulate + heartbeat + manager（health_monitor/task_manager），跳过 slam/nav（测 manager 用）
 #   SIM_BRINGUP_MANAGER_WAIT=2   heartbeat 就绪后等待秒数再拉 manager（默认 2）
 #   SIM_BRINGUP_MANAGER_POSE_TOPIC=amcl_pose   传给 health_monitor；置空则关闭位姿判定 ready
+#   SIM_BRINGUP_MAX_BAG_BYTES=5242880          rosbag 单包上限（默认 5MB，测试轮转用）
 #
 # 勿用 set -u：/opt/ros/*/setup.bash 与 install/setup.bash 会引用未设置的变量（如 AMENT_TRACE_SETUP_FILES），
 # 与 backend RosNodeManager._bash_prefix 一致，仅用 -e 与 pipefail。
@@ -125,6 +126,9 @@ if [[ "${AUTO_MAPPING}" == "1" ]]; then
 fi
 log "NAV_GRID_MODE=${NAV_GRID_MODE}"
 
+MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-5242880}"
+log "MAX_BAG_BYTES=${MAX_BAG_BYTES}"
+
 # --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/startup.launch.py 维护）---
 ros2 launch system startup.launch.py \
   "robot_name:=${RID}" \
@@ -134,6 +138,7 @@ ros2 launch system startup.launch.py \
   "mapping_mode:=false" \
   "publish_rate:=2.0" \
   "log_root:=${ROOT}/log_bag" \
+  "max_bag_bytes:=${MAX_BAG_BYTES}" \
   "enable_fake_pub:=false" &
 log "started system startup.launch.py (log_bag+heartbeat, pid $!)"
 
@@ -173,146 +178,30 @@ else
   log "WARN: heartbeat lifecycle service not visible within ${HB_WAIT}s: ${HB}"
 fi
 
-# --- 2b) manager：health_monitor + task_manager（包名 manager，与 heartbeat 同命名空间）---
-# health_monitor：检查 required_nodes（默认含 heartbeat）→ 通过 set_heartbeat_params 推进
-#   robot_status（localizing / localization_lost / ready / shutdown 等）；订阅 ~/robot_status 与定位位姿话题。
-# task_manager：暴露 ~/set_robot_task，将 task_status 写入 heartbeat。
-# 必须在 heartbeat lifecycle active 之后启动，否则 set_heartbeat_params 与 robot_status 可能不可用。
+# --- 2b) manager：health_monitor + task_manager + stack_lifecycle_manager ---
+SLAM_INITIAL_MODE="inactive"
+if [[ "${AUTO_MAPPING}" == "1" ]]; then
+  SLAM_INITIAL_MODE="mapping"
+else
+  SLAM_INITIAL_MODE="localize"
+fi
 ros2 launch manager manager.launch.py \
   "namespace:=${RID}" \
-  "localization_pose_topic:=${MANAGER_POSE_TOPIC}" &
-log "started manager.launch.py (health_monitor+task_manager, pid $!) namespace=${RID} pose_topic=${MANAGER_POSE_TOPIC}"
+  "localization_pose_topic:=${MANAGER_POSE_TOPIC}" \
+  "use_sim_time:=true" \
+  "initial_slam_mode:=${SLAM_INITIAL_MODE}" &
+log "started manager.launch.py (health_monitor+task_manager+stack_lifecycle_manager, pid $!) namespace=${RID} slam=${SLAM_INITIAL_MODE}"
 sleep "${MANAGER_WAIT}"
 
 if [[ "${SIM_BRINGUP_MANAGER_ONLY:-0}" == "1" ]]; then
-  log "SIM_BRINGUP_MANAGER_ONLY=1: skip slam + nav; background jobs = simulate + heartbeat + manager"
+  log "SIM_BRINGUP_MANAGER_ONLY=1: skip nav; background jobs = simulate + heartbeat + manager"
   wait
   exit 0
 fi
 
-# --- 3) 定位 + 建图（同时启动，按 lifecycle 切换 active/inactive）---
-ros2 launch slam_bringup localization.launch.py \
-  "robot_name:=${RID}" \
-  "namespace:=${RID}" &
-log "started localization.launch.py (pid $!)"
+# --- 3) SLAM mode is owned by stack_lifecycle_manager (initial_slam_mode above) ---
 
-ros2 launch slam_bringup mapping.launch.py \
-  "robot_name:=${RID}" \
-  "namespace:=${RID}" &
-log "started mapping.launch.py (pid $!)"
-
-SLAM_LOCALIZATION="/${RID}/slam_bringup/localization"
-SLAM_MAPPING="/${RID}/slam_bringup/mapping"
-
-wait_lifecycle_node() {
-  local node="$1"
-  local timeout_s="$2"
-  local ready=0
-  local i
-  for i in $(seq 1 "${timeout_s}"); do
-    if ros2 lifecycle get "${node}" >/dev/null 2>&1; then
-      ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [[ "${ready}" == "1" ]]; then
-    return 0
-  fi
-  return 1
-}
-
-lifecycle_set_best_effort() {
-  local node="$1"
-  local transition="$2"
-  if ros2 lifecycle set "${node}" "${transition}" >/dev/null 2>&1; then
-    log "slam lifecycle ${transition} requested: ${node}"
-  else
-    log "slam lifecycle ${transition} skipped/failed (state may already satisfy target): ${node}"
-  fi
-}
-
-lifecycle_get_state() {
-  local node="$1"
-  local out
-  out="$(ros2 lifecycle get "${node}" 2>/dev/null || true)"
-  if [[ "${out}" == *"inactive"* ]]; then
-    echo "inactive"
-  elif [[ "${out}" == *"active"* ]]; then
-    echo "active"
-  elif [[ "${out}" == *"unconfigured"* ]]; then
-    echo "unconfigured"
-  elif [[ "${out}" == *"finalized"* ]]; then
-    echo "finalized"
-  else
-    echo "unknown"
-  fi
-}
-
-ensure_lifecycle_inactive() {
-  local node="$1"
-  local state
-  state="$(lifecycle_get_state "${node}")"
-  case "${state}" in
-    unconfigured)
-      lifecycle_set_best_effort "${node}" configure
-      ;;
-    inactive)
-      ;;
-    active)
-      lifecycle_set_best_effort "${node}" deactivate
-      ;;
-    *)
-      # Best effort fallback if state parsing failed.
-      lifecycle_set_best_effort "${node}" configure
-      lifecycle_set_best_effort "${node}" deactivate
-      ;;
-  esac
-}
-
-ensure_lifecycle_active() {
-  local node="$1"
-  local state
-  state="$(lifecycle_get_state "${node}")"
-  case "${state}" in
-    active)
-      ;;
-    inactive)
-      lifecycle_set_best_effort "${node}" activate
-      ;;
-    unconfigured)
-      lifecycle_set_best_effort "${node}" configure
-      lifecycle_set_best_effort "${node}" activate
-      ;;
-    *)
-      # Best effort fallback if state parsing failed.
-      lifecycle_set_best_effort "${node}" configure
-      lifecycle_set_best_effort "${node}" activate
-      ;;
-  esac
-}
-
-for slam_node in "${SLAM_LOCALIZATION}" "${SLAM_MAPPING}"; do
-  if wait_lifecycle_node "${slam_node}" "${SLAM_WAIT}"; then
-    ensure_lifecycle_inactive "${slam_node}"
-  else
-    log "WARN: slam lifecycle service not visible within ${SLAM_WAIT}s: ${slam_node}"
-  fi
-done
-
-if [[ "${AUTO_MAPPING}" == "1" ]]; then
-  # mapping mode: first force localization inactive, then bring mapping active.
-  ensure_lifecycle_inactive "${SLAM_LOCALIZATION}"
-  ensure_lifecycle_active "${SLAM_MAPPING}"
-  log "slam mode=mapping (localization inactive, mapping active)"
-else
-  # normal mode: first force mapping inactive, then bring localization active.
-  ensure_lifecycle_inactive "${SLAM_MAPPING}"
-  ensure_lifecycle_active "${SLAM_LOCALIZATION}"
-  log "slam mode=normal (localization active, mapping inactive)"
-fi
-
-# --- 5) 导航（默认 active）---
+# --- 4) 导航（默认 active）---
 ros2 launch nav_bringup stack.launch.py \
   "robot_name:=${RID}" \
   "grid_mode:=${NAV_GRID_MODE}" \

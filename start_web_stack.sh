@@ -67,6 +67,11 @@ while [[ "${BACKEND_PORT}" -eq "${FRONTEND_PORT}" ]] || port_is_busy "${BACKEND_
   BACKEND_PORT=$((BACKEND_PORT + 1))
 done
 
+# Avoid FastRTPS shared-memory errors after hard kills (stale /dev/shm segments).
+# UDP-only transport is more reliable for the web backend joining an existing ROS graph.
+: "${FASTDDS_BUILTIN_TRANSPORTS:=UDPv4}"
+export FASTDDS_BUILTIN_TRANSPORTS
+
 # 默认 ROBOT_POSE_MODE=ros2_tf（真 TF）；无 ROS 时位姿列表为空。仅演示轨迹请: export ROBOT_POSE_MODE=mock
 : "${ROBOT_POSE_MODE:=ros2_tf}"
 export ROBOT_POSE_MODE

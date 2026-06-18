@@ -134,7 +134,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "robot_name",
                 default_value="robot2",
-                description="ROS namespace for Nav2 nodes (match slam_bringup / robot TF prefix)",
+                description="ROS namespace for Nav2 nodes (match robot TF prefix)",
             ),
             DeclareLaunchArgument(
                 "use_sim_time",

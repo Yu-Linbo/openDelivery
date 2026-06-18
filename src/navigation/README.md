@@ -14,7 +14,7 @@
 
 ## 启动示例
 
-先启动 `slam_bringup`（或其它发布 `/<robot>/map` 或 `/<robot>/mapping` 的栈），再：
+先启动 SLAM（`stack_lifecycle_manager` 或任意发布 `/<robot>/map` / `/<robot>/mapping` 的栈），再：
 
 ```bash
 cd /path/to/openDelivery

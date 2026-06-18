@@ -2422,7 +2422,8 @@ function appendLog(message) {
 }
 
 let logBagEntries = [];
-let selectedLogBagIndex = -1;
+let selectedLogBagIndices = new Set();
+let logBagFileChecked = new Map();
 let logBagRobotOptions = [];
 
 function flattenLogBagEntries(payload) {
@@ -2508,6 +2509,22 @@ function formatLogBagSize(bytes) {
   return `${n} B`;
 }
 
+function basenameOfLogPath(path) {
+  const text = String(path || "");
+  const slash = text.lastIndexOf("/");
+  return slash >= 0 ? text.slice(slash + 1) : text;
+}
+
+function toggleLogBagSelection(idx, checked) {
+  if (checked) {
+    selectedLogBagIndices.add(idx);
+  } else {
+    selectedLogBagIndices.delete(idx);
+  }
+  renderLogBagList();
+  renderLogBagFiles();
+}
+
 function renderLogBagList() {
   if (!logBagList) return;
   logBagList.innerHTML = "";
@@ -2523,19 +2540,34 @@ function renderLogBagList() {
   }
   logBagEntries.forEach((entry, idx) => {
     const li = document.createElement("li");
-    li.className = `log-bag-item${idx === selectedLogBagIndex ? " log-bag-item--selected" : ""}`;
-    li.tabIndex = 0;
+    const selected = selectedLogBagIndices.has(idx);
+    li.className = `log-bag-item${selected ? " log-bag-item--selected" : ""}`;
     li.dataset.index = String(idx);
+
+    const checkboxId = `log-bag-select-${idx}`;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.id = checkboxId;
+    checkbox.className = "log-bag-item__checkbox";
+    checkbox.checked = selected;
+    checkbox.addEventListener("change", () => {
+      toggleLogBagSelection(idx, checkbox.checked);
+    });
+    li.appendChild(checkbox);
+
+    const body = document.createElement("label");
+    body.className = "log-bag-item__body";
+    body.htmlFor = checkboxId;
 
     const title = document.createElement("div");
     title.className = "log-bag-item__title";
-    title.textContent = entry.bag || "(unknown bag)";
-    li.appendChild(title);
+    title.textContent = basenameOfLogPath(entry.bag) || "(unknown bag)";
+    body.appendChild(title);
 
     const meta = document.createElement("div");
     meta.className = "log-bag-item__meta";
-    meta.textContent = `${entry.robotName || "unknown"} · ${entry.ended_at || entry.started_at || "无时间"} · ${formatLogBagSize(entry.bytes)}`;
-    li.appendChild(meta);
+    meta.textContent = `${entry.ended_at || entry.started_at || "无时间"} · ${formatLogBagSize(entry.bytes)}`;
+    body.appendChild(meta);
 
     const tags = Array.isArray(entry.tags) ? entry.tags : [];
     const tagRow = document.createElement("div");
@@ -2553,29 +2585,34 @@ function renderLogBagList() {
         tagRow.appendChild(chip);
       });
     }
-    li.appendChild(tagRow);
-
-    li.addEventListener("click", () => {
-      selectedLogBagIndex = idx;
-      renderLogBagList();
-      renderLogBagFiles();
-    });
-    li.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectedLogBagIndex = idx;
-        renderLogBagList();
-        renderLogBagFiles();
-      }
-    });
+    body.appendChild(tagRow);
+    li.appendChild(body);
     logBagList.appendChild(li);
   });
 }
 
 function selectedLogBagFiles() {
-  const entry = logBagEntries[selectedLogBagIndex];
-  if (!entry || !Array.isArray(entry.files)) return [];
-  return entry.files.filter((f) => f && f.path);
+  const files = [];
+  const seen = new Set();
+  Array.from(selectedLogBagIndices)
+    .sort((a, b) => a - b)
+    .forEach((idx) => {
+      const entry = logBagEntries[idx];
+      if (!entry || !Array.isArray(entry.files)) return;
+      entry.files.forEach((file) => {
+        if (!file || !file.path || seen.has(file.path)) return;
+        seen.add(file.path);
+        files.push({
+          ...file,
+          bagTitle: basenameOfLogPath(entry.bag) || entry.bag || "bag",
+        });
+      });
+    });
+  return files;
+}
+
+function defaultLogBagFileChecked(file) {
+  return file.kind === "bag";
 }
 
 function updateLogBagDownloadState() {
@@ -2584,23 +2621,43 @@ function updateLogBagDownloadState() {
     document.querySelectorAll(".log-bag-file-list input[type='checkbox']:checked")
   ).map((el) => el.value);
   btnDownloadLogBag.disabled = checked.length === 0;
+  const bagCount = selectedLogBagIndices.size;
   logBagSelectionSummary.textContent =
-    checked.length === 0 ? "未选择文件" : `已选择 ${checked.length} 个文件`;
+    checked.length === 0
+      ? bagCount > 0
+        ? "未勾选下载文件"
+        : "未选择 bag"
+      : `${bagCount} 个 bag · ${checked.length} 个文件`;
 }
 
 function renderLogBagFiles() {
   if (!logBagFileList || !logBagFileHint) return;
   logBagFileList.innerHTML = "";
   const files = selectedLogBagFiles();
+  if (selectedLogBagIndices.size === 0) {
+    logBagFileHint.hidden = false;
+    logBagFileHint.textContent = "请先在左侧勾选一个或多个 bag。";
+    updateLogBagDownloadState();
+    return;
+  }
   if (files.length === 0) {
     logBagFileHint.hidden = false;
-    logBagFileHint.textContent =
-      selectedLogBagIndex < 0 ? "请先在左侧选择一个 bag。" : "该 bag 没有关联文件。";
+    logBagFileHint.textContent = "所选 bag 没有关联文件。";
     updateLogBagDownloadState();
     return;
   }
   logBagFileHint.hidden = true;
+
+  let groupTitle = "";
   files.forEach((file, idx) => {
+    if (file.bagTitle !== groupTitle) {
+      groupTitle = file.bagTitle;
+      const heading = document.createElement("div");
+      heading.className = "log-bag-file-group";
+      heading.textContent = groupTitle;
+      logBagFileList.appendChild(heading);
+    }
+
     const id = `log-bag-file-${idx}`;
     const row = document.createElement("label");
     row.className = `log-bag-file${file.exists ? "" : " log-bag-file--missing"}`;
@@ -2610,16 +2667,25 @@ function renderLogBagFiles() {
     input.type = "checkbox";
     input.id = id;
     input.value = file.path;
-    input.checked = true;
+    const checked = logBagFileChecked.has(file.path)
+      ? logBagFileChecked.get(file.path)
+      : defaultLogBagFileChecked(file);
+    if (!logBagFileChecked.has(file.path)) {
+      logBagFileChecked.set(file.path, checked);
+    }
+    input.checked = checked;
     input.disabled = !file.exists;
-    input.addEventListener("change", updateLogBagDownloadState);
+    input.addEventListener("change", () => {
+      logBagFileChecked.set(file.path, input.checked);
+      updateLogBagDownloadState();
+    });
     row.appendChild(input);
 
     const body = document.createElement("span");
     body.className = "log-bag-file__body";
     const name = document.createElement("span");
     name.className = "log-bag-file__name";
-    name.textContent = file.path;
+    name.textContent = basenameOfLogPath(file.path);
     const meta = document.createElement("span");
     meta.className = "log-bag-file__meta";
     meta.textContent = `${file.kind || "file"}${file.is_dir ? " · directory" : ""}${file.exists ? "" : " · missing"}`;
@@ -2640,7 +2706,8 @@ async function refreshLogBags() {
     const robotName = logBagRobotSelect ? String(logBagRobotSelect.value || "").trim() : "";
     if (!robotName) {
       logBagEntries = [];
-      selectedLogBagIndex = -1;
+      selectedLogBagIndices = new Set();
+      logBagFileChecked = new Map();
       renderLogBagList();
       renderLogBagFiles();
       logBagStatus.textContent = "无机器人，暂无日志索引";
@@ -2652,14 +2719,16 @@ async function refreshLogBags() {
     const payload = await res.json();
     if (!res.ok) throw new Error(payload.error || "读取日志索引失败");
     logBagEntries = flattenLogBagEntries(payload);
-    selectedLogBagIndex = logBagEntries.length > 0 ? 0 : -1;
+    logBagFileChecked = new Map();
+    selectedLogBagIndices = logBagEntries.length > 0 ? new Set([0]) : new Set();
     renderLogBagList();
     renderLogBagFiles();
     logBagStatus.textContent =
       logBagEntries.length > 0 ? `${robotName}：已加载 ${logBagEntries.length} 个 bag` : `${robotName}：无 log`;
   } catch (err) {
     logBagEntries = [];
-    selectedLogBagIndex = -1;
+    selectedLogBagIndices = new Set();
+    logBagFileChecked = new Map();
     renderLogBagList();
     renderLogBagFiles();
     logBagStatus.textContent = `读取失败：${err.message || err}`;

@@ -287,17 +287,24 @@ class RosNodeManager:
 
     def _make_slam_mapping_spec(self, robot_name: str = "sim_robot") -> dict:
         rn = self._sanitize_node_fragment(robot_name, "robot_name")
+        svc = (
+            f"ros2 service call /{rn}/set_stack_lifecycle_transition "
+            f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
+            f"'{{node_name: \"slam\", transition: \"mapping\"}}'"
+        )
+        stop_svc = (
+            f"ros2 service call /{rn}/set_stack_lifecycle_transition "
+            f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
+            f"'{{node_name: \"slam\", transition: \"inactive\"}}'"
+        )
         return {
             "id": "slam_bringup_mapping",
             "name": "slam_bringup_mapping",
             "persistent": False,
-            "start_cmd": (
-                f"ros2 launch slam_bringup mapping.launch.py "
-                f"robot_name:={rn} namespace:={rn}"
-            ),
-            "stop_cmd": "pkill -f 'ros2 launch slam_bringup mapping.launch.py'",
-            "match": "mapping.launch.py",
-            "note": f"SLAM 建图 (robot_name={rn}, 与仿真 namespace 对齐)",
+            "start_cmd": svc,
+            "stop_cmd": stop_svc,
+            "match": "stack_lifecycle_manager",
+            "note": f"SLAM mapping via stack_lifecycle_manager (robot={rn})",
         }
 
     def create_slam_mapping_node_and_start(self, robot_name: str = "sim_robot"):
@@ -1252,8 +1259,9 @@ def _build_debug_nodes_view() -> dict:
     def _is_lifecycle_candidate(node_name: str) -> bool:
         n = str(node_name or "")
         hints = (
-            "/slam_bringup/localization",
-            "/slam_bringup/mapping",
+            "/stack_lifecycle_manager",
+            "/slam_bringup/mapping_worker",
+            "/slam_bringup/localization_worker",
             "/heartbeat",
             "/lifecycle_manager_",
             "/bt_navigator",
@@ -1270,8 +1278,7 @@ def _build_debug_nodes_view() -> dict:
         # keep lifecycle action buttons but skip per-request state probing.
         n = str(node_name or "")
         return (
-            "/slam_bringup/localization" in n
-            or "/slam_bringup/mapping" in n
+            "/stack_lifecycle_manager" in n
             or "/heartbeat" in n
             or "/lifecycle_manager_navigation" in n
         )
@@ -1520,6 +1527,12 @@ def _list_log_bag_matches(robot_filter: Optional[str] = None) -> dict:
     return {"robots": robots, "timestamp": time.time()}
 
 
+def _zip_log_bag_arcname(path: Path, *, root: Optional[Path] = None) -> str:
+    if root is not None:
+        return f"{root.name}/{path.relative_to(root).as_posix()}"
+    return path.name
+
+
 def _zip_log_bag_files(raw_files: list) -> Tuple[bytes, str]:
     if not isinstance(raw_files, list) or not raw_files:
         raise ValueError("files must be a non-empty array")
@@ -1538,9 +1551,9 @@ def _zip_log_bag_files(raw_files: list) -> Tuple[bytes, str]:
         for p in paths:
             if p.is_dir():
                 for child in sorted(x for x in p.rglob("*") if x.is_file()):
-                    zf.write(child, _log_bag_display_path(child))
+                    zf.write(child, _zip_log_bag_arcname(child, root=p))
             else:
-                zf.write(p, _log_bag_display_path(p))
+                zf.write(p, _zip_log_bag_arcname(p))
     return buf.getvalue(), f"openDelivery_logs_{int(time.time())}.zip"
 
 

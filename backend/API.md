@@ -94,6 +94,7 @@ These endpoints are used by `web/app.js`.
 - `POST /api/log_bag/download`
   - Body: `{ "files": ["log_bag/robot2/backup/bags/20260609T080918_terminal_bag", "log_bag/robot2/backup/logs/20260609T080918_terminal_log.txt"] }`
   - Purpose: download selected log files/directories as a zip.
+  - Zip layout: flat top-level entries only — `*_terminal_bag/` directories and `*_terminal_log.txt` files (no `log_bag/.../backup/...` prefix).
 
 ## Web And AI Shared APIs
 

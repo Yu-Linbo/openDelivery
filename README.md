@@ -39,7 +39,7 @@ git clone https://github.com/ros-navigation/navigation2.git
 ```bash
 cd /path/to/openDelivery
 source /opt/ros/$ROS_DISTRO/setup.bash
-colcon build --symlink-install --packages-up-to simulate slam_bringup
+colcon build --symlink-install --packages-up-to simulate manager
 source install/setup.bash
 ros2 launch simulate simulate.launch.py
 ```
@@ -47,7 +47,7 @@ ros2 launch simulate simulate.launch.py
 另一终端（已 `source install/setup.bash`）：
 
 ```bash
-ros2 launch slam_bringup mapping.launch.py
+ros2 launch manager manager.launch.py namespace:=robot2 initial_slam_mode:=mapping
 ```
 
 详见 **`src/README.md`**（含 TF 约定、仿真与构建说明）。

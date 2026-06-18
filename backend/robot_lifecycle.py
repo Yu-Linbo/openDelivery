@@ -10,10 +10,8 @@ Per-robot stack orchestration for the web console.
 - **仿真离线**：向 ``/<robot>/set_heartbeat_params`` 写入 ``robot_status=SHUTDOWN``（``RobotStatus.msg`` 中
   ``ROBOT_STATUS_SHUTDOWN=4``），供各节点订阅 ``/<robot>/robot_status`` 后自行收尾；再对 navigation / heartbeat
   做 best-effort lifecycle shutdown，最后 ``pause`` 各托管项（已废弃 ``sim_shutdown.sh``）。
-- ``heartbeat`` / ``navigation``：ROS 2 lifecycle；``localization`` / ``mapping``：脚本内 ``ros2 launch``，
-  Web 侧另注册同名托管项（不二次 start）以便展示与 start/pause。
-- **建图**：是否启动由 ``sim_bringup.sh`` 读取 ``backend/data/robot_status_last.json`` 决定（与历史
-  ``robot_status == mapping`` 一致）；未自动建图时可在 ROS 页对 mapping 点 ``start``。
+- ``heartbeat`` / ``navigation``：经 ``set_stack_lifecycle_transition`` 驱动标准 Lifecycle；
+  ``slam``：同一服务切换模式（``mapping`` / ``localize`` / ``inactive``），由 ``stack_lifecycle_manager`` fork ``slam_toolbox``。
 """
 
 import os
@@ -67,9 +65,24 @@ class RobotLifecycleOrchestrator:
             env=os.environ.copy(),
         )
 
+    def _stack_lifecycle_transition(self, robot_id: str, node_name: str, transition: str):
+        rid = str(robot_id or "").strip()
+        nn = str(node_name or "").strip()
+        tr = str(transition or "").strip().lower()
+        if not rid or not nn or not tr:
+            raise ValueError("robot_id, node_name and transition are required")
+        cmd = (
+            f"ros2 service call /{rid}/set_stack_lifecycle_transition "
+            f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
+            f"'{{node_name: \"{nn}\", transition: \"{tr}\"}}'"
+        )
+        proc = self._run_shell(cmd, timeout=20.0)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(detail or f"stack lifecycle transition failed: {nn} {tr}")
+
     def _component_catalog(self, robot_id: str):
         rid = str(robot_id or "").strip()
-        slam_ns = f"/{rid}/slam_bringup"
         return [
             {
                 "id": "simulate",
@@ -80,6 +93,13 @@ class RobotLifecycleOrchestrator:
                 "transitions": ["start", "shutdown"],
             },
             {
+                "id": "stack_lifecycle_manager",
+                "label_zh": "栈生命周期",
+                "type": "stack_manager",
+                "node": f"/{rid}/stack_lifecycle_manager",
+                "transitions": [],
+            },
+            {
                 "id": "heartbeat",
                 "label_zh": "心跳",
                 "type": "lifecycle",
@@ -87,20 +107,11 @@ class RobotLifecycleOrchestrator:
                 "transitions": ["configure", "activate", "deactivate", "cleanup", "shutdown"],
             },
             {
-                "id": "localization",
-                "label_zh": "定位",
-                "type": "process_wrapper",
-                "managed_node_id": f"localization_{rid}",
-                "expected_node": f"{slam_ns}/localization",
-                "transitions": ["start", "shutdown"],
-            },
-            {
-                "id": "mapping",
-                "label_zh": "建图",
-                "type": "process_wrapper",
-                "managed_node_id": f"mapping_{rid}",
-                "expected_node": f"{slam_ns}/mapping",
-                "transitions": ["start", "shutdown"],
+                "id": "slam",
+                "label_zh": "SLAM",
+                "type": "slam_mode",
+                "node": f"/{rid}/stack_lifecycle_manager",
+                "transitions": ["mapping", "localize", "inactive"],
             },
             {
                 "id": "navigation",
@@ -163,8 +174,7 @@ class RobotLifecycleOrchestrator:
                 {
                     "simulate_started": False,
                     "heartbeat_started": False,
-                    "localization_started": False,
-                    "mapping_started": False,
+                    "slam_mode": "inactive",
                     "navigation_started": False,
                     "sim_mode": "sim",
                     "updated_at": time.time(),
@@ -341,8 +351,6 @@ class RobotLifecycleOrchestrator:
                 f"pkill -f 'sim_bringup.sh {rid}' || true; "
                 f"pkill -f 'ros2 launch system startup.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}' || true; "
-                f"pkill -f 'ros2 launch slam_bringup mapping.launch.py.*robot_name:={rid}' || true; "
-                f"pkill -f 'ros2 launch slam_bringup localization.launch.py.*robot_name:={rid}' || true; "
                 f"pkill -f 'ros2 launch manager manager.launch.py.*namespace:={rid}' || true; "
                 f"pkill -f 'ros2 launch heartbeat heartbeat.launch.py.*namespace:={rid}' || true; "
                 f"pkill -f 'ros2 launch log_bag log_bag.launch.py.*robot_name:={rid}' || true; "
@@ -372,37 +380,7 @@ class RobotLifecycleOrchestrator:
                 note="full sim stack via sim_bringup.sh (managed id = robot id)",
                 force=force_restart,
             )
-            # 脚本已拉起下列进程；仅注册托管项（不二次 start），便于 Web 用 ps 匹配显示与 start/pause
-            loc_cmd = (
-                f"ros2 launch slam_bringup localization.launch.py "
-                f"robot_name:={rid} namespace:={rid}"
-            )
-            self._start_if_needed(
-                f"localization_{rid}",
-                loc_cmd,
-                stop_cmd=(
-                    f"pkill -f 'ros2 launch slam_bringup localization.launch.py "
-                    f"robot_name:={rid} namespace:={rid}' || true"
-                ),
-                match=f"localization.launch.py robot_name:={rid}",
-                autostart=False,
-                note="registered for status (started by sim_bringup.sh)",
-            )
-            map_cmd = (
-                f"ros2 launch slam_bringup mapping.launch.py "
-                f"robot_name:={rid} namespace:={rid}"
-            )
-            self._start_if_needed(
-                f"mapping_{rid}",
-                map_cmd,
-                stop_cmd=(
-                    f"pkill -f 'ros2 launch slam_bringup mapping.launch.py "
-                    f"robot_name:={rid} namespace:={rid}' || true"
-                ),
-                match=f"mapping.launch.py robot_name:={rid}",
-                autostart=False,
-                note="registered for status (started by sim_bringup.sh if auto)",
-            )
+            # navigation 托管项仅用于状态展示（由 sim_bringup.sh 拉起）
             nav_cmd = (
                 f"ros2 launch nav_bringup stack.launch.py "
                 f"robot_name:={rid} grid_mode:=localize autostart:=false"
@@ -427,11 +405,8 @@ class RobotLifecycleOrchestrator:
                 {
                     "simulate_started": True,
                     "heartbeat_started": True,
-                    "localization_started": True,
-                    "mapping_started": auto_mapping,
+                    "slam_mode": "mapping" if auto_mapping else "localize",
                     "navigation_started": True,
-                    "localization_state": "inactive",
-                    "mapping_state": "unconfigured" if auto_mapping else None,
                     "sim_mode": sim_mode,
                     "last_persisted_robot_status": last_rs or None,
                     "updated_at": time.time(),
@@ -454,9 +429,6 @@ class RobotLifecycleOrchestrator:
             self._lifecycle_try(hb, t)
         for node_id in (
             f"navigation_{rid}",
-            f"mapping_{rid}",
-            f"localization_{rid}",
-            f"heartbeat_{rid}",
             rid,
         ):
             try:
@@ -465,8 +437,7 @@ class RobotLifecycleOrchestrator:
                 pass
         with self._lock:
             st = self._state.setdefault(rid, {})
-            st.pop("localization_state", None)
-            st.pop("mapping_state", None)
+            st.pop("slam_mode", None)
             st["updated_at"] = time.time()
             self._last_error = ""
         return self.status(rid)
@@ -480,16 +451,16 @@ class RobotLifecycleOrchestrator:
             action = "start" if transition in ("configure", "activate", "start") else "pause"
             self._ros_node_manager.control(rid, action)
             return self.status(rid)
-        if cid in ("localization", "mapping"):
-            node_id = f"{cid}_{rid}"
-            action = "start" if transition in ("configure", "activate", "start") else "pause"
-            self._ros_node_manager.control(node_id, action)
+        if cid in ("slam", "mapping", "localization"):
+            if cid == "mapping":
+                tr = "mapping" if transition in ("configure", "activate", "start", "mapping") else "inactive"
+            elif cid == "localization":
+                tr = "localize" if transition in ("configure", "activate", "start", "localize") else "inactive"
+            else:
+                tr = transition
+            self._stack_lifecycle_transition(rid, "slam", tr)
             with self._lock:
-                self._state.setdefault(rid, {})
-                if cid == "localization":
-                    self._state[rid]["localization_state"] = "active" if action == "start" else "unconfigured"
-                if cid == "mapping":
-                    self._state[rid]["mapping_state"] = "inactive" if action == "start" else "unconfigured"
+                self._state.setdefault(rid, {})["slam_mode"] = tr
             return self.status(rid)
         comp = next((c for c in self._component_catalog(rid) if c["id"] == cid), None)
         if not comp:
@@ -497,7 +468,8 @@ class RobotLifecycleOrchestrator:
         node = comp.get("node")
         if not node:
             raise ValueError(f"component {cid} is not lifecycle-addressable")
-        self._lifecycle_set(node, transition)
+        target = "lifecycle_manager_navigation" if cid == "navigation" else cid
+        self._stack_lifecycle_transition(rid, target, transition)
         return self.status(rid)
 
     def status(self, robot_id=None):
@@ -539,11 +511,24 @@ class RobotLifecycleOrchestrator:
                     mn = managed_by_id.get(comp.get("managed_node_id"))
                     running = bool(mn and mn.get("running"))
                     lifecycle_state = "active" if running else "unconfigured"
-                    if comp["id"] in ("localization", "mapping"):
-                        with self._lock:
-                            virtual = self._state.get(rid, {}).get(f"{comp['id']}_state")
-                        if virtual:
-                            lifecycle_state = virtual
+                elif ctype == "slam_mode":
+                    slam_ns = f"/{rid}/slam_bringup"
+                    running = any(
+                        n in discovered_names
+                        for n in (
+                            f"{slam_ns}/mapping_worker",
+                            f"{slam_ns}/localization_worker",
+                        )
+                    )
+                    with self._lock:
+                        lifecycle_state = str(
+                            self._state.get(rid, {}).get("slam_mode") or "inactive"
+                        )
+                    if running and lifecycle_state == "inactive":
+                        lifecycle_state = "mapping" if f"{slam_ns}/mapping_worker" in discovered_names else "localize"
+                elif ctype == "stack_manager":
+                    running = f"/{rid}/stack_lifecycle_manager" in discovered_names
+                    lifecycle_state = "active" if running else "missing"
                 elif node:
                     nn = _norm_ros_name(str(node))
                     running = nn in discovered_names
@@ -562,7 +547,7 @@ class RobotLifecycleOrchestrator:
                     "transitions": comp.get("transitions") or [],
                     "expected": True,
                 }
-                if comp["id"] == "mapping":
+                if comp["id"] == "slam":
                     row["sim_bringup_autostart_mapping"] = will_auto_mapping
                 components.append(row)
             with self._lock:
@@ -581,9 +566,9 @@ class RobotLifecycleOrchestrator:
                     "last_persisted_robot_status_at_bringup": online_state.get(
                         "last_persisted_robot_status"
                     ),
-                    "session_mapping_process_started": bool(
-                        online_state.get("mapping_started")
-                    ),
+                    "session_mapping_process_started": str(
+                        online_state.get("slam_mode") or ""
+                    ).lower() == "mapping",
                     "discovered_nodes": [{"name": n} for n in discovered_under],
                     "components": components,
                 }

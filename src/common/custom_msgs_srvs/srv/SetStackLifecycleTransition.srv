@@ -1,0 +1,9 @@
+# node_name: short name (slam, heartbeat, lifecycle_manager_navigation) or absolute FQN.
+# transition: ROS lifecycle (configure|activate|deactivate|cleanup|shutdown)
+#             or slam mode (mapping|localize|inactive).
+string node_name
+string transition
+---
+bool success
+string message
+string current_state
