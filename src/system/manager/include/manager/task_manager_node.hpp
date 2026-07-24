@@ -33,6 +33,8 @@ private:
     uint8_t task_status,
     const std::string & current_map);
 
+  // Separate group so localize/set_task callbacks can wait on heartbeat without deadlock.
+  rclcpp::CallbackGroup::SharedPtr hb_client_cb_group_;
   rclcpp::Client<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedPtr hb_client_;
   rclcpp::Service<custom_msgs_srvs::srv::SetRobotTask>::SharedPtr srv_;
   rclcpp::Subscription<custom_msgs_srvs::msg::RobotStatus>::SharedPtr status_gate_sub_;

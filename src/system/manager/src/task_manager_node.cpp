@@ -67,7 +67,13 @@ TaskManagerNode::TaskManagerNode()
     initial_pose_topic_ = "initial";
   }
 
-  hb_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>("set_heartbeat_params");
+  // Client responses must not share the MutuallyExclusive group used by
+  // localize_nav / set_robot_task callbacks (otherwise wait times out ~8s).
+  hb_client_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  hb_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>(
+    "set_heartbeat_params",
+    rmw_qos_profile_services_default,
+    hb_client_cb_group_);
   srv_ = create_service<custom_msgs_srvs::srv::SetRobotTask>(
     "set_robot_task",
     std::bind(&TaskManagerNode::on_set_task, this, std::placeholders::_1, std::placeholders::_2));
@@ -200,13 +206,16 @@ void TaskManagerNode::on_localize_nav(
     RCLCPP_WARN(get_logger(), "localize_nav_command ignored: robot_status is shutdown");
     return;
   }
+  // LOCALIZATION_LOST is the post-relocate resting state until pose recovers; must accept
+  // further Web reloc clicks (otherwise only the first relocate works).
   if (rs != RobotStatusMsg::ROBOT_STATUS_INITIALIZING &&
     rs != RobotStatusMsg::ROBOT_STATUS_LOCALIZING &&
+    rs != RobotStatusMsg::ROBOT_STATUS_LOCALIZATION_LOST &&
     rs != RobotStatusMsg::ROBOT_STATUS_READY)
   {
     RCLCPP_WARN(
       get_logger(),
-      "localize_nav_command ignored: robot_status=%u not in {init,localizing,ready}",
+      "localize_nav_command ignored: robot_status=%u not in {init,localizing,lost,ready}",
       static_cast<unsigned>(rs));
     return;
   }

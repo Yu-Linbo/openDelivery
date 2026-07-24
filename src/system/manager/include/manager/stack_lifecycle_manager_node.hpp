@@ -46,6 +46,8 @@ private:
   bool use_sim_time_{true};
 
   std::vector<std::string> tracked_lifecycle_nodes_;
+  // Separate group so timer/service callbacks can wait on lifecycle clients.
+  rclcpp::CallbackGroup::SharedPtr client_cb_group_;
   rclcpp::Publisher<custom_msgs_srvs::msg::StackLifecycle>::SharedPtr stack_pub_;
   rclcpp::Service<custom_msgs_srvs::srv::SetStackLifecycleTransition>::SharedPtr transition_srv_;
   rclcpp::TimerBase::SharedPtr publish_timer_;

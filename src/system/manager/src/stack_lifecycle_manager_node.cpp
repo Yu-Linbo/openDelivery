@@ -85,14 +85,16 @@ std::string lifecycle_state_label(uint8_t id) {
 }
 
 template<typename FutureT>
-bool wait_future(const FutureT & fut, std::chrono::nanoseconds timeout, rclcpp::Node * node) {
+bool wait_future(const FutureT & fut, std::chrono::nanoseconds timeout) {
+  // Do not spin_some here: this node runs inside MultiThreadedExecutor; spinning the
+  // same node interface throws "Node has already been added to an executor".
   const auto step = std::chrono::milliseconds(20);
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
     if (fut.wait_for(step) == std::future_status::ready) {
       return true;
     }
-    rclcpp::spin_some(node->get_node_base_interface());
+    std::this_thread::sleep_for(step);
   }
   return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
@@ -103,7 +105,10 @@ namespace manager {
 
 StackLifecycleManagerNode::StackLifecycleManagerNode()
 : rclcpp::Node("stack_lifecycle_manager"), slam_mode_("inactive") {
-  declare_parameter<bool>("use_sim_time", true);
+  // Launch may already declare use_sim_time via parameters=[{...}]; re-declare crashes on Foxy.
+  if (!has_parameter("use_sim_time")) {
+    declare_parameter<bool>("use_sim_time", true);
+  }
   declare_parameter<std::string>("mapper_params_file", "");
   declare_parameter<std::string>("localization_params_file", "");
   declare_parameter<std::string>("map_file", "");
@@ -152,6 +157,8 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
     slam_child_namespace_ = std::string("/") + rid + "/slam_bringup";
   }
 
+  client_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
   stack_pub_ = create_publisher<custom_msgs_srvs::msg::StackLifecycle>("stack_lifecycle", 10);
   transition_srv_ = create_service<custom_msgs_srvs::srv::SetStackLifecycleTransition>(
     "set_stack_lifecycle_transition",
@@ -194,20 +201,28 @@ std::string StackLifecycleManagerNode::resolve_lifecycle_node_fqn(const std::str
 }
 
 std::string StackLifecycleManagerNode::query_lifecycle_state(const std::string & node_fqn) {
-  auto client = create_client<lifecycle_msgs::srv::GetState>(node_fqn + "/get_state");
-  if (!client->wait_for_service(std::chrono::seconds(1))) {
-    return "missing";
-  }
-  auto req = std::make_shared<lifecycle_msgs::srv::GetState::Request>();
-  auto fut = client->async_send_request(req);
-  if (!wait_future(fut, std::chrono::seconds(2), this)) {
-    return "timeout";
-  }
-  auto resp = fut.get();
-  if (!resp) {
+  try {
+    auto client = create_client<lifecycle_msgs::srv::GetState>(
+      node_fqn + "/get_state", rmw_qos_profile_services_default, client_cb_group_);
+    if (!client->wait_for_service(std::chrono::milliseconds(200))) {
+      return "missing";
+    }
+    auto req = std::make_shared<lifecycle_msgs::srv::GetState::Request>();
+    auto fut = client->async_send_request(req);
+    if (!wait_future(fut, std::chrono::milliseconds(500))) {
+      return "timeout";
+    }
+    auto resp = fut.get();
+    if (!resp) {
+      return "error";
+    }
+    return lifecycle_state_label(resp->current_state.id);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000, "query_lifecycle_state(%s): %s", node_fqn.c_str(),
+      e.what());
     return "error";
   }
-  return lifecycle_state_label(resp->current_state.id);
 }
 
 bool StackLifecycleManagerNode::call_lifecycle_transition(
@@ -221,7 +236,8 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
     }
     return false;
   }
-  auto client = create_client<lifecycle_msgs::srv::ChangeState>(node_fqn + "/change_state");
+  auto client = create_client<lifecycle_msgs::srv::ChangeState>(
+    node_fqn + "/change_state", rmw_qos_profile_services_default, client_cb_group_);
   if (!client->wait_for_service(std::chrono::seconds(3))) {
     if (err) {
       *err = "lifecycle service missing for " + node_fqn;
@@ -231,7 +247,7 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
   auto req = std::make_shared<lifecycle_msgs::srv::ChangeState::Request>();
   req->transition.id = tid;
   auto fut = client->async_send_request(req);
-  if (!wait_future(fut, std::chrono::seconds(8), this)) {
+  if (!wait_future(fut, std::chrono::seconds(8))) {
     if (err) {
       *err = "lifecycle transition timeout for " + node_fqn;
     }
@@ -334,6 +350,10 @@ bool StackLifecycleManagerNode::start_slam_child(const std::string & mode) {
   if (m != "mapping" && m != "map") {
     args.push_back("-p");
     args.push_back("map_file_name:=" + map_file_);
+    // task_manager / Web publish PoseWithCovarianceStamped on /<robot>/initial;
+    // slam_toolbox localization listens to relative topic "initialpose".
+    args.push_back("-r");
+    args.push_back("initialpose:=" + std::string("/") + robot_id() + "/initial");
   }
 
   std::vector<char *> argv;
@@ -412,27 +432,32 @@ void StackLifecycleManagerNode::handle_transition(
 }
 
 void StackLifecycleManagerNode::publish_stack_lifecycle() {
-  custom_msgs_srvs::msg::StackLifecycle msg;
-  msg.header.stamp = now();
-  msg.robot_id = robot_id();
+  try {
+    custom_msgs_srvs::msg::StackLifecycle msg;
+    msg.header.stamp = now();
+    msg.robot_id = robot_id();
 
-  custom_msgs_srvs::msg::StackComponentState slam;
-  slam.name = "slam";
-  if (slam_pid_ > 0) {
-    slam.state = slam_mode_;
-  } else {
-    slam.state = "inactive";
+    custom_msgs_srvs::msg::StackComponentState slam;
+    slam.name = "slam";
+    if (slam_pid_ > 0) {
+      slam.state = slam_mode_;
+    } else {
+      slam.state = "inactive";
+    }
+    msg.components.push_back(slam);
+
+    for (const auto & short_name : tracked_lifecycle_nodes_) {
+      custom_msgs_srvs::msg::StackComponentState comp;
+      comp.name = short_name;
+      comp.state = query_lifecycle_state(resolve_lifecycle_node_fqn(short_name));
+      msg.components.push_back(comp);
+    }
+
+    stack_pub_->publish(msg);
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 5000, "publish_stack_lifecycle failed: %s", e.what());
   }
-  msg.components.push_back(slam);
-
-  for (const auto & short_name : tracked_lifecycle_nodes_) {
-    custom_msgs_srvs::msg::StackComponentState comp;
-    comp.name = short_name;
-    comp.state = query_lifecycle_state(resolve_lifecycle_node_fqn(short_name));
-    msg.components.push_back(comp);
-  }
-
-  stack_pub_->publish(msg);
 }
 
 }  // namespace manager
@@ -440,7 +465,7 @@ void StackLifecycleManagerNode::publish_stack_lifecycle() {
 int main(int argc, char ** argv) {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<manager::StackLifecycleManagerNode>();
-  rclcpp::executors::MultiThreadedExecutor executor;
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4u);
   executor.add_node(node);
   executor.spin();
   rclcpp::shutdown();

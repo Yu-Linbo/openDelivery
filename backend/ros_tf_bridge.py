@@ -771,6 +771,44 @@ class OpenDeliveryTfBridgeNode(Node):
         self.get_logger().info(
             f"publish localize_nav_command {rid} map={map_name!r} set_initial_pose={set_pose}"
         )
+        # Sim: also teleport Gazebo entity. Occupancy-only maps have no slam posegraph,
+        # so /initial alone may not move TF; set_model_state updates the physical robot.
+        if set_pose:
+            self._maybe_gazebo_teleport_on_reloc(rid, msg.x, msg.y, msg.yaw)
+
+    def _maybe_gazebo_teleport_on_reloc(
+        self, rid: str, x: float, y: float, yaw: float
+    ) -> None:
+        status = self._robot_status_payload_by_id.get(rid) or {}
+        if not bool(status.get("is_simulation", False)):
+            return
+        try:
+            from gazebo_set_state_client import try_set_model_state_fast
+        except ImportError:
+            try:
+                from backend.gazebo_set_state_client import try_set_model_state_fast
+            except ImportError:
+                self.get_logger().warning("gazebo_set_state_client unavailable; skip sim teleport")
+                return
+        try:
+            result = try_set_model_state_fast(
+                model_name=rid,
+                x=float(x),
+                y=float(y),
+                z=0.05,
+                yaw=float(yaw),
+                reference_frame="world",
+            )
+            if result and result.get("ok"):
+                self.get_logger().info(
+                    f"gazebo teleport {rid} -> ({x:.3f}, {y:.3f}, yaw={yaw:.4f})"
+                )
+            else:
+                self.get_logger().warning(
+                    f"gazebo teleport {rid} skipped/failed (service down or model missing)"
+                )
+        except Exception as ex:  # noqa: BLE001
+            self.get_logger().warning(f"gazebo teleport {rid} error: {ex}")
 
     def _handle_web_command(self, cmd: Dict[str, Any]) -> None:
         ctype = str(cmd.get("type") or "").strip()

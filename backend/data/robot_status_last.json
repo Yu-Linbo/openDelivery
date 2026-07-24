@@ -24,16 +24,16 @@
     "updated_at": 1776394434.0977662
   },
   "robot2": {
-    "current_map": "robot2_mapping",
+    "current_map": "test_103",
     "is_simulation": true,
     "robot_id": "robot2",
     "robot_name": "robot2",
     "robot_status": "localizing",
-    "stamp_ns": 1781759083737981970,
+    "stamp_ns": 1784800796089064882,
     "task_progress": -1.0,
-    "task_status": "mapping",
+    "task_status": "idle",
     "topic": "/robot2/robot_status",
-    "updated_at": 1781759083.7621286
+    "updated_at": 1784800796.0901845
   },
   "robot4": {
     "current_map": "",

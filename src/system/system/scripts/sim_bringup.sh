@@ -97,21 +97,61 @@ log "simulate: start_gazebo:=${START_GZ} spawn_robot:=true"
 
 STORE="${ROOT}/backend/data/robot_status_last.json"
 AUTO_MAPPING=0
+PERSISTED_MAP=""
 if [[ -f "${STORE}" ]]; then
-  AUTO_MAPPING="$(python3 -c "
+  # Prints: <auto_mapping 0|1> <current_map>
+  _persist="$(python3 -c "
 import json, sys
 rid, path = sys.argv[1], sys.argv[2]
 try:
     with open(path, encoding='utf-8') as f:
         d = json.load(f)
     e = d.get(rid) or {}
-    s = str(e.get('task_status') or e.get('robot_status', '')).strip().lower()
-    print(1 if s == 'mapping' else 0)
+    s = str(e.get('task_status') or '').strip().lower()
+    cm = str(e.get('current_map') or '').strip()
+    print(('1' if s == 'mapping' else '0') + ' ' + cm)
 except Exception:
-    print(0)
+    print('0 ')
 " "${RID}" "${STORE}")"
+  AUTO_MAPPING="${_persist%% *}"
+  PERSISTED_MAP="${_persist#* }"
+  if [[ "${PERSISTED_MAP}" == "${AUTO_MAPPING}" ]]; then
+    PERSISTED_MAP=""
+  fi
 fi
 log "AUTO_MAPPING=${AUTO_MAPPING} (from persisted robot_status in ${STORE})"
+
+resolve_floor_map_yaml() {
+  # Args: preferred floor name. Echo absolute yaml path or empty.
+  local prefer="$1"
+  local map_root="${ROOT}/map"
+  local name yaml
+  if [[ -n "${prefer}" && "${prefer}" != *_mapping ]]; then
+    yaml="${map_root}/${prefer}/${prefer}.yaml"
+    if [[ -f "${yaml}" ]]; then
+      echo "${yaml}"
+      return 0
+    fi
+  fi
+  for name in test_101 test_102 test_103 test_104 nh_102 nh_103 nh_113 nh_114 nh_117; do
+    yaml="${map_root}/${name}/${name}.yaml"
+    if [[ -f "${yaml}" ]]; then
+      echo "${yaml}"
+      return 0
+    fi
+  done
+  if [[ -d "${map_root}" ]]; then
+    for yaml in "${map_root}"/*/*.yaml; do
+      [[ -f "${yaml}" ]] || continue
+      name="$(basename "$(dirname "${yaml}")")"
+      if [[ "$(basename "${yaml}")" == "${name}.yaml" && "${name}" != *_mapping ]]; then
+        echo "${yaml}"
+        return 0
+      fi
+    done
+  fi
+  echo ""
+}
 
 SIM_WAIT="${SIM_BRINGUP_SIM_WAIT:-6}"
 HB_WAIT="${SIM_BRINGUP_HEARTBEAT_WAIT_SEC:-20}"
@@ -129,10 +169,25 @@ log "NAV_GRID_MODE=${NAV_GRID_MODE}"
 MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-5242880}"
 log "MAX_BAG_BYTES=${MAX_BAG_BYTES}"
 
+HB_CURRENT_MAP="${RID}_mapping"
+MAP_FILE=""
+if [[ "${AUTO_MAPPING}" == "1" ]]; then
+  HB_CURRENT_MAP="${RID}_mapping"
+else
+  MAP_FILE="$(resolve_floor_map_yaml "${PERSISTED_MAP}")"
+  if [[ -n "${MAP_FILE}" ]]; then
+    HB_CURRENT_MAP="$(basename "$(dirname "${MAP_FILE}")")"
+  else
+    log "WARN: no floor map yaml under ${ROOT}/map; localize SLAM will need map_file"
+    HB_CURRENT_MAP="${PERSISTED_MAP:-${RID}_mapping}"
+  fi
+fi
+log "heartbeat current_map=${HB_CURRENT_MAP} map_file=${MAP_FILE:-<none>}"
+
 # --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/startup.launch.py 维护）---
 ros2 launch system startup.launch.py \
   "robot_name:=${RID}" \
-  "current_map:=${RID}_mapping" \
+  "current_map:=${HB_CURRENT_MAP}" \
   "robot_status:=0" \
   "sim_mode:=${SIM_MODE}" \
   "mapping_mode:=false" \
@@ -180,16 +235,21 @@ fi
 
 # --- 2b) manager：health_monitor + task_manager + stack_lifecycle_manager ---
 SLAM_INITIAL_MODE="inactive"
+MANAGER_EXTRA=()
 if [[ "${AUTO_MAPPING}" == "1" ]]; then
   SLAM_INITIAL_MODE="mapping"
 else
   SLAM_INITIAL_MODE="localize"
+  if [[ -n "${MAP_FILE}" ]]; then
+    MANAGER_EXTRA+=("map_file:=${MAP_FILE}")
+  fi
 fi
 ros2 launch manager manager.launch.py \
   "namespace:=${RID}" \
   "localization_pose_topic:=${MANAGER_POSE_TOPIC}" \
   "use_sim_time:=true" \
-  "initial_slam_mode:=${SLAM_INITIAL_MODE}" &
+  "initial_slam_mode:=${SLAM_INITIAL_MODE}" \
+  "${MANAGER_EXTRA[@]}" &
 log "started manager.launch.py (health_monitor+task_manager+stack_lifecycle_manager, pid $!) namespace=${RID} slam=${SLAM_INITIAL_MODE}"
 sleep "${MANAGER_WAIT}"
 
