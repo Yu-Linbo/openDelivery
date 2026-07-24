@@ -1,8 +1,10 @@
 #include "heartbeat/heartbeat_node.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -21,6 +23,13 @@ std::string strip_spaces(const std::string & s) {
   }
   auto end = s.find_last_not_of(ws);
   return s.substr(start, end - start + 1);
+}
+
+std::string to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
 }
 
 std::string leaf_namespace_id(const std::string & raw_ns) {
@@ -52,38 +61,23 @@ std::string fully_qualified_name(std::string ns, const std::string & name) {
 }
 
 bool parameter_indicates_simulation(const std::string & raw) {
-  const std::string s = strip_spaces(raw);
+  const std::string s = to_lower(strip_spaces(raw));
   if (s.empty()) {
     return true;
   }
-  std::string lower;
-  lower.reserve(s.size());
-  for (unsigned char ch : s) {
-    lower.push_back(static_cast<char>(std::tolower(ch)));
-  }
-  return lower != "real";
+  return s != "real";
 }
 
-int read_int_parameter_flexible(const rclcpp::Parameter & p, int default_value) {
-  try {
-    switch (p.get_type()) {
-      case rclcpp::ParameterType::PARAMETER_INTEGER:
-        return static_cast<int>(p.as_int());
-      case rclcpp::ParameterType::PARAMETER_DOUBLE:
-        return static_cast<int>(p.as_double());
-      case rclcpp::ParameterType::PARAMETER_STRING: {
-        const std::string s = strip_spaces(p.as_string());
-        if (s.empty()) {
-          return default_value;
-        }
-        return std::stoi(s);
-      }
-      default:
-        return default_value;
-    }
-  } catch (const std::exception &) {
-    return default_value;
-  }
+const std::unordered_set<std::string> & robot_status_set() {
+  static const std::unordered_set<std::string> k{
+    "initializing", "localizing", "localization_lost", "ready", "shutdown"};
+  return k;
+}
+
+const std::unordered_set<std::string> & task_status_set() {
+  static const std::unordered_set<std::string> k{
+    "idle", "mapping", "delivery", "cleaning", "patrolling"};
+  return k;
 }
 
 }  // namespace
@@ -125,8 +119,8 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
 : rclcpp_lifecycle::LifecycleNode("heartbeat", options) {
   declare_parameter<std::string>("robot_name", "");
   declare_parameter<std::string>("current_map", "");
-  declare_parameter<int>("robot_status", static_cast<int>(RobotStatus::ROBOT_STATUS_INITIALIZING));
-  declare_parameter<int>("task_status", static_cast<int>(RobotStatus::TASK_STATUS_IDLE));
+  declare_parameter<std::string>("robot_status", "initializing");
+  declare_parameter<std::string>("task_status", "idle");
   declare_parameter<bool>("mapping_mode", false);
   declare_parameter<bool>("auto_mapping_status", true);
   declare_parameter<std::string>("sim_mode", "sim");
@@ -185,36 +179,34 @@ bool HeartbeatNode::slam_mapping_node_present() {
   return false;
 }
 
-uint8_t HeartbeatNode::clamp_robot_status(int v) {
-  if (v < 0 || v > static_cast<int>(RobotStatus::ROBOT_STATUS_SHUTDOWN)) {
-    return RobotStatus::ROBOT_STATUS_INITIALIZING;
+std::string HeartbeatNode::normalize_robot_status(const std::string & v) {
+  const std::string s = to_lower(strip_spaces(v));
+  if (robot_status_set().count(s)) {
+    return s;
   }
-  return static_cast<uint8_t>(v);
+  return "initializing";
 }
 
-uint8_t HeartbeatNode::clamp_task_status(int v) {
-  if (v < 0 || v > static_cast<int>(RobotStatus::TASK_STATUS_PATROLLING)) {
-    return RobotStatus::TASK_STATUS_IDLE;
+std::string HeartbeatNode::normalize_task_status(const std::string & v) {
+  const std::string s = to_lower(strip_spaces(v));
+  if (task_status_set().count(s)) {
+    return s;
   }
-  return static_cast<uint8_t>(v);
+  return "idle";
 }
 
-uint8_t HeartbeatNode::resolved_robot_status_value() {
-  const int v = read_int_parameter_flexible(
-    get_parameter("robot_status"), static_cast<int>(RobotStatus::ROBOT_STATUS_INITIALIZING));
-  return clamp_robot_status(v);
+std::string HeartbeatNode::resolved_robot_status_value() {
+  return normalize_robot_status(get_parameter("robot_status").as_string());
 }
 
-uint8_t HeartbeatNode::resolved_task_status_value() {
+std::string HeartbeatNode::resolved_task_status_value() {
   const bool manual_mapping = get_parameter("mapping_mode").as_bool();
   const bool auto_mapping =
     get_parameter("auto_mapping_status").as_bool() && slam_mapping_node_present();
   if (manual_mapping || auto_mapping) {
-    return RobotStatus::TASK_STATUS_MAPPING;
+    return "mapping";
   }
-  const int v = read_int_parameter_flexible(
-    get_parameter("task_status"), static_cast<int>(RobotStatus::TASK_STATUS_IDLE));
-  return clamp_task_status(v);
+  return normalize_task_status(get_parameter("task_status").as_string());
 }
 
 void HeartbeatNode::recreate_timer_locked() {
@@ -251,7 +243,7 @@ void HeartbeatNode::tick() {
   msg.robot_name = effective_robot_name();
   msg.robot_status = resolved_robot_status_value();
   msg.task_status = resolved_task_status_value();
-  if (msg.task_status == RobotStatus::TASK_STATUS_MAPPING) {
+  if (msg.task_status == "mapping") {
     msg.current_map = msg.robot_name + "_mapping";
   } else {
     msg.current_map = get_parameter("current_map").as_string();
@@ -276,13 +268,11 @@ void HeartbeatNode::on_set_params(
     if (request->current_map != "") {
       new_params.emplace_back("current_map", request->current_map);
     }
-    if (request->robot_status != Srv::Request::ROBOT_STATUS_LEAVE_UNCHANGED) {
-      new_params.emplace_back(
-        "robot_status", static_cast<int>(clamp_robot_status(static_cast<int>(request->robot_status))));
+    if (!strip_spaces(request->robot_status).empty()) {
+      new_params.emplace_back("robot_status", normalize_robot_status(request->robot_status));
     }
-    if (request->task_status != Srv::Request::TASK_STATUS_LEAVE_UNCHANGED) {
-      new_params.emplace_back(
-        "task_status", static_cast<int>(clamp_task_status(static_cast<int>(request->task_status))));
+    if (!strip_spaces(request->task_status).empty()) {
+      new_params.emplace_back("task_status", normalize_task_status(request->task_status));
     }
     bool publish_rate_changed = false;
     if (request->rate_hz > 0.0) {

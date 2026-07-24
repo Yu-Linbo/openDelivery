@@ -123,12 +123,11 @@ void HealthMonitorNode::best_effort_shutdown_after_spin(rclcpp::Executor * exec)
     }
     phase_ = Phase::ShutdownSent;
   }
-  (void)call_set_params(
-    custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_SHUTDOWN, "", exec);
+  (void)call_set_params("shutdown", "", exec);
 }
 
 bool HealthMonitorNode::call_set_params(
-  uint8_t robot_status, const std::string & current_map,
+  const std::string & robot_status, const std::string & current_map,
   rclcpp::Executor * pump_exec) {
   if (!self_) {
     return false;
@@ -142,7 +141,7 @@ bool HealthMonitorNode::call_set_params(
   auto req = std::make_shared<custom_msgs_srvs::srv::SetHeartbeatParams::Request>();
   req->robot_name = "";
   req->robot_status = robot_status;
-  req->task_status = custom_msgs_srvs::srv::SetHeartbeatParams::Request::TASK_STATUS_LEAVE_UNCHANGED;
+  req->task_status = "";
   if (!current_map.empty()) {
     req->current_map = current_map;
   }
@@ -190,7 +189,7 @@ void HealthMonitorNode::on_poll() {
   }
   if (phase_ == Phase::Initializing) {
     if (required_satisfied()) {
-      if (call_set_params(custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_LOCALIZING, "")) {
+      if (call_set_params("localizing", "")) {
         phase_ = Phase::Localizing;
         reset_map_baseline();
         RCLCPP_INFO(get_logger(), "robot_status -> localizing (required nodes up)");
@@ -204,8 +203,8 @@ void HealthMonitorNode::on_robot_status(const custom_msgs_srvs::msg::RobotStatus
   if (phase_ == Phase::ShutdownSent) {
     return;
   }
-  // task_manager sets LOCALIZATION_LOST after Web relocate; adopt phase (do not re-send LOST).
-  if (msg->robot_status == custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_LOCALIZATION_LOST) {
+  // task_manager sets localization_lost after Web relocate; adopt phase (do not re-send LOST).
+  if (msg->robot_status == "localization_lost") {
     if (phase_ == Phase::Localizing || phase_ == Phase::Ready) {
       phase_ = Phase::LocalizationLost;
       const std::string m = strip(msg->current_map);
@@ -236,14 +235,14 @@ void HealthMonitorNode::on_pose(const geometry_msgs::msg::PoseWithCovarianceStam
     return;
   }
   if (phase_ == Phase::LocalizationLost) {
-    if (call_set_params(custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_READY, "")) {
+    if (call_set_params("ready", "")) {
       phase_ = Phase::Ready;
       RCLCPP_INFO(get_logger(), "robot_status -> ready (localization ok)");
     }
     return;
   }
   if (phase_ == Phase::Localizing && allow_ready_from_localizing_) {
-    if (call_set_params(custom_msgs_srvs::msg::RobotStatus::ROBOT_STATUS_READY, "")) {
+    if (call_set_params("ready", "")) {
       phase_ = Phase::Ready;
       RCLCPP_INFO(get_logger(), "robot_status -> ready (from localizing, covariance ok)");
     }

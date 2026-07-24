@@ -34,7 +34,7 @@ When JSON is **not** set: the bridge discovers robots only from ``/*/robot_statu
 Web commands (HTTP ``POST /api/robot/command`` → queue → this node):
 
 - **``type: localize_nav_command``**：发布 ``/{robot_id}/localize_nav_command``（``LocalizeNavCommand``），由
-  **task_manager** 顺序写 heartbeat（task idle → ``current_map`` → ``ROBOT_STATUS_LOCALIZATION_LOST``）并发布 ``initial``。
+  **task_manager** 顺序写 heartbeat（task idle → ``current_map`` → ``robot_status=localization_lost``）并发布 ``initial``。
 - **Legacy** ``mode``: ``map_only`` / ``pose_only`` / ``both`` — 直接发布 ``robot_status`` / ``initial``（不经 task_manager）。
 - Publish ``geometry_msgs/PoseWithCovarianceStamped`` on ``/{robot_id}/initial`` (template:
   ``ROS_INITIAL_POSE_TOPIC_TEMPLATE`` default ``/{id}/initial``).
@@ -69,7 +69,7 @@ from sensor_msgs.msg import LaserScan, Image
 from tf2_msgs.msg import TFMessage
 
 try:
-    # custom_msgs_srvs/RobotStatus: uint8 robot_status / task_status pseudo-enums
+    # custom_msgs_srvs/RobotStatus: string robot_status / task_status
     from custom_msgs_srvs.msg import LocalizeNavCommand
     from custom_msgs_srvs.msg import RobotStatus
 except Exception:  # noqa: BLE001
@@ -87,7 +87,7 @@ _TASK_STATUS_LABELS = ("idle", "mapping", "delivery", "cleaning", "patrolling")
 
 
 def _robot_status_label(v: Any) -> str:
-    """Uint8 code or legacy string → stable label for JSON / web."""
+    """Msg string / legacy uint8 → stable label for JSON / web."""
     if v is None:
         return ""
     if isinstance(v, str):
@@ -101,7 +101,10 @@ def _robot_status_label(v: Any) -> str:
                     return _ROBOT_STATUS_LABELS[i]
             except ValueError:
                 return t
-        return t
+        low = t.lower()
+        if low == "normal":
+            return "ready"
+        return low if low in _ROBOT_STATUS_LABELS else t
     try:
         i = int(v)
         if 0 <= i < len(_ROBOT_STATUS_LABELS):
@@ -125,7 +128,8 @@ def _task_status_label(v: Any) -> str:
                     return _TASK_STATUS_LABELS[i]
             except ValueError:
                 return t
-        return t
+        low = t.lower()
+        return low if low in _TASK_STATUS_LABELS else t
     try:
         i = int(v)
         if 0 <= i < len(_TASK_STATUS_LABELS):
@@ -135,68 +139,21 @@ def _task_status_label(v: Any) -> str:
     return str(v).strip()
 
 
-def _robot_status_to_msg_code(v: Any, default: int = 0) -> int:
-    """Label / int / legacy string → RobotStatus.robot_status uint8."""
-    if RobotStatus is not None:
-        mx = int(RobotStatus.ROBOT_STATUS_SHUTDOWN)
-    else:
-        mx = len(_ROBOT_STATUS_LABELS) - 1
-    if v is None or v == "":
-        return int(default) if isinstance(default, int) else 0
-    if isinstance(v, bool):
-        return 0
-    if isinstance(v, (int, float)):
-        i = int(v)
-        return i if 0 <= i <= mx else 0
-    s = str(v).strip().lower()
-    if not s:
-        return 0
-    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
-        try:
-            i = int(s)
-            return i if 0 <= i <= mx else 0
-        except ValueError:
-            return 0
-    names = {
-        "initializing": 0,
-        "localizing": 1,
-        "localization_lost": 2,
-        "ready": 3,
-        "shutdown": 4,
-        "normal": 3,
-    }
-    return int(names.get(s, 0))
+def _robot_status_to_msg(v: Any, default: str = "ready") -> str:
+    """Label / legacy int → RobotStatus.robot_status string."""
+    label = _robot_status_label(v)
+    if label in _ROBOT_STATUS_LABELS:
+        return label
+    d = str(default or "ready").strip().lower()
+    return d if d in _ROBOT_STATUS_LABELS else "ready"
 
 
-def _task_status_to_msg_code(v: Any, default: int = 0) -> int:
-    if RobotStatus is not None:
-        mx = int(RobotStatus.TASK_STATUS_PATROLLING)
-    else:
-        mx = len(_TASK_STATUS_LABELS) - 1
-    if v is None or v == "":
-        return int(default) if isinstance(default, int) else 0
-    if isinstance(v, bool):
-        return 0
-    if isinstance(v, (int, float)):
-        i = int(v)
-        return i if 0 <= i <= mx else 0
-    s = str(v).strip().lower()
-    if not s:
-        return 0
-    if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
-        try:
-            i = int(s)
-            return i if 0 <= i <= mx else 0
-        except ValueError:
-            return 0
-    names = {
-        "idle": 0,
-        "mapping": 1,
-        "delivery": 2,
-        "cleaning": 3,
-        "patrolling": 4,
-    }
-    return int(names.get(s, 0))
+def _task_status_to_msg(v: Any, default: str = "idle") -> str:
+    label = _task_status_label(v)
+    if label in _TASK_STATUS_LABELS:
+        return label
+    d = str(default or "idle").strip().lower()
+    return d if d in _TASK_STATUS_LABELS else "idle"
 
 
 import ros_command_queue
@@ -679,8 +636,8 @@ class OpenDeliveryTfBridgeNode(Node):
         rid: str,
         map_name: str,
         *,
-        robot_status_code: Optional[int] = None,
-        task_status_code: Optional[int] = None,
+        robot_status: Optional[str] = None,
+        task_status: Optional[str] = None,
     ) -> None:
         if not map_name:
             return
@@ -697,14 +654,14 @@ class OpenDeliveryTfBridgeNode(Node):
         st.robot_name = str(payload.get("robot_name") or rid).strip() or rid
         st.current_map = str(map_name).strip()
         st.robot_status = (
-            int(robot_status_code)
-            if robot_status_code is not None
-            else _robot_status_to_msg_code(payload.get("robot_status"), 3)
+            _robot_status_to_msg(robot_status, "ready")
+            if robot_status is not None
+            else _robot_status_to_msg(payload.get("robot_status"), "ready")
         )
         st.task_status = (
-            int(task_status_code)
-            if task_status_code is not None
-            else _task_status_to_msg_code(payload.get("task_status"), 0)
+            _task_status_to_msg(task_status, "idle")
+            if task_status is not None
+            else _task_status_to_msg(payload.get("task_status"), "idle")
         )
         st.is_simulation = bool(payload.get("is_simulation", False))
         self._robot_status_cmd_pubs[rid].publish(st)

@@ -10,9 +10,9 @@
 #   4) stack_lifecycle_manager 按 initial_slam_mode 切换 slam（mapping|localize）
 #   5) nav_bringup stack
 #
-# **仿真下线**不再调用 sim_shutdown.sh：由上层将 ``RobotStatus.robot_status`` 置为 **SHUTDOWN**
-#（`RobotStatus.msg` 中 ``ROBOT_STATUS_SHUTDOWN=4``），典型路径为 Web「仿真离线」→
-# ``robot_lifecycle.shutdown_selected_robot`` → ``ros2 service call /<id>/set_heartbeat_params``；
+# **仿真下线**不再调用 sim_shutdown.sh：由上层将 ``RobotStatus.robot_status`` 置为 **shutdown**，
+# 典型路径为 Web「仿真离线」→ ``robot_lifecycle.shutdown_selected_robot`` →
+# ``ros2 service call /<id>/set_heartbeat_params``；
 # simulate / nav / slam 等应订阅 ``/<id>/robot_status`` 或监听该状态并自行 pkill 或 lifecycle 收尾
 #（本脚本不负责杀进程）。
 #
@@ -173,12 +173,14 @@ HB_CURRENT_MAP="${RID}_mapping"
 MAP_FILE=""
 if [[ "${AUTO_MAPPING}" == "1" ]]; then
   HB_CURRENT_MAP="${RID}_mapping"
+  # Optional: keep last floor on /<robot>/map via map_server; mapping stream stays on /mapping.
+  MAP_FILE="$(resolve_floor_map_yaml "${PERSISTED_MAP}")"
 else
   MAP_FILE="$(resolve_floor_map_yaml "${PERSISTED_MAP}")"
   if [[ -n "${MAP_FILE}" ]]; then
     HB_CURRENT_MAP="$(basename "$(dirname "${MAP_FILE}")")"
   else
-    log "WARN: no floor map yaml under ${ROOT}/map; localize SLAM will need map_file"
+    log "WARN: no floor map yaml under ${ROOT}/map; localize needs map_file for map_server"
     HB_CURRENT_MAP="${PERSISTED_MAP:-${RID}_mapping}"
   fi
 fi
@@ -188,7 +190,7 @@ log "heartbeat current_map=${HB_CURRENT_MAP} map_file=${MAP_FILE:-<none>}"
 ros2 launch system startup.launch.py \
   "robot_name:=${RID}" \
   "current_map:=${HB_CURRENT_MAP}" \
-  "robot_status:=0" \
+  "robot_status:=initializing" \
   "sim_mode:=${SIM_MODE}" \
   "mapping_mode:=false" \
   "publish_rate:=2.0" \
@@ -236,13 +238,13 @@ fi
 # --- 2b) manager：health_monitor + task_manager + stack_lifecycle_manager ---
 SLAM_INITIAL_MODE="inactive"
 MANAGER_EXTRA=()
+if [[ -n "${MAP_FILE}" ]]; then
+  MANAGER_EXTRA+=("map_file:=${MAP_FILE}")
+fi
 if [[ "${AUTO_MAPPING}" == "1" ]]; then
   SLAM_INITIAL_MODE="mapping"
 else
   SLAM_INITIAL_MODE="localize"
-  if [[ -n "${MAP_FILE}" ]]; then
-    MANAGER_EXTRA+=("map_file:=${MAP_FILE}")
-  fi
 fi
 ros2 launch manager manager.launch.py \
   "namespace:=${RID}" \

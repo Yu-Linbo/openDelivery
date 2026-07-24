@@ -1,10 +1,13 @@
 #include "manager/task_manager_node.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <cctype>
 #include <functional>
 #include <future>
 #include <thread>
+#include <unordered_set>
 
 #include "custom_msgs_srvs/msg/robot_status.hpp"
 #include "rclcpp/executors/multi_threaded_executor.hpp"
@@ -19,6 +22,13 @@ std::string strip(const std::string & s) {
   }
   const auto b = s.find_last_not_of(ws);
   return s.substr(a, b - a + 1);
+}
+
+std::string to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
 }
 
 std::string leaf_namespace_id(const std::string & raw_ns) {
@@ -37,6 +47,18 @@ std::string leaf_namespace_id(const std::string & raw_ns) {
     return ns;
   }
   return ns.substr(p + 1);
+}
+
+bool valid_robot_status(const std::string & s) {
+  static const std::unordered_set<std::string> k{
+    "initializing", "localizing", "localization_lost", "ready", "shutdown"};
+  return k.count(s) > 0;
+}
+
+bool valid_task_status(const std::string & s) {
+  static const std::unordered_set<std::string> k{
+    "idle", "mapping", "delivery", "cleaning", "patrolling"};
+  return k.count(s) > 0;
 }
 
 template<typename FutureT>
@@ -104,13 +126,13 @@ void TaskManagerNode::set_self(std::shared_ptr<TaskManagerNode> self) {
 
 void TaskManagerNode::on_robot_status_for_gate(const RobotStatusMsg::SharedPtr msg) {
   std::lock_guard<std::mutex> lock(mtx_);
-  last_robot_status_ = msg->robot_status;
-  last_task_status_ = msg->task_status;
+  last_robot_status_ = to_lower(strip(msg->robot_status));
+  last_task_status_ = to_lower(strip(msg->task_status));
 }
 
 bool TaskManagerNode::send_heartbeat(
-  uint8_t robot_status,
-  uint8_t task_status,
+  const std::string & robot_status,
+  const std::string & task_status,
   const std::string & current_map) {
   if (!hb_client_->wait_for_service(std::chrono::milliseconds(800))) {
     return false;
@@ -136,10 +158,10 @@ bool TaskManagerNode::send_heartbeat(
 void TaskManagerNode::on_set_task(
   const std::shared_ptr<custom_msgs_srvs::srv::SetRobotTask::Request> req,
   std::shared_ptr<custom_msgs_srvs::srv::SetRobotTask::Response> res) {
-  const uint8_t t = req->task_status;
-  if (t > RobotStatusMsg::TASK_STATUS_PATROLLING) {
+  const std::string t = to_lower(strip(req->task_status));
+  if (!valid_task_status(t)) {
     res->success = false;
-    res->message = "task_status out of range (use RobotStatus.TASK_STATUS_*)";
+    res->message = "task_status must be idle|mapping|delivery|cleaning|patrolling";
     return;
   }
   if (!hb_client_->wait_for_service(std::chrono::seconds(2))) {
@@ -148,14 +170,15 @@ void TaskManagerNode::on_set_task(
     return;
   }
   auto hb_req = std::make_shared<Srv::Request>();
-  const uint8_t rs = req->robot_status;
-  if (rs == custom_msgs_srvs::srv::SetRobotTask::Request::ROBOT_STATUS_LEAVE_UNCHANGED) {
-    hb_req->robot_status = Srv::Request::ROBOT_STATUS_LEAVE_UNCHANGED;
-  } else if (rs <= RobotStatusMsg::ROBOT_STATUS_SHUTDOWN) {
+  const std::string rs = to_lower(strip(req->robot_status));
+  if (rs.empty()) {
+    hb_req->robot_status = "";
+  } else if (valid_robot_status(rs)) {
     hb_req->robot_status = rs;
   } else {
     res->success = false;
-    res->message = "robot_status out of range (0..4 or 255 leave unchanged)";
+    res->message =
+      "robot_status must be empty (leave) or initializing|localizing|localization_lost|ready|shutdown";
     return;
   }
   hb_req->task_status = t;
@@ -190,33 +213,29 @@ void TaskManagerNode::on_localize_nav(
     return;
   }
 
-  uint8_t rs = 0;
-  uint8_t ts = 0;
+  std::string rs;
+  std::string ts;
   {
     std::lock_guard<std::mutex> lock(mtx_);
     rs = last_robot_status_;
     ts = last_task_status_;
   }
 
-  if (ts == RobotStatusMsg::TASK_STATUS_MAPPING) {
+  if (ts == "mapping") {
     RCLCPP_WARN(get_logger(), "localize_nav_command ignored: task_status is mapping");
     return;
   }
-  if (rs == RobotStatusMsg::ROBOT_STATUS_SHUTDOWN) {
+  if (rs == "shutdown") {
     RCLCPP_WARN(get_logger(), "localize_nav_command ignored: robot_status is shutdown");
     return;
   }
-  // LOCALIZATION_LOST is the post-relocate resting state until pose recovers; must accept
+  // localization_lost is the post-relocate resting state until pose recovers; must accept
   // further Web reloc clicks (otherwise only the first relocate works).
-  if (rs != RobotStatusMsg::ROBOT_STATUS_INITIALIZING &&
-    rs != RobotStatusMsg::ROBOT_STATUS_LOCALIZING &&
-    rs != RobotStatusMsg::ROBOT_STATUS_LOCALIZATION_LOST &&
-    rs != RobotStatusMsg::ROBOT_STATUS_READY)
-  {
+  if (rs != "initializing" && rs != "localizing" && rs != "localization_lost" && rs != "ready") {
     RCLCPP_WARN(
       get_logger(),
-      "localize_nav_command ignored: robot_status=%u not in {init,localizing,lost,ready}",
-      static_cast<unsigned>(rs));
+      "localize_nav_command ignored: robot_status=%s not in {initializing,localizing,localization_lost,ready}",
+      rs.c_str());
     return;
   }
 
@@ -227,23 +246,19 @@ void TaskManagerNode::on_localize_nav(
   }
 
   // 1) task idle (mapping off)
-  if (!send_heartbeat(Srv::Request::ROBOT_STATUS_LEAVE_UNCHANGED, RobotStatusMsg::TASK_STATUS_IDLE, "")) {
+  if (!send_heartbeat("", "idle", "")) {
     RCLCPP_ERROR(get_logger(), "localize_nav: failed to set task idle");
     return;
   }
   // 2) current_map (切图)
   if (!map.empty()) {
-    if (!send_heartbeat(
-        Srv::Request::ROBOT_STATUS_LEAVE_UNCHANGED,
-        Srv::Request::TASK_STATUS_LEAVE_UNCHANGED,
-        map))
-    {
+    if (!send_heartbeat("", "", map)) {
       RCLCPP_ERROR(get_logger(), "localize_nav: failed to set current_map");
       return;
     }
   }
   // 3) localization lost (health_monitor will drive -> ready from pose topic)
-  if (!send_heartbeat(RobotStatusMsg::ROBOT_STATUS_LOCALIZATION_LOST, Srv::Request::TASK_STATUS_LEAVE_UNCHANGED, "")) {
+  if (!send_heartbeat("localization_lost", "", "")) {
     RCLCPP_ERROR(get_logger(), "localize_nav: failed to set robot_status localization_lost");
     return;
   }

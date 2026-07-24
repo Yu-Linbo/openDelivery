@@ -1,6 +1,7 @@
 #include "manager/stack_lifecycle_manager_node.hpp"
 
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -18,6 +19,11 @@
 #include "lifecycle_msgs/srv/get_state.hpp"
 
 namespace {
+
+bool file_exists(const std::string & path) {
+  struct stat st {};
+  return !path.empty() && ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
 
 std::string strip(const std::string & s) {
   const char * ws = " \t\n\r";
@@ -118,11 +124,12 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   declare_parameter<std::string>("scan_topic", "");
   declare_parameter<std::string>("mapping_map_topic", "");
   declare_parameter<std::string>("localization_map_topic", "");
+  declare_parameter<std::string>("static_map_topic", "");
   declare_parameter<std::string>("slam_child_namespace", "");
   declare_parameter<std::string>("initial_slam_mode", "inactive");
   declare_parameter<std::vector<std::string>>(
     "tracked_lifecycle_nodes",
-    std::vector<std::string>{"heartbeat", "lifecycle_manager_navigation"});
+    std::vector<std::string>{"heartbeat", "lifecycle_manager_navigation", "map_server"});
 
   use_sim_time_ = get_parameter("use_sim_time").as_bool();
   mapper_params_file_ = get_parameter("mapper_params_file").as_string();
@@ -134,6 +141,7 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   scan_topic_ = get_parameter("scan_topic").as_string();
   mapping_map_topic_ = get_parameter("mapping_map_topic").as_string();
   localization_map_topic_ = get_parameter("localization_map_topic").as_string();
+  static_map_topic_ = get_parameter("static_map_topic").as_string();
   slam_child_namespace_ = get_parameter("slam_child_namespace").as_string();
   tracked_lifecycle_nodes_ = get_parameter("tracked_lifecycle_nodes").as_string_array();
 
@@ -150,8 +158,12 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   if (mapping_map_topic_.empty()) {
     mapping_map_topic_ = std::string("/") + rid + "/mapping";
   }
+  // SLAM localization must not own /<robot>/map — that is map_server's static occupancy grid.
   if (localization_map_topic_.empty()) {
-    localization_map_topic_ = std::string("/") + rid + "/map";
+    localization_map_topic_ = std::string("/") + rid + "/slam_map";
+  }
+  if (static_map_topic_.empty()) {
+    static_map_topic_ = std::string("/") + rid + "/map";
   }
   if (slam_child_namespace_.empty()) {
     slam_child_namespace_ = std::string("/") + rid + "/slam_bringup";
@@ -169,6 +181,15 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
     std::chrono::seconds(1),
     std::bind(&StackLifecycleManagerNode::publish_stack_lifecycle, this));
 
+  // Load static floor map whenever map_file (occupancy yaml) is provided, including mapping mode
+  // so /<robot>/map stays the saved map and is never overwritten by /mapping.
+  if (!map_file_.empty()) {
+    std::string map_err;
+    if (!ensure_static_map_loaded(&map_err)) {
+      RCLCPP_WARN(get_logger(), "static map load failed: %s", map_err.c_str());
+    }
+  }
+
   const std::string initial = lower(get_parameter("initial_slam_mode").as_string());
   if (!initial.empty() && initial != "inactive") {
     std::string err;
@@ -179,8 +200,14 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
 
   RCLCPP_INFO(
     get_logger(),
-    "stack_lifecycle_manager ready (robot=%s slam_mode=%s)",
-    rid.c_str(), slam_mode_.c_str());
+    "stack_lifecycle_manager ready (robot=%s slam_mode=%s static_map=%s slam_map=%s mapping=%s)",
+    rid.c_str(), slam_mode_.c_str(), static_map_topic_.c_str(), localization_map_topic_.c_str(),
+    mapping_map_topic_.c_str());
+}
+
+StackLifecycleManagerNode::~StackLifecycleManagerNode() {
+  stop_slam_child();
+  stop_map_server();
 }
 
 std::string StackLifecycleManagerNode::robot_id() const {
@@ -263,6 +290,175 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
   return true;
 }
 
+void StackLifecycleManagerNode::stop_map_server() {
+  if (map_server_pid_ <= 0) {
+    map_server_yaml_.clear();
+    return;
+  }
+  RCLCPP_INFO(get_logger(), "Stopping map_server child pid=%d", map_server_pid_);
+  kill(map_server_pid_, SIGINT);
+  constexpr int max_wait_cycles = 50;
+  for (int i = 0; i < max_wait_cycles; ++i) {
+    int status = 0;
+    const pid_t ret = waitpid(map_server_pid_, &status, WNOHANG);
+    if (ret == map_server_pid_ || ret < 0) {
+      map_server_pid_ = -1;
+      map_server_yaml_.clear();
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  kill(map_server_pid_, SIGKILL);
+  waitpid(map_server_pid_, nullptr, 0);
+  map_server_pid_ = -1;
+  map_server_yaml_.clear();
+}
+
+std::string StackLifecycleManagerNode::resolve_posegraph_stem() const {
+  // slam_toolbox appends ".posegraph" / ".data" to map_file_name. Occupancy yaml is NOT a posegraph.
+  std::string stem = map_file_;
+  const auto slash = stem.find_last_of('/');
+  const std::string base = (slash == std::string::npos) ? stem : stem.substr(slash + 1);
+  const auto dot = base.find_last_of('.');
+  if (dot != std::string::npos) {
+    const std::string ext = lower(base.substr(dot));
+    if (ext == ".yaml" || ext == ".yml") {
+      stem = stem.substr(0, stem.size() - (base.size() - dot));
+    }
+  }
+  if (file_exists(stem + ".posegraph") && file_exists(stem + ".data")) {
+    return stem;
+  }
+  return {};
+}
+
+bool StackLifecycleManagerNode::start_map_server(std::string * err) {
+  if (map_file_.empty()) {
+    if (err) {
+      *err = "map_file is empty";
+    }
+    return false;
+  }
+  if (!file_exists(map_file_)) {
+    if (err) {
+      *err = "map yaml missing: " + map_file_;
+    }
+    return false;
+  }
+
+  std::string exec_path;
+  try {
+    exec_path = ament_index_cpp::get_package_prefix("nav2_map_server") + "/lib/nav2_map_server/map_server";
+  } catch (const std::exception & e) {
+    if (err) {
+      *err = std::string("nav2_map_server path: ") + e.what();
+    }
+    return false;
+  }
+  if (access(exec_path.c_str(), X_OK) != 0) {
+    if (err) {
+      *err = "map_server executable missing: " + exec_path;
+    }
+    return false;
+  }
+
+  const std::string rid = robot_id();
+  // topic_name is relative under PushRosNamespace-equivalent __ns so it becomes /<rid>/map.
+  // Prefer absolute static_map_topic_ leaf "map" when under robot namespace.
+  std::string topic_leaf = "map";
+  {
+    const std::string prefix = std::string("/") + rid + "/";
+    if (static_map_topic_.rfind(prefix, 0) == 0) {
+      topic_leaf = static_map_topic_.substr(prefix.size());
+    } else if (!static_map_topic_.empty() && static_map_topic_.front() != '/') {
+      topic_leaf = static_map_topic_;
+    }
+  }
+
+  std::vector<std::string> args = {
+    exec_path,
+    "--ros-args",
+    "-r", "__node:=map_server",
+    "-r", "__ns:=" + std::string("/") + rid,
+    "-p", "use_sim_time:=" + std::string(use_sim_time_ ? "true" : "false"),
+    "-p", "yaml_filename:=" + map_file_,
+    "-p", "topic_name:=" + topic_leaf,
+    "-p", "frame_id:=" + map_frame_,
+  };
+
+  std::vector<char *> argv;
+  argv.reserve(args.size() + 1);
+  for (auto & item : args) {
+    argv.push_back(const_cast<char *>(item.c_str()));
+  }
+  argv.push_back(nullptr);
+
+  const pid_t pid = fork();
+  if (pid < 0) {
+    if (err) {
+      *err = "fork() failed for map_server";
+    }
+    return false;
+  }
+  if (pid == 0) {
+    execv(argv[0], argv.data());
+    _exit(127);
+  }
+
+  map_server_pid_ = pid;
+  map_server_yaml_ = map_file_;
+  RCLCPP_INFO(
+    get_logger(), "Started map_server pid=%d yaml=%s topic=/%s/%s",
+    map_server_pid_, map_file_.c_str(), rid.c_str(), topic_leaf.c_str());
+
+  const std::string fqn = resolve_lifecycle_node_fqn("map_server");
+  std::string local_err;
+  // Wait until lifecycle services appear.
+  bool ready = false;
+  for (int i = 0; i < 50; ++i) {
+    auto client = create_client<lifecycle_msgs::srv::ChangeState>(
+      fqn + "/change_state", rmw_qos_profile_services_default, client_cb_group_);
+    if (client->wait_for_service(std::chrono::milliseconds(100))) {
+      ready = true;
+      break;
+    }
+  }
+  if (!ready) {
+    if (err) {
+      *err = "map_server lifecycle service not ready";
+    }
+    return false;
+  }
+  if (!call_lifecycle_transition(fqn, "configure", &local_err)) {
+    if (err) {
+      *err = "map_server configure failed: " + local_err;
+    }
+    return false;
+  }
+  if (!call_lifecycle_transition(fqn, "activate", &local_err)) {
+    if (err) {
+      *err = "map_server activate failed: " + local_err;
+    }
+    return false;
+  }
+  RCLCPP_INFO(get_logger(), "map_server active publishing static map from %s", map_file_.c_str());
+  return true;
+}
+
+bool StackLifecycleManagerNode::ensure_static_map_loaded(std::string * err) {
+  if (map_file_.empty()) {
+    return true;
+  }
+  if (map_server_pid_ > 0 && map_server_yaml_ == map_file_) {
+    const std::string st = query_lifecycle_state(resolve_lifecycle_node_fqn("map_server"));
+    if (st == "active") {
+      return true;
+    }
+  }
+  stop_map_server();
+  return start_map_server(err);
+}
+
 void StackLifecycleManagerNode::stop_slam_child() {
   if (slam_pid_ <= 0) {
     return;
@@ -308,8 +504,14 @@ bool StackLifecycleManagerNode::start_slam_child(const std::string & mode) {
     child_node_name = "localization_worker";
     slam_mode_param = "localization";
     map_name = localization_map_topic_;
+    // Occupancy yaml is loaded by map_server onto static_map_topic_; slam must not claim /map.
     if (map_file_.empty()) {
-      RCLCPP_ERROR(get_logger(), "localize mode requires map_file parameter");
+      RCLCPP_ERROR(get_logger(), "localize mode requires map_file (occupancy yaml) parameter");
+      return false;
+    }
+    std::string map_err;
+    if (!ensure_static_map_loaded(&map_err)) {
+      RCLCPP_ERROR(get_logger(), "localize: static map load failed: %s", map_err.c_str());
       return false;
     }
   } else {
@@ -348,8 +550,18 @@ bool StackLifecycleManagerNode::start_slam_child(const std::string & mode) {
     "-p", "map_name:=" + map_name,
   };
   if (m != "mapping" && m != "map") {
-    args.push_back("-p");
-    args.push_back("map_file_name:=" + map_file_);
+    const std::string posegraph = resolve_posegraph_stem();
+    if (!posegraph.empty()) {
+      args.push_back("-p");
+      args.push_back("map_file_name:=" + posegraph);
+      RCLCPP_INFO(get_logger(), "localize: loading slam posegraph stem %s", posegraph.c_str());
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "localize: no .posegraph/.data beside map_file; slam will not deserialize occupancy yaml "
+        "(static map is on %s via map_server)",
+        static_map_topic_.c_str());
+    }
     // task_manager / Web publish PoseWithCovarianceStamped on /<robot>/initial;
     // slam_toolbox localization listens to relative topic "initialpose".
     args.push_back("-r");

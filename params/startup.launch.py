@@ -15,7 +15,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("robot_name", default_value="robot2"),
             DeclareLaunchArgument("current_map", default_value="nh_102"),
-            DeclareLaunchArgument("robot_status", default_value="0"),
+            DeclareLaunchArgument("robot_status", default_value="initializing"),
             DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument("mapping_mode", default_value="false"),
             DeclareLaunchArgument("publish_rate", default_value="2.0"),

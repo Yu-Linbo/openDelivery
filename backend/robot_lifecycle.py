@@ -7,9 +7,9 @@ Per-robot stack orchestration for the web console.
 - **仿真上线**：仅启动一个托管进程（id = ``robot_id``），运行 ``sim_bringup.sh``；脚本内依次拉起
   Gazebo/仿真、heartbeat、manager（health_monitor + task_manager）、定位、（按磁盘缓存可选）建图、导航，
   并对 heartbeat / slam lifecycle 做 configure/activate。
-- **仿真离线**：向 ``/<robot>/set_heartbeat_params`` 写入 ``robot_status=SHUTDOWN``（``RobotStatus.msg`` 中
-  ``ROBOT_STATUS_SHUTDOWN=4``），供各节点订阅 ``/<robot>/robot_status`` 后自行收尾；再对 navigation / heartbeat
-  做 best-effort lifecycle shutdown，最后 ``pause`` 各托管项（已废弃 ``sim_shutdown.sh``）。
+- **仿真离线**：向 ``/<robot>/set_heartbeat_params`` 写入 ``robot_status=shutdown``，供各节点订阅
+  ``/<robot>/robot_status`` 后自行收尾；再对 navigation / heartbeat 做 best-effort lifecycle shutdown，
+  最后 ``pause`` 各托管项（已废弃 ``sim_shutdown.sh``）。
 - ``heartbeat`` / ``navigation``：经 ``set_stack_lifecycle_transition`` 驱动标准 Lifecycle；
   ``slam``：同一服务切换模式（``mapping`` / ``localize`` / ``inactive``），由 ``stack_lifecycle_manager`` fork ``slam_toolbox``。
 """
@@ -236,9 +236,12 @@ class RobotLifecycleOrchestrator:
         )
 
     def _signal_shutdown_via_heartbeat(self, rid: str) -> None:
-        """Publish SHUTDOWN by updating heartbeat params (``robot_status=4``)."""
-        # SetHeartbeatParams: empty strings leave name/map; 255 leaves task_status; rate_hz<=0 unchanged.
-        yaml_req = '{robot_name: "", current_map: "", robot_status: 4, task_status: 255, rate_hz: 0.0}'
+        """Publish shutdown by updating heartbeat params (``robot_status=shutdown``)."""
+        # SetHeartbeatParams: empty strings leave name/map/task_status unchanged; rate_hz<=0 unchanged.
+        yaml_req = (
+            '{robot_name: "", current_map: "", robot_status: "shutdown", '
+            'task_status: "", rate_hz: 0.0}'
+        )
         cmd = (
             f"ros2 service call /{rid}/set_heartbeat_params "
             f"custom_msgs_srvs/srv/SetHeartbeatParams {shlex.quote(yaml_req)}"

@@ -1,7 +1,6 @@
 #ifndef MANAGER__TASK_MANAGER_NODE_HPP_
 #define MANAGER__TASK_MANAGER_NODE_HPP_
 
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -29,8 +28,8 @@ private:
   void on_localize_nav(const custom_msgs_srvs::msg::LocalizeNavCommand::SharedPtr msg);
 
   bool send_heartbeat(
-    uint8_t robot_status,
-    uint8_t task_status,
+    const std::string & robot_status,
+    const std::string & task_status,
     const std::string & current_map);
 
   // Separate group so localize/set_task callbacks can wait on heartbeat without deadlock.
@@ -42,8 +41,8 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pub_;
 
   std::mutex mtx_;
-  uint8_t last_robot_status_{0};
-  uint8_t last_task_status_{0};
+  std::string last_robot_status_{"initializing"};
+  std::string last_task_status_{"idle"};
   std::string initial_pose_topic_;
 
   std::shared_ptr<TaskManagerNode> self_;

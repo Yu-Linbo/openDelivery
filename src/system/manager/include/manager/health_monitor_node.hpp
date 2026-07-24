@@ -33,7 +33,7 @@ private:
 
   /// ``pump_exec``: when non-null, ``spin_some`` is used while waiting (e.g. after main ``spin`` returns).
   bool call_set_params(
-    uint8_t robot_status, const std::string & current_map,
+    const std::string & robot_status, const std::string & current_map,
     rclcpp::Executor * pump_exec = nullptr);
   bool required_satisfied();
   void reset_map_baseline();

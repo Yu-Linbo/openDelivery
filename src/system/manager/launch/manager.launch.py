@@ -30,10 +30,16 @@ def _slam_params(context, *args, **kwargs):
             "base_frame": f"{ns}/base_footprint",
             "scan_topic": f"/{ns}/scan_2d",
             "mapping_map_topic": f"/{ns}/mapping",
-            "localization_map_topic": f"/{ns}/map",
+            # SLAM scan-built grid (must not collide with map_server on /map)
+            "localization_map_topic": f"/{ns}/slam_map",
+            "static_map_topic": f"/{ns}/map",
             "slam_child_namespace": f"/{ns}/slam_bringup",
             "initial_slam_mode": initial,
-            "tracked_lifecycle_nodes": ["heartbeat", "lifecycle_manager_navigation"],
+            "tracked_lifecycle_nodes": [
+                "heartbeat",
+                "lifecycle_manager_navigation",
+                "map_server",
+            ],
         }
     ]
 
@@ -88,7 +94,11 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "map_file",
                 default_value="",
-                description="Map yaml for localize slam mode (initial_slam_mode:=localize).",
+                description=(
+                    "Occupancy grid yaml for map_server → /<ns>/map. "
+                    "Also required for initial_slam_mode:=localize. "
+                    "Posegraph (optional) is <stem>.posegraph/.data beside the yaml."
+                ),
             ),
             DeclareLaunchArgument(
                 "initial_slam_mode",

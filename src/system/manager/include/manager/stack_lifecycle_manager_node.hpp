@@ -14,6 +14,7 @@ namespace manager {
 class StackLifecycleManagerNode : public rclcpp::Node {
 public:
   StackLifecycleManagerNode();
+  ~StackLifecycleManagerNode() override;
 
 private:
   void publish_stack_lifecycle();
@@ -30,8 +31,17 @@ private:
   bool start_slam_child(const std::string & mode);
   void stop_slam_child();
 
+  /** Load occupancy yaml via nav2 map_server onto static_map_topic_ (default /<robot>/map). */
+  bool ensure_static_map_loaded(std::string * err = nullptr);
+  bool start_map_server(std::string * err = nullptr);
+  void stop_map_server();
+  /** slam_toolbox pose-graph stem (no extension), or empty if only occupancy yaml exists. */
+  std::string resolve_posegraph_stem() const;
+
   std::string slam_mode_;
   pid_t slam_pid_{-1};
+  pid_t map_server_pid_{-1};
+  std::string map_server_yaml_;
 
   std::string mapper_params_file_;
   std::string localization_params_file_;
@@ -41,7 +51,9 @@ private:
   std::string base_frame_;
   std::string scan_topic_;
   std::string mapping_map_topic_;
+  /** SLAM localization OccupancyGrid topic — must NOT be /<robot>/map (owned by map_server). */
   std::string localization_map_topic_;
+  std::string static_map_topic_;
   std::string slam_child_namespace_;
   bool use_sim_time_{true};
 

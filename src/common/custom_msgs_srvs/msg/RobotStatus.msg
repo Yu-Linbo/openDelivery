@@ -3,20 +3,21 @@ string robot_name
 string current_map
 
 # --- robot_status: 上线生命周期（health_monitor → set_heartbeat_params → heartbeat）---
-uint8 ROBOT_STATUS_INITIALIZING=0
-uint8 ROBOT_STATUS_LOCALIZING=1
-uint8 ROBOT_STATUS_LOCALIZATION_LOST=2
-uint8 ROBOT_STATUS_READY=3
-uint8 ROBOT_STATUS_SHUTDOWN=4
-uint8 robot_status
+# echo 直接显示下列字面量；常量供代码引用，避免魔法字符串
+string ROBOT_STATUS_INITIALIZING=initializing
+string ROBOT_STATUS_LOCALIZING=localizing
+string ROBOT_STATUS_LOCALIZATION_LOST=localization_lost
+string ROBOT_STATUS_READY=ready
+string ROBOT_STATUS_SHUTDOWN=shutdown
+string robot_status
 
 # --- task_status: 作业状态（task_manager → set_heartbeat_params → heartbeat）---
-uint8 TASK_STATUS_IDLE=0
-uint8 TASK_STATUS_MAPPING=1
-uint8 TASK_STATUS_DELIVERY=2
-uint8 TASK_STATUS_CLEANING=3
-uint8 TASK_STATUS_PATROLLING=4
-uint8 task_status
+string TASK_STATUS_IDLE=idle
+string TASK_STATUS_MAPPING=mapping
+string TASK_STATUS_DELIVERY=delivery
+string TASK_STATUS_CLEANING=cleaning
+string TASK_STATUS_PATROLLING=patrolling
+string task_status
 
 # true: 来自仿真栈；false: 真机或未知（旧节点未填时桥接侧按 false 处理）
 bool is_simulation

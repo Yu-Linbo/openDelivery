@@ -25,13 +25,13 @@ def generate_launch_description():
             DeclareLaunchArgument("current_map", default_value="nh_102"),
             DeclareLaunchArgument(
                 "robot_status",
-                default_value="0",
-                description="RobotStatus.robot_status enum int (0=INITIALIZING .. 4=SHUTDOWN).",
+                default_value="initializing",
+                description="RobotStatus.robot_status string: initializing|localizing|localization_lost|ready|shutdown.",
             ),
             DeclareLaunchArgument(
                 "task_status",
-                default_value="0",
-                description="RobotStatus.task_status enum int (0=IDLE .. 4=PATROLLING).",
+                default_value="idle",
+                description="RobotStatus.task_status string: idle|mapping|delivery|cleaning|patrolling.",
             ),
             DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument(
