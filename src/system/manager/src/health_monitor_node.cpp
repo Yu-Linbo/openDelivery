@@ -77,7 +77,7 @@ HealthMonitorNode::HealthMonitorNode()
     "required_nodes", std::vector<std::string>{"heartbeat"});
   declare_parameter<std::string>("localization_pose_topic", "amcl_pose");
   declare_parameter<double>("position_covariance_max", 0.45);
-  declare_parameter<bool>("allow_ready_from_localizing", false);
+  declare_parameter<bool>("allow_ready_from_localizing", true);
   declare_parameter<double>("poll_period_sec", 1.0);
 
   required_nodes_ = get_parameter("required_nodes").as_string_array();
@@ -91,6 +91,10 @@ HealthMonitorNode::HealthMonitorNode()
     "robot_status",
     rclcpp::QoS(10),
     std::bind(&HealthMonitorNode::on_robot_status, this, std::placeholders::_1));
+  stack_sub_ = create_subscription<custom_msgs_srvs::msg::StackLifecycle>(
+    "stack_lifecycle",
+    rclcpp::QoS(10),
+    std::bind(&HealthMonitorNode::on_stack_lifecycle, this, std::placeholders::_1));
 
   if (!pose_topic_.empty()) {
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
@@ -187,13 +191,37 @@ void HealthMonitorNode::on_poll() {
   if (phase_ == Phase::ShutdownSent) {
     return;
   }
-  if (phase_ == Phase::Initializing) {
-    if (required_satisfied()) {
-      if (call_set_params("localizing", "")) {
-        phase_ = Phase::Localizing;
-        reset_map_baseline();
-        RCLCPP_INFO(get_logger(), "robot_status -> localizing (required nodes up)");
-      }
+  // Node presence alone does not mean localization is active. State transitions
+  // are driven by stack_lifecycle in on_stack_lifecycle().
+  (void)required_satisfied();
+}
+
+void HealthMonitorNode::on_stack_lifecycle(
+  const custom_msgs_srvs::msg::StackLifecycle::SharedPtr msg) {
+  std::lock_guard<std::recursive_mutex> lock(mtx_);
+  if (phase_ == Phase::ShutdownSent || !required_satisfied()) {
+    return;
+  }
+  std::string localization_state;
+  for (const auto & component : msg->components) {
+    if (component.name == "localization") {
+      localization_state = component.state;
+    }
+  }
+  if (localization_state == "active") {
+    if (phase_ == Phase::Initializing && call_set_params("localizing", "")) {
+      phase_ = Phase::Localizing;
+      reset_map_baseline();
+      RCLCPP_INFO(get_logger(), "robot_status -> localizing (SLAM localization active)");
+    }
+    return;
+  }
+  if (phase_ == Phase::Initializing && !localization_state.empty()) {
+    if (call_set_params("localization_lost", "")) {
+      phase_ = Phase::LocalizationLost;
+      RCLCPP_INFO(
+        get_logger(),
+        "robot_status -> localization_lost (localization module not active)");
     }
   }
 }

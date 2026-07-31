@@ -6,16 +6,16 @@
   <description>health_monitor, task_manager, and stack_lifecycle_manager (SLAM mode + ROS lifecycle proxy).</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
-
   <buildtool_depend>ament_cmake</buildtool_depend>
-
   <depend>rclcpp</depend>
   <depend>custom_msgs_srvs</depend>
   <depend>geometry_msgs</depend>
   <depend>lifecycle_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>ament_index_cpp</depend>
   <exec_depend>nav2_map_server</exec_depend>
-
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>slam_gmapping</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

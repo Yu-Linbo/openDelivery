@@ -288,12 +288,12 @@ class RosNodeManager:
     def _make_slam_mapping_spec(self, robot_name: str = "sim_robot") -> dict:
         rn = self._sanitize_node_fragment(robot_name, "robot_name")
         svc = (
-            f"ros2 service call /{rn}/set_stack_lifecycle_transition "
+            f"ros2 service call /{rn}/slam/set_stack_lifecycle_transition "
             f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
             f"'{{node_name: \"slam\", transition: \"mapping\"}}'"
         )
         stop_svc = (
-            f"ros2 service call /{rn}/set_stack_lifecycle_transition "
+            f"ros2 service call /{rn}/slam/set_stack_lifecycle_transition "
             f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
             f"'{{node_name: \"slam\", transition: \"inactive\"}}'"
         )
@@ -303,8 +303,8 @@ class RosNodeManager:
             "persistent": False,
             "start_cmd": svc,
             "stop_cmd": stop_svc,
-            "match": "stack_lifecycle_manager",
-            "note": f"SLAM mapping via stack_lifecycle_manager (robot={rn})",
+            "match": f"/{rn}/slam/lifecycle_manager",
+            "note": f"SLAM mapping via slam lifecycle manager (robot={rn})",
         }
 
     def create_slam_mapping_node_and_start(self, robot_name: str = "sim_robot"):
@@ -1199,17 +1199,21 @@ def _lifecycle_get_quick(root_dir: Path, node_name: str, timeout_s: float = 1.0)
         f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
         f'cd "{root_dir}" && {install_src}; ros2 lifecycle get {shlex.quote(node_name)}'
     )
+    proc = subprocess.Popen(
+        ["bash", "-lc", cmd],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=os.environ.copy(), start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            ["bash", "-lc", cmd],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=os.environ.copy(),
-        )
+        stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
         return {"available": True, "state": "timeout", "raw": "timeout"}
-    txt = (proc.stdout or proc.stderr or "").strip()
+    txt = (stdout or stderr or "").strip()
     # Remove ANSI escape sequences from ros2 CLI output before parsing.
     txt_clean = re.sub(r"\x1B\[[0-9;]*[A-Za-z]", "", txt)
     if proc.returncode != 0:
@@ -1262,9 +1266,9 @@ def _build_debug_nodes_view() -> dict:
     def _is_lifecycle_candidate(node_name: str) -> bool:
         n = str(node_name or "")
         hints = (
-            "/stack_lifecycle_manager",
-            "/slam_bringup/mapping_worker",
-            "/slam_bringup/localization_worker",
+            "/slam/lifecycle_manager",
+            "/slam/mapping",
+            "/slam/localizing",
             "/heartbeat",
             "/lifecycle_manager_",
             "/bt_navigator",
@@ -1281,7 +1285,7 @@ def _build_debug_nodes_view() -> dict:
         # keep lifecycle action buttons but skip per-request state probing.
         n = str(node_name or "")
         return (
-            "/stack_lifecycle_manager" in n
+            "/slam/lifecycle_manager" in n
             or "/heartbeat" in n
             or "/lifecycle_manager_navigation" in n
         )
@@ -1396,6 +1400,61 @@ class RosDebugNodesTable:
 ROS_DEBUG_NODES_TABLE = RosDebugNodesTable(
     refresh_sec=float(os.environ.get("ROS_DEBUG_NODES_REFRESH_SEC") or 2.0)
 )
+
+
+def _robot_process_metrics(robot_id: str) -> list:
+    """Read-only CPU/memory snapshot for processes associated with one robot."""
+    rid = str(robot_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid):
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,pcpu=,pmem=,rss=,args="],
+            capture_output=True, text=True, timeout=2.0,
+        )
+    except Exception:
+        return []
+    markers = (
+        f"robot_name:={rid}", f"namespace:={rid}", f"--robot-name {rid}",
+        f"sim_bringup.sh {rid}", f"/{rid}/",
+    )
+    rows = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 5 or not any(marker in parts[4] for marker in markers):
+            continue
+        if "/ros2 lifecycle get " in parts[4]:
+            continue
+        try:
+            rows.append({
+                "pid": int(parts[0]), "cpu_percent": float(parts[1]),
+                "memory_percent": float(parts[2]), "rss_kb": int(parts[3]),
+                "command": parts[4],
+            })
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda row: row["cpu_percent"], reverse=True)
+    return rows[:32]
+
+
+def _robot_detail_payload(robot_id: str) -> dict:
+    rid = str(robot_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid):
+        raise ValueError("invalid robot_id")
+    presence = _build_presence_rows()
+    row = next((item for item in presence.get("items", []) if item.get("id") == rid), None)
+    table = ROS_DEBUG_NODES_TABLE.snapshot()
+    prefix = f"/{rid}/"
+    nodes = [
+        node for node in (table.get("nodes") or [])
+        if str((node or {}).get("name") or "").startswith(prefix)
+    ]
+    logs = _list_log_bag_matches(rid)
+    return {
+        "robot_id": rid, "status": row or {"id": rid, "online": False},
+        "nodes": nodes, "processes": _robot_process_metrics(rid),
+        "logs": logs, "timestamp": time.time(),
+    }
 
 
 def _safe_log_bag_path(raw_path: str) -> Path:
@@ -2553,6 +2612,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json(augment_topdown_for_api(frame), 200)
+            return
+
+        m_detail = re.match(r"^/api/robot/([^/]+)/detail$", path)
+        if m_detail:
+            rid = unquote(m_detail.group(1))
+            try:
+                self._send_json(_robot_detail_payload(rid))
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
             return
 
         m_scan = re.match(r"^/api/robot/([^/]+)/scan_2d$", path)

@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(custom_msgs_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
 add_executable(health_monitor_node
@@ -39,6 +40,7 @@ ament_target_dependencies(task_manager_node
 add_executable(stack_lifecycle_manager_node
   src/stack_lifecycle_manager_node.cpp
 )
+
 target_include_directories(stack_lifecycle_manager_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -46,6 +48,7 @@ ament_target_dependencies(stack_lifecycle_manager_node
   rclcpp
   custom_msgs_srvs
   lifecycle_msgs
+  std_srvs
   ament_index_cpp
 )
 

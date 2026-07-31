@@ -16,6 +16,7 @@ map/
 
 # Backend runtime files
 backend/data/robot_status_last.json
+backend/data/.robot_status_last.json.*.tmp
 backend/logs/
 
 # ROS bag files

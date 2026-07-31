@@ -6,8 +6,8 @@
 # 在本脚本内**顺序后台启动**同一命名空间 ${RID} 下的：
 #   1) simulate（Gazebo + 机器人）
 #   2) heartbeat（RobotStatus 发布；Lifecycle 需 configure→activate）
-#   3) manager（health_monitor + task_manager + stack_lifecycle_manager）
-#   4) stack_lifecycle_manager 按 initial_slam_mode 切换 slam（mapping|localize）
+#   3) manager（health_monitor + task_manager + lifecycle_manager）
+#   4) lifecycle_manager 按 initial_slam_mode 切换 slam（mapping|localize）
 #   5) nav_bringup stack
 #
 # **仿真下线**不再调用 sim_shutdown.sh：由上层将 ``RobotStatus.robot_status`` 置为 **shutdown**，
@@ -56,7 +56,15 @@ if [[ -z "${ROOT}" ]]; then
   ROOT="$(cd "${_here}/../../../../" && pwd)"
 fi
 
+# Foxy FastRTPS may ignore FASTDDS_BUILTIN_TRANSPORTS and attempt stale SHM
+# segments. Apply the XML profile before any ROS process is created so manager,
+# map_server, SLAM, Nav2 and Gazebo all use the same UDP-only transport.
+: "${FASTDDS_BUILTIN_TRANSPORTS:=UDPv4}"
+: "${FASTRTPS_DEFAULT_PROFILES_FILE:=${ROOT}/backend/fastdds_udp_only.xml}"
+export FASTDDS_BUILTIN_TRANSPORTS FASTRTPS_DEFAULT_PROFILES_FILE
+
 log "robot_id=${RID} SIM_MODE=${SIM_MODE} OPEN_DELIVERY_ROOT=${ROOT}"
+log "FastRTPS profile=${FASTRTPS_DEFAULT_PROFILES_FILE}"
 
 ROS_DISTRO="${ROS_DISTRO:-foxy}"
 if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
@@ -235,7 +243,7 @@ else
   log "WARN: heartbeat lifecycle service not visible within ${HB_WAIT}s: ${HB}"
 fi
 
-# --- 2b) manager：health_monitor + task_manager + stack_lifecycle_manager ---
+# --- 2b) manager：health_monitor + task_manager + lifecycle_manager ---
 SLAM_INITIAL_MODE="inactive"
 MANAGER_EXTRA=()
 if [[ -n "${MAP_FILE}" ]]; then
@@ -252,7 +260,7 @@ ros2 launch manager manager.launch.py \
   "use_sim_time:=true" \
   "initial_slam_mode:=${SLAM_INITIAL_MODE}" \
   "${MANAGER_EXTRA[@]}" &
-log "started manager.launch.py (health_monitor+task_manager+stack_lifecycle_manager, pid $!) namespace=${RID} slam=${SLAM_INITIAL_MODE}"
+log "started manager.launch.py (health_monitor+task_manager+lifecycle_manager, pid $!) namespace=${RID} slam=${SLAM_INITIAL_MODE}"
 sleep "${MANAGER_WAIT}"
 
 if [[ "${SIM_BRINGUP_MANAGER_ONLY:-0}" == "1" ]]; then
@@ -261,7 +269,7 @@ if [[ "${SIM_BRINGUP_MANAGER_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
-# --- 3) SLAM mode is owned by stack_lifecycle_manager (initial_slam_mode above) ---
+# --- 3) SLAM mode is owned by lifecycle_manager (initial_slam_mode above) ---
 
 # --- 4) 导航（默认 active）---
 ros2 launch nav_bringup stack.launch.py \

@@ -9,7 +9,7 @@
 #   ./start_heartbeat_slam_nav.sh <robot_name> normal [/absolute/path/to/map.yaml]
 #
 # Debug: ros2 topic echo /robot2/stack_lifecycle
-#   ros2 service call /robot2/set_stack_lifecycle_transition \
+#   ros2 service call /robot2/slam/set_stack_lifecycle_transition \
 #     custom_msgs_srvs/srv/SetStackLifecycleTransition "{node_name: slam, transition: mapping}"
 
 set -euo pipefail
@@ -139,7 +139,7 @@ PY
 stack_transition() {
   local node_name="$1"
   local transition="$2"
-  ros2 service call "/${ROBOT}/set_stack_lifecycle_transition" \
+  ros2 service call "//slam/set_stack_lifecycle_transition" \
     custom_msgs_srvs/srv/SetStackLifecycleTransition \
     "{node_name: '${node_name}', transition: '${transition}'}" || true
 }

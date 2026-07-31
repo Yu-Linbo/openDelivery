@@ -1,5 +1,11 @@
+const initialFrontendPort = Number(window.location.port || 0);
 let API_BASE_URL =
-  window.API_BASE_URL || `${window.location.protocol}//${window.location.hostname}:8001`;
+  window.API_BASE_URL ||
+  window.location.protocol +
+    "//" +
+    window.location.hostname +
+    ":" +
+    (initialFrontendPort > 0 ? initialFrontendPort + 1 : 8001);
 
 const menuButtons = Array.from(document.querySelectorAll(".menu-item"));
 const layoutEl = document.querySelector(".layout");
@@ -14,6 +20,13 @@ const robotPresenceSummary = document.getElementById("robot-presence-summary");
 const robotPresenceNewId = document.getElementById("robot-presence-new-id");
 const btnRobotPresenceBringupNew = document.getElementById("btn-robot-presence-bringup-new");
 const robotPresenceNewMsg = document.getElementById("robot-presence-new-msg");
+const robotQuickDock = document.getElementById("robot-quick-dock");
+const robotDetailPanel = document.getElementById("robot-detail-panel");
+const robotDetailName = document.getElementById("robot-detail-name");
+const robotDetailSubtitle = document.getElementById("robot-detail-subtitle");
+const robotDetailTabs = document.getElementById("robot-detail-tabs");
+const robotDetailBody = document.getElementById("robot-detail-body");
+const btnRobotDetailClose = document.getElementById("btn-robot-detail-close");
 const views = {
   monitor: document.getElementById("view-monitor"),
   gazebo: document.getElementById("view-gazebo"),
@@ -128,6 +141,10 @@ let robotStatusCacheItems = [];
 let robotPresencePanelOpen = false;
 let robotPresenceCacheTimer = null;
 let selectedPresenceRobotId = "";
+let selectedDetailRobotId = "";
+let robotDetailActiveTab = "overview";
+let robotDetailPayload = null;
+let robotDetailPollTimer = null;
 
 /** Per-robot: idle | starting | sim_online（仿真上线流程） */
 const simBringupPhaseByRobot = {};
@@ -1054,7 +1071,7 @@ function renderRosNodesStatus(data) {
   };
   const classifyPackage = (nodeName) => {
     const n = String(nodeName || "");
-    if (n.includes("/slam_bringup/")) return "slam";
+    if (n.includes("/slam/")) return "slam";
     if (
       n.includes("/bt_navigator") ||
       n.includes("/planner_server") ||
@@ -1418,19 +1435,34 @@ function drawPlannedPathOnMap(points) {
   ctx.restore();
 }
 
-function drawScan2dOnMap(data) {
+function drawScan2dOnMap(data, robot) {
   if (!activePgm || !data || !data.hits || data.hits.length === 0) {
     return;
   }
+  const robotPose = robot && robot.pose ? robot.pose : null;
+  const robotBaseCoordinates = data.coordinates === "robot_base";
+  if (robotBaseCoordinates && !robotPose) {
+    return;
+  }
+  const robotYaw = Number(robotPose && robotPose.yaw) || 0;
+  const cosYaw = Math.cos(robotYaw);
+  const sinYaw = Math.sin(robotYaw);
   ctx.save();
-  // scan_2d：地图坐标系下的命中点，红色圆点（半径随缩放略变）
+  // scan_2d is cached in robot-base coordinates, then projected with the
+  // current robot pose so it remains attached to the robot during relocation.
   const ptRadius = Math.max(1.25, Math.min(3.5, viewScale * 0.2));
   ctx.fillStyle = "#ef4444";
   data.hits.forEach((hit) => {
     if (!hit || hit.length < 2) {
       return;
     }
-    const pix = worldToMapPixels({ x: hit[0], y: hit[1] });
+    const world = robotBaseCoordinates
+      ? {
+          x: robotPose.x + cosYaw * hit[0] - sinYaw * hit[1],
+          y: robotPose.y + sinYaw * hit[0] + cosYaw * hit[1],
+        }
+      : { x: hit[0], y: hit[1] };
+    const pix = worldToMapPixels(world);
     if (!pix) {
       return;
     }
@@ -1736,6 +1768,7 @@ function renderRobotPresencePanel() {
     })
     .join("");
   persistSimBringupPhasesToSession();
+  renderRobotQuickDock();
 }
 
 function setRobotPresenceOpen(open) {
@@ -1949,7 +1982,7 @@ function renderScene() {
     robotsHere.forEach((r) => {
       const sd = latestScanByRobot[r.id];
       if (sd && sd.hits && sd.hits.length) {
-        drawScan2dOnMap(sd);
+        drawScan2dOnMap(sd, r);
       }
     });
   }
@@ -2025,6 +2058,7 @@ function updateRobotStatus() {
     }
   } finally {
     updateRobotPresenceTriggerSummary();
+    renderRobotQuickDock();
     if (robotPresencePanelOpen) {
       renderRobotPresencePanel();
     }
@@ -3936,9 +3970,232 @@ async function bootstrap() {
   loadSimBringupPhasesFromSession();
   initRosNodesPage();
   initRobotPresenceUi();
+  initRobotDetailUi();
   updateRobotPresenceTriggerSummary();
   await initMonitor();
   initGazeboPage();
 }
 
 bootstrap();
+
+function detailStatusValue(status, liveKey, persistedKey) {
+  return String((status && (status[liveKey] || status[persistedKey])) || "—");
+}
+
+function robotDetailSettingsKey(rid) {
+  return `${SETTINGS_KEY}:${rid}`;
+}
+
+function loadRobotDetailSettings(rid) {
+  const defaults = { maxSpeed: 1.2, angularSpeed: 0.8, safetyDistance: 0.6, refreshInterval: 500 };
+  try {
+    return { ...defaults, ...(JSON.parse(localStorage.getItem(robotDetailSettingsKey(rid)) || "null") || {}) };
+  } catch {
+    return defaults;
+  }
+}
+
+function renderRobotQuickDock() {
+  if (!robotQuickDock) return;
+  const online = mergePresenceRows().filter((row) => row.online);
+  robotQuickDock.innerHTML = online
+    .map(
+      (row) => `<button type="button" class="robot-quick-chip${
+        selectedDetailRobotId === row.id && robotDetailPanel && !robotDetailPanel.hidden ? " active" : ""
+      }" data-robot-quick-id="${escapeHtml(row.id)}" title="查看 ${escapeHtml(row.name || row.id)} 详情">
+        <span class="robot-quick-chip__avatar"><img src="./icons/robot.svg" alt="" /></span>
+        <span class="robot-quick-chip__name">${escapeHtml(row.name || row.id)}</span>
+        <span class="robot-quick-chip__dot" aria-label="在线"></span>
+      </button>`
+    )
+    .join("");
+}
+
+function robotNodeByHint(nodes, hints) {
+  return (nodes || []).find((node) => hints.some((hint) => String(node.name || "").includes(hint)));
+}
+
+function renderRobotBehaviorTree(nodes) {
+  const steps = [
+    ["接收导航目标", ["/bt_navigator"]],
+    ["行为树调度", ["/bt_navigator"]],
+    ["全局路径规划", ["/planner_server"]],
+    ["局部轨迹控制", ["/controller_server"]],
+    ["恢复行为", ["/recoveries_server"]],
+    ["到达目标 / 任务反馈", ["/waypoint_follower", "/bt_navigator"]],
+  ];
+  return `<div class="robot-bt-tree">${steps
+    .map(([label, hints]) => {
+      const node = robotNodeByHint(nodes, hints);
+      const lifecycle = node && node.lifecycle ? String(node.lifecycle.state || "unknown") : "missing";
+      const running = !!(node && node.running);
+      return `<div class="robot-bt-node ${running ? "running" : "missing"}">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${node ? `${escapeHtml(node.name)} · ${escapeHtml(lifecycle)}` : "对应节点未发现"}</span>
+      </div>`;
+    })
+    .join("")}</div>`;
+}
+
+function renderRobotDetailOverview(payload) {
+  const status = payload.status || {};
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const poseRow = (latestSnapshot && Array.isArray(latestSnapshot.robots)
+    ? latestSnapshot.robots.find((r) => String(r.id) === payload.robot_id)
+    : null) || {};
+  const pose = poseRow.pose || {};
+  return `<div class="robot-detail-grid">
+    <section class="robot-detail-card"><h3>运行状态</h3>
+      <p>在线：<code>${status.online ? "是" : "否"}</code></p>
+      <p>robot_status：<code>${escapeHtml(detailStatusValue(status, "live_robot_status", "persisted_robot_status"))}</code></p>
+      <p>task_status：<code>${escapeHtml(detailStatusValue(status, "live_task_status", "persisted_task_status"))}</code></p>
+      <p>任务进度：<code>${Number(status.task_progress) >= 0 ? `${Math.round(Number(status.task_progress) * 100)}%` : "—"}</code></p>
+    </section>
+    <section class="robot-detail-card"><h3>位置</h3>
+      <p>地图：<code>${escapeHtml(status.floor || status.persisted_current_map || "—")}</code></p>
+      <p>X：<code>${Number.isFinite(Number(pose.x)) ? Number(pose.x).toFixed(3) : "—"}</code></p>
+      <p>Y：<code>${Number.isFinite(Number(pose.y)) ? Number(pose.y).toFixed(3) : "—"}</code></p>
+      <p>Yaw：<code>${Number.isFinite(Number(pose.yaw)) ? Number(pose.yaw).toFixed(3) : "—"}</code></p>
+    </section>
+    <section class="robot-detail-card"><h3>ROS 节点</h3><p><code>${nodes.length}</code> 个该机器人节点</p></section>
+    <section class="robot-detail-card"><h3>资源</h3><p><code>${(payload.processes || []).length}</code> 个关联进程</p></section>
+  </div>`;
+}
+
+function renderRobotDetailTasks(payload) {
+  const status = payload.status || {};
+  const task = detailStatusValue(status, "live_task_status", "persisted_task_status");
+  const progress = Number(status.task_progress);
+  const active = task && task !== "—" && task !== "idle";
+  return `<div class="robot-detail-grid">
+    <section class="robot-detail-card"><h3>当前任务</h3>
+      <p>${active ? `<code>${escapeHtml(task)}</code>` : "当前为空闲状态"}</p>
+      <p>进度：<code>${progress >= 0 ? `${Math.round(progress * 100)}%` : "未上报"}</code></p>
+    </section>
+    <section class="robot-detail-card"><h3>待执行队列</h3>
+      <p class="robot-detail-empty">暂无待执行任务。当前后端尚未接入持久任务队列。</p>
+    </section>
+  </div>`;
+}
+
+function renderRobotDetailCpu(payload) {
+  const processes = Array.isArray(payload.processes) ? payload.processes : [];
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const processRows = processes.length
+    ? processes.map((p) => `<tr><td>${p.pid}</td><td>${Number(p.cpu_percent).toFixed(1)}%</td><td>${Number(p.memory_percent).toFixed(1)}%</td><td>${(Number(p.rss_kb) / 1024).toFixed(1)} MB</td><td class="robot-detail-command" title="${escapeHtml(p.command)}">${escapeHtml(p.command)}</td></tr>`).join("")
+    : '<tr><td colspan="5">暂无匹配的机器人进程</td></tr>';
+  const nodeRows = nodes.length
+    ? nodes.map((n) => `<tr><td><code>${escapeHtml(n.name)}</code></td><td>${n.running ? "运行中" : "未运行"}</td><td>${escapeHtml((n.lifecycle && n.lifecycle.state) || "n/a")}</td></tr>`).join("")
+    : '<tr><td colspan="3">暂无该机器人 ROS 节点</td></tr>';
+  return `<section class="robot-detail-card"><h3>关联进程 CPU / 内存</h3><table class="robot-detail-table"><thead><tr><th>PID</th><th>CPU</th><th>MEM</th><th>RSS</th><th>命令</th></tr></thead><tbody>${processRows}</tbody></table></section>
+    <section class="robot-detail-card" style="margin-top:10px"><h3>该机器人 ROS 节点</h3><table class="robot-detail-table"><thead><tr><th>节点</th><th>状态</th><th>Lifecycle</th></tr></thead><tbody>${nodeRows}</tbody></table></section>`;
+}
+
+function renderRobotDetailLogs(payload) {
+  const entries = flattenLogBagEntries(payload.logs || {});
+  if (!entries.length) return '<p class="robot-detail-empty">该机器人暂无日志索引。</p>';
+  return `<div class="robot-detail-grid">${entries.slice(0, 12).map((entry) => `<section class="robot-detail-card"><h3>${escapeHtml(basenameOfLogPath(entry.bag) || "bag")}</h3><p>${escapeHtml(entry.ended_at || entry.started_at || "无时间")}</p><p>${escapeHtml(formatLogBagSize(entry.bytes))} · ${(entry.files || []).length} 个关联文件</p></section>`).join("")}</div><div class="robot-detail-param-actions"><button type="button" data-robot-detail-open-logs="1">打开完整日志页面</button></div>`;
+}
+
+function renderRobotDetailParams(payload) {
+  const p = loadRobotDetailSettings(payload.robot_id);
+  return `<form id="robot-detail-params-form">
+    <div class="robot-detail-params">
+      <label>最大速度 (m/s)<input name="maxSpeed" type="number" step="0.1" min="0" value="${p.maxSpeed}" required /></label>
+      <label>角速度 (rad/s)<input name="angularSpeed" type="number" step="0.1" min="0" value="${p.angularSpeed}" required /></label>
+      <label>避障距离 (m)<input name="safetyDistance" type="number" step="0.1" min="0" value="${p.safetyDistance}" required /></label>
+      <label>刷新间隔 (ms)<input name="refreshInterval" type="number" step="100" min="100" value="${p.refreshInterval}" required /></label>
+    </div>
+    <div class="robot-detail-param-actions"><button type="submit">保存 ${escapeHtml(payload.robot_id)} 参数</button><span id="robot-detail-param-message" class="message"></span></div>
+  </form>`;
+}
+
+function renderRobotDetail() {
+  if (!robotDetailBody || !robotDetailPayload) return;
+  const payload = robotDetailPayload;
+  const renderers = {
+    overview: renderRobotDetailOverview,
+    tree: (p) => renderRobotBehaviorTree(p.nodes || []),
+    tasks: renderRobotDetailTasks,
+    cpu: renderRobotDetailCpu,
+    logs: renderRobotDetailLogs,
+    params: renderRobotDetailParams,
+  };
+  robotDetailBody.innerHTML = (renderers[robotDetailActiveTab] || renderRobotDetailOverview)(payload);
+}
+
+async function refreshRobotDetail() {
+  if (!selectedDetailRobotId || !robotDetailPanel || robotDetailPanel.hidden) return;
+  const payload = await fetchJson(`${API_BASE_URL}/api/robot/${encodeURIComponent(selectedDetailRobotId)}/detail`, { cache: "no-store" });
+  robotDetailPayload = payload;
+  const status = payload.status || {};
+  if (robotDetailName) robotDetailName.textContent = status.name || payload.robot_id;
+  if (robotDetailSubtitle) robotDetailSubtitle.textContent = `${payload.robot_id} · ${status.online ? "在线" : "离线"} · ${status.floor || "无地图"}`;
+  renderRobotDetail();
+  renderRobotQuickDock();
+}
+
+function closeRobotDetail() {
+  if (robotDetailPanel) robotDetailPanel.hidden = true;
+  selectedDetailRobotId = "";
+  robotDetailPayload = null;
+  if (robotDetailPollTimer) clearInterval(robotDetailPollTimer);
+  robotDetailPollTimer = null;
+  renderRobotQuickDock();
+}
+
+function openRobotDetail(rid) {
+  selectedDetailRobotId = rid;
+  robotDetailActiveTab = "overview";
+  robotDetailPayload = null;
+  if (robotDetailPanel) robotDetailPanel.hidden = false;
+  if (robotDetailBody) robotDetailBody.innerHTML = '<p class="robot-detail-empty">正在读取机器人详情…</p>';
+  if (robotDetailTabs) robotDetailTabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.robotDetailTab === "overview"));
+  refreshRobotDetail().catch((err) => {
+    if (robotDetailBody) robotDetailBody.innerHTML = `<p class="robot-detail-empty">读取失败：${escapeHtml(err.message || err)}</p>`;
+  });
+  if (robotDetailPollTimer) clearInterval(robotDetailPollTimer);
+  robotDetailPollTimer = setInterval(() => refreshRobotDetail().catch(() => {}), 2500);
+}
+
+function initRobotDetailUi() {
+  renderRobotQuickDock();
+  if (robotQuickDock) robotQuickDock.addEventListener("click", (ev) => {
+    const button = ev.target.closest("button[data-robot-quick-id]");
+    if (button) openRobotDetail(String(button.dataset.robotQuickId || ""));
+  });
+  if (btnRobotDetailClose) btnRobotDetailClose.addEventListener("click", closeRobotDetail);
+  if (robotDetailTabs) robotDetailTabs.addEventListener("click", (ev) => {
+    const button = ev.target.closest("button[data-robot-detail-tab]");
+    if (!button) return;
+    robotDetailActiveTab = String(button.dataset.robotDetailTab || "overview");
+    robotDetailTabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === button));
+    renderRobotDetail();
+  });
+  if (robotDetailBody) robotDetailBody.addEventListener("click", (ev) => {
+    const button = ev.target.closest("button[data-robot-detail-open-logs]");
+    if (!button || !selectedDetailRobotId) return;
+    const menu = document.querySelector(`.menu-item[data-view="logs"]`);
+    if (menu) menu.click();
+    if (logBagRobotSelect) {
+      logBagRobotSelect.value = selectedDetailRobotId;
+      refreshLogBags();
+    }
+    closeRobotDetail();
+  });
+  if (robotDetailBody) robotDetailBody.addEventListener("submit", (ev) => {
+    const form = ev.target.closest("#robot-detail-params-form");
+    if (!form || !selectedDetailRobotId) return;
+    ev.preventDefault();
+    const payload = {
+      maxSpeed: Number(form.elements.maxSpeed.value),
+      angularSpeed: Number(form.elements.angularSpeed.value),
+      safetyDistance: Number(form.elements.safetyDistance.value),
+      refreshInterval: Number(form.elements.refreshInterval.value),
+    };
+    localStorage.setItem(robotDetailSettingsKey(selectedDetailRobotId), JSON.stringify(payload));
+    const message = document.getElementById("robot-detail-param-message");
+    if (message) message.textContent = `已保存 ${new Date().toLocaleTimeString()}`;
+    appendLog(`${selectedDetailRobotId} 参数已更新 ${JSON.stringify(payload)}`);
+  });
+}

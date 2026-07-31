@@ -164,7 +164,7 @@ bool HeartbeatNode::slam_mapping_node_present() {
   if (rn.empty()) {
     return false;
   }
-  const std::string expected_ns = std::string("/") + rn + "/slam_bringup";
+  const std::string expected_ns = std::string("/") + rn + "/slam";
   std::vector<std::pair<std::string, std::string>> pairs;
   try {
     pairs = get_node_graph_interface()->get_node_names_and_namespaces();
@@ -172,7 +172,7 @@ bool HeartbeatNode::slam_mapping_node_present() {
     return false;
   }
   for (const auto & pr : pairs) {
-    if (pr.first == "mapping_worker" && pr.second == expected_ns) {
+    if (pr.first == "mapping" && pr.second == expected_ns) {
       return true;
     }
   }

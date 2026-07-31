@@ -123,10 +123,10 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   declare_parameter<std::string>("base_frame", "");
   declare_parameter<std::string>("scan_topic", "");
   declare_parameter<std::string>("mapping_map_topic", "");
-  declare_parameter<std::string>("localization_map_topic", "");
   declare_parameter<std::string>("static_map_topic", "");
   declare_parameter<std::string>("slam_child_namespace", "");
   declare_parameter<std::string>("initial_slam_mode", "inactive");
+  declare_parameter<std::string>("robot_id", "");
   declare_parameter<std::vector<std::string>>(
     "tracked_lifecycle_nodes",
     std::vector<std::string>{"heartbeat", "lifecycle_manager_navigation", "map_server"});
@@ -140,10 +140,10 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   base_frame_ = get_parameter("base_frame").as_string();
   scan_topic_ = get_parameter("scan_topic").as_string();
   mapping_map_topic_ = get_parameter("mapping_map_topic").as_string();
-  localization_map_topic_ = get_parameter("localization_map_topic").as_string();
   static_map_topic_ = get_parameter("static_map_topic").as_string();
   slam_child_namespace_ = get_parameter("slam_child_namespace").as_string();
   tracked_lifecycle_nodes_ = get_parameter("tracked_lifecycle_nodes").as_string_array();
+  robot_id_ = strip(get_parameter("robot_id").as_string());
 
   const std::string rid = robot_id();
   if (odom_frame_.empty()) {
@@ -158,15 +158,11 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   if (mapping_map_topic_.empty()) {
     mapping_map_topic_ = std::string("/") + rid + "/mapping";
   }
-  // SLAM localization must not own /<robot>/map — that is map_server's static occupancy grid.
-  if (localization_map_topic_.empty()) {
-    localization_map_topic_ = std::string("/") + rid + "/slam_map";
-  }
   if (static_map_topic_.empty()) {
     static_map_topic_ = std::string("/") + rid + "/map";
   }
   if (slam_child_namespace_.empty()) {
-    slam_child_namespace_ = std::string("/") + rid + "/slam_bringup";
+    slam_child_namespace_ = std::string("/") + rid + "/slam";
   }
 
   client_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -180,29 +176,41 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   publish_timer_ = create_wall_timer(
     std::chrono::seconds(1),
     std::bind(&StackLifecycleManagerNode::publish_stack_lifecycle, this));
+  initial_slam_mode_ = lower(get_parameter("initial_slam_mode").as_string());
+  // Lifecycle service responses require this node's executor to be spinning.
+  // Starting map_server/SLAM in the constructor deadlocks until timeout because
+  // the node has not been added to the executor yet.
+  initial_start_timer_ = create_wall_timer(
+    std::chrono::milliseconds(100),
+    std::bind(&StackLifecycleManagerNode::start_initial_modules, this));
 
-  // Load static floor map whenever map_file (occupancy yaml) is provided, including mapping mode
-  // so /<robot>/map stays the saved map and is never overwritten by /mapping.
+  RCLCPP_INFO(
+    get_logger(),
+    "slam lifecycle manager ready (robot=%s mode=%s static_map=%s mapping=%s)",
+    rid.c_str(), slam_mode_.c_str(), static_map_topic_.c_str(), mapping_map_topic_.c_str());
+}
+
+void StackLifecycleManagerNode::start_initial_modules() {
+  if (initial_start_timer_) {
+    initial_start_timer_->cancel();
+  }
+  // Keep the saved static floor map available in both mapping and localization modes.
   if (!map_file_.empty()) {
     std::string map_err;
     if (!ensure_static_map_loaded(&map_err)) {
       RCLCPP_WARN(get_logger(), "static map load failed: %s", map_err.c_str());
     }
   }
-
-  const std::string initial = lower(get_parameter("initial_slam_mode").as_string());
-  if (!initial.empty() && initial != "inactive") {
+  if (!initial_slam_mode_.empty() && initial_slam_mode_ != "inactive") {
     std::string err;
-    if (!set_slam_mode(initial, &err)) {
-      RCLCPP_WARN(get_logger(), "initial_slam_mode=%s failed: %s", initial.c_str(), err.c_str());
+    if (!set_slam_mode(initial_slam_mode_, &err)) {
+      RCLCPP_WARN(
+        get_logger(), "initial_slam_mode=%s failed: %s",
+        initial_slam_mode_.c_str(), err.c_str());
     }
   }
-
-  RCLCPP_INFO(
-    get_logger(),
-    "stack_lifecycle_manager ready (robot=%s slam_mode=%s static_map=%s slam_map=%s mapping=%s)",
-    rid.c_str(), slam_mode_.c_str(), static_map_topic_.c_str(), localization_map_topic_.c_str(),
-    mapping_map_topic_.c_str());
+  initialization_complete_.store(true);
+  publish_stack_lifecycle();
 }
 
 StackLifecycleManagerNode::~StackLifecycleManagerNode() {
@@ -211,8 +219,15 @@ StackLifecycleManagerNode::~StackLifecycleManagerNode() {
 }
 
 std::string StackLifecycleManagerNode::robot_id() const {
+  if (!robot_id_.empty()) {
+    return robot_id_;
+  }
   const std::string leaf = leaf_namespace(get_namespace());
   return leaf.empty() ? std::string("robot") : leaf;
+}
+
+std::string StackLifecycleManagerNode::slam_node_fqn(const std::string & leaf) const {
+  return std::string("/") + robot_id() + "/slam/" + leaf;
 }
 
 std::string StackLifecycleManagerNode::resolve_lifecycle_node_fqn(const std::string & node_name) const {
@@ -227,10 +242,35 @@ std::string StackLifecycleManagerNode::resolve_lifecycle_node_fqn(const std::str
   return std::string("/") + rid + "/" + n;
 }
 
+rclcpp::Client<lifecycle_msgs::srv::GetState>::SharedPtr
+StackLifecycleManagerNode::get_state_client(const std::string & node_fqn) {
+  std::lock_guard<std::mutex> lock(lifecycle_clients_mutex_);
+  auto it = get_state_clients_.find(node_fqn);
+  if (it != get_state_clients_.end()) {
+    return it->second;
+  }
+  auto client = create_client<lifecycle_msgs::srv::GetState>(
+    node_fqn + "/get_state", rmw_qos_profile_services_default, client_cb_group_);
+  get_state_clients_[node_fqn] = client;
+  return client;
+}
+
+rclcpp::Client<lifecycle_msgs::srv::ChangeState>::SharedPtr
+StackLifecycleManagerNode::change_state_client(const std::string & node_fqn) {
+  std::lock_guard<std::mutex> lock(lifecycle_clients_mutex_);
+  auto it = change_state_clients_.find(node_fqn);
+  if (it != change_state_clients_.end()) {
+    return it->second;
+  }
+  auto client = create_client<lifecycle_msgs::srv::ChangeState>(
+    node_fqn + "/change_state", rmw_qos_profile_services_default, client_cb_group_);
+  change_state_clients_[node_fqn] = client;
+  return client;
+}
+
 std::string StackLifecycleManagerNode::query_lifecycle_state(const std::string & node_fqn) {
   try {
-    auto client = create_client<lifecycle_msgs::srv::GetState>(
-      node_fqn + "/get_state", rmw_qos_profile_services_default, client_cb_group_);
+    auto client = get_state_client(node_fqn);
     if (!client->wait_for_service(std::chrono::milliseconds(200))) {
       return "missing";
     }
@@ -263,8 +303,7 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
     }
     return false;
   }
-  auto client = create_client<lifecycle_msgs::srv::ChangeState>(
-    node_fqn + "/change_state", rmw_qos_profile_services_default, client_cb_group_);
+  auto client = change_state_client(node_fqn);
   if (!client->wait_for_service(std::chrono::seconds(3))) {
     if (err) {
       *err = "lifecycle service missing for " + node_fqn;
@@ -290,6 +329,25 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
   return true;
 }
 
+bool StackLifecycleManagerNode::navigation_active() {
+  if (!navigation_active_client_) {
+    navigation_active_client_ = create_client<std_srvs::srv::Trigger>(
+      resolve_lifecycle_node_fqn("lifecycle_manager_navigation") + "/is_active",
+      rmw_qos_profile_services_default,
+      client_cb_group_);
+  }
+  if (!navigation_active_client_->wait_for_service(std::chrono::milliseconds(100))) {
+    return false;
+  }
+  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+  auto future = navigation_active_client_->async_send_request(request);
+  if (!wait_future(future, std::chrono::milliseconds(300))) {
+    return false;
+  }
+  const auto response = future.get();
+  return response && response->success;
+}
+
 void StackLifecycleManagerNode::stop_map_server() {
   if (map_server_pid_ <= 0) {
     map_server_yaml_.clear();
@@ -312,24 +370,6 @@ void StackLifecycleManagerNode::stop_map_server() {
   waitpid(map_server_pid_, nullptr, 0);
   map_server_pid_ = -1;
   map_server_yaml_.clear();
-}
-
-std::string StackLifecycleManagerNode::resolve_posegraph_stem() const {
-  // slam_toolbox appends ".posegraph" / ".data" to map_file_name. Occupancy yaml is NOT a posegraph.
-  std::string stem = map_file_;
-  const auto slash = stem.find_last_of('/');
-  const std::string base = (slash == std::string::npos) ? stem : stem.substr(slash + 1);
-  const auto dot = base.find_last_of('.');
-  if (dot != std::string::npos) {
-    const std::string ext = lower(base.substr(dot));
-    if (ext == ".yaml" || ext == ".yml") {
-      stem = stem.substr(0, stem.size() - (base.size() - dot));
-    }
-  }
-  if (file_exists(stem + ".posegraph") && file_exists(stem + ".data")) {
-    return stem;
-  }
-  return {};
 }
 
 bool StackLifecycleManagerNode::start_map_server(std::string * err) {
@@ -413,22 +453,6 @@ bool StackLifecycleManagerNode::start_map_server(std::string * err) {
 
   const std::string fqn = resolve_lifecycle_node_fqn("map_server");
   std::string local_err;
-  // Wait until lifecycle services appear.
-  bool ready = false;
-  for (int i = 0; i < 50; ++i) {
-    auto client = create_client<lifecycle_msgs::srv::ChangeState>(
-      fqn + "/change_state", rmw_qos_profile_services_default, client_cb_group_);
-    if (client->wait_for_service(std::chrono::milliseconds(100))) {
-      ready = true;
-      break;
-    }
-  }
-  if (!ready) {
-    if (err) {
-      *err = "map_server lifecycle service not ready";
-    }
-    return false;
-  }
   if (!call_lifecycle_transition(fqn, "configure", &local_err)) {
     if (err) {
       *err = "map_server configure failed: " + local_err;
@@ -460,136 +484,91 @@ bool StackLifecycleManagerNode::ensure_static_map_loaded(std::string * err) {
 }
 
 void StackLifecycleManagerNode::stop_slam_child() {
-  if (slam_pid_ <= 0) {
-    return;
-  }
-  RCLCPP_INFO(get_logger(), "Stopping SLAM child pid=%d", slam_pid_);
-  kill(slam_pid_, SIGINT);
-  constexpr int max_wait_cycles = 50;
-  for (int i = 0; i < max_wait_cycles; ++i) {
-    int status = 0;
-    const pid_t ret = waitpid(slam_pid_, &status, WNOHANG);
-    if (ret == slam_pid_) {
-      slam_pid_ = -1;
-      return;
+  if (slam_pid_ > 0) {
+    RCLCPP_INFO(get_logger(), "Stopping GMapping pid=%d", slam_pid_);
+    kill(slam_pid_, SIGINT);
+    for (int i = 0; i < 50; ++i) {
+      if (waitpid(slam_pid_, nullptr, WNOHANG) == slam_pid_) {
+        slam_pid_ = -1;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    if (ret < 0) {
+    if (slam_pid_ > 0) {
+      kill(slam_pid_, SIGKILL);
+      waitpid(slam_pid_, nullptr, 0);
       slam_pid_ = -1;
-      return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-  kill(slam_pid_, SIGKILL);
-  waitpid(slam_pid_, nullptr, 0);
-  slam_pid_ = -1;
+  const std::string amcl = slam_node_fqn("localizing");
+  if (query_lifecycle_state(amcl) == "active") {
+    std::string err;
+    if (!call_lifecycle_transition(amcl, "deactivate", &err)) {
+      RCLCPP_ERROR(get_logger(), "failed to deactivate AMCL: %s", err.c_str());
+    }
+  }
 }
 
 bool StackLifecycleManagerNode::start_slam_child(const std::string & mode) {
   const std::string m = lower(mode);
-  std::string executable;
-  std::string params_file;
-  std::string child_node_name;
-  std::string slam_mode_param;
-  std::string map_name;
-
   if (m == "mapping" || m == "map") {
-    executable = "sync_slam_toolbox_node";
-    params_file = mapper_params_file_;
-    child_node_name = "mapping_worker";
-    slam_mode_param = "mapping";
-    map_name = mapping_map_topic_;
-  } else if (m == "localize" || m == "localization" || m == "localizing") {
-    executable = "localization_slam_toolbox_node";
-    params_file = localization_params_file_;
-    child_node_name = "localization_worker";
-    slam_mode_param = "localization";
-    map_name = localization_map_topic_;
-    // Occupancy yaml is loaded by map_server onto static_map_topic_; slam must not claim /map.
-    if (map_file_.empty()) {
-      RCLCPP_ERROR(get_logger(), "localize mode requires map_file (occupancy yaml) parameter");
+    std::string exec_path;
+    try {
+      exec_path = ament_index_cpp::get_package_prefix("slam_gmapping") +
+        "/lib/slam_gmapping/slam_gmapping";
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(get_logger(), "resolve slam_gmapping: %s", e.what());
       return false;
     }
-    std::string map_err;
-    if (!ensure_static_map_loaded(&map_err)) {
-      RCLCPP_ERROR(get_logger(), "localize: static map load failed: %s", map_err.c_str());
+    const std::string rid = robot_id();
+    std::vector<std::string> args = {
+      exec_path, "--ros-args",
+      "-r", "__node:=mapping", "-r", "__ns:=/" + rid + "/slam",
+      "-r", "scan:=" + scan_topic_, "-r", "map:=" + mapping_map_topic_,
+      "-p", "use_sim_time:=" + std::string(use_sim_time_ ? "true" : "false"),
+      "-p", "base_frame:=" + base_frame_, "-p", "odom_frame:=" + odom_frame_,
+      "-p", "map_frame:=" + map_frame_};
+    if (!mapper_params_file_.empty()) {
+      args.insert(args.end(), {"--params-file", mapper_params_file_});
+    }
+    std::vector<char *> argv;
+    for (auto & arg : args) { argv.push_back(const_cast<char *>(arg.c_str())); }
+    argv.push_back(nullptr);
+    const pid_t pid = fork();
+    if (pid < 0) { return false; }
+    if (pid == 0) { execv(argv[0], argv.data()); _exit(127); }
+    slam_pid_ = pid;
+    slam_mode_ = "mapping";
+    RCLCPP_INFO(get_logger(), "GMapping active pid=%d", slam_pid_);
+    return true;
+  }
+  if (m != "localize" && m != "localization" && m != "localizing") {
+    return false;
+  }
+  if (map_file_.empty()) {
+    RCLCPP_ERROR(get_logger(), "AMCL localization requires map_file");
+    return false;
+  }
+  std::string err;
+  if (!ensure_static_map_loaded(&err)) {
+    RCLCPP_ERROR(get_logger(), "AMCL map load failed: %s", err.c_str());
+    return false;
+  }
+  const std::string amcl = slam_node_fqn("localizing");
+  std::string state = query_lifecycle_state(amcl);
+  if (state == "unconfigured") {
+    if (!call_lifecycle_transition(amcl, "configure", &err)) {
+      RCLCPP_ERROR(get_logger(), "configure AMCL: %s", err.c_str());
       return false;
     }
-  } else {
+    state = "inactive";
+  }
+  if (state != "active" && !call_lifecycle_transition(amcl, "activate", &err)) {
+    RCLCPP_ERROR(get_logger(), "activate AMCL: %s", err.c_str());
     return false;
   }
-
-  if (params_file.empty()) {
-    RCLCPP_ERROR(get_logger(), "SLAM params_file is empty for mode=%s", m.c_str());
-    return false;
-  }
-
-  std::string exec_path;
-  try {
-    exec_path = ament_index_cpp::get_package_prefix("slam_toolbox") + "/lib/slam_toolbox/" + executable;
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "slam_toolbox path: %s", e.what());
-    return false;
-  }
-  if (access(exec_path.c_str(), X_OK) != 0) {
-    RCLCPP_ERROR(get_logger(), "SLAM executable missing: %s", exec_path.c_str());
-    return false;
-  }
-
-  std::vector<std::string> args = {
-    exec_path,
-    "--ros-args",
-    "-r", "__node:=" + child_node_name,
-    "-r", "__ns:=" + slam_child_namespace_,
-    "--params-file", params_file,
-    "-p", "use_sim_time:=" + std::string(use_sim_time_ ? "true" : "false"),
-    "-p", "mode:=" + slam_mode_param,
-    "-p", "map_frame:=" + map_frame_,
-    "-p", "odom_frame:=" + odom_frame_,
-    "-p", "base_frame:=" + base_frame_,
-    "-p", "scan_topic:=" + scan_topic_,
-    "-p", "map_name:=" + map_name,
-  };
-  if (m != "mapping" && m != "map") {
-    const std::string posegraph = resolve_posegraph_stem();
-    if (!posegraph.empty()) {
-      args.push_back("-p");
-      args.push_back("map_file_name:=" + posegraph);
-      RCLCPP_INFO(get_logger(), "localize: loading slam posegraph stem %s", posegraph.c_str());
-    } else {
-      RCLCPP_WARN(
-        get_logger(),
-        "localize: no .posegraph/.data beside map_file; slam will not deserialize occupancy yaml "
-        "(static map is on %s via map_server)",
-        static_map_topic_.c_str());
-    }
-    // task_manager / Web publish PoseWithCovarianceStamped on /<robot>/initial;
-    // slam_toolbox localization listens to relative topic "initialpose".
-    args.push_back("-r");
-    args.push_back("initialpose:=" + std::string("/") + robot_id() + "/initial");
-  }
-
-  std::vector<char *> argv;
-  argv.reserve(args.size() + 1);
-  for (auto & item : args) {
-    argv.push_back(const_cast<char *>(item.c_str()));
-  }
-  argv.push_back(nullptr);
-
-  const pid_t pid = fork();
-  if (pid < 0) {
-    RCLCPP_ERROR(get_logger(), "fork() failed");
-    return false;
-  }
-  if (pid == 0) {
-    execv(argv[0], argv.data());
-    _exit(127);
-  }
-
-  slam_pid_ = pid;
-  slam_mode_ = (m == "mapping" || m == "map") ? "mapping" : "localize";
-  RCLCPP_INFO(
-    get_logger(), "Started SLAM %s pid=%d node=%s ns=%s",
-    slam_mode_.c_str(), slam_pid_, child_node_name.c_str(), slam_child_namespace_.c_str());
+  slam_mode_ = "localize";
+  RCLCPP_INFO(get_logger(), "AMCL localization active");
   return true;
 }
 
@@ -600,7 +579,8 @@ bool StackLifecycleManagerNode::set_slam_mode(const std::string & mode, std::str
     slam_mode_ = "inactive";
     return true;
   }
-  if (m == slam_mode_ && slam_pid_ > 0) {
+  if (m == slam_mode_ && ((m == "mapping" && slam_pid_ > 0) ||
+      (m != "mapping" && query_lifecycle_state(slam_node_fqn("localizing")) == "active"))) {
     return true;
   }
   stop_slam_child();
@@ -644,26 +624,25 @@ void StackLifecycleManagerNode::handle_transition(
 }
 
 void StackLifecycleManagerNode::publish_stack_lifecycle() {
+  if (!initialization_complete_.load()) {
+    return;
+  }
   try {
     custom_msgs_srvs::msg::StackLifecycle msg;
     msg.header.stamp = now();
     msg.robot_id = robot_id();
 
-    custom_msgs_srvs::msg::StackComponentState slam;
-    slam.name = "slam";
-    if (slam_pid_ > 0) {
-      slam.state = slam_mode_;
-    } else {
-      slam.state = "inactive";
-    }
-    msg.components.push_back(slam);
+    custom_msgs_srvs::msg::StackComponentState localization;
+    localization.name = "localization";
+    const bool localization_running =
+      query_lifecycle_state(slam_node_fqn("localizing")) == "active";
+    localization.state = localization_running ? "active" : "inactive";
+    msg.components.push_back(localization);
 
-    for (const auto & short_name : tracked_lifecycle_nodes_) {
-      custom_msgs_srvs::msg::StackComponentState comp;
-      comp.name = short_name;
-      comp.state = query_lifecycle_state(resolve_lifecycle_node_fqn(short_name));
-      msg.components.push_back(comp);
-    }
+    custom_msgs_srvs::msg::StackComponentState navigation;
+    navigation.name = "navigation";
+    navigation.state = navigation_active() ? "active" : "inactive";
+    msg.components.push_back(navigation);
 
     stack_pub_->publish(msg);
   } catch (const std::exception & e) {

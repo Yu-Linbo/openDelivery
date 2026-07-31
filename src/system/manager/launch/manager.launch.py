@@ -1,4 +1,4 @@
-"""health_monitor + task_manager + stack_lifecycle_manager (same namespace as heartbeat)."""
+"""Robot managers plus /<robot>/slam/{mapping,localizing,lifecycle_manager}."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction
@@ -22,6 +22,7 @@ def _slam_params(context, *args, **kwargs):
     return [
         {
             "use_sim_time": use_sim,
+            "robot_id": ns,
             "mapper_params_file": mapper,
             "localization_params_file": localize,
             "map_file": map_file,
@@ -30,10 +31,8 @@ def _slam_params(context, *args, **kwargs):
             "base_frame": f"{ns}/base_footprint",
             "scan_topic": f"/{ns}/scan_2d",
             "mapping_map_topic": f"/{ns}/mapping",
-            # SLAM scan-built grid (must not collide with map_server on /map)
-            "localization_map_topic": f"/{ns}/slam_map",
             "static_map_topic": f"/{ns}/map",
-            "slam_child_namespace": f"/{ns}/slam_bringup",
+            "slam_child_namespace": f"/{ns}/slam",
             "initial_slam_mode": initial,
             "tracked_lifecycle_nodes": [
                 "heartbeat",
@@ -46,11 +45,32 @@ def _slam_params(context, *args, **kwargs):
 
 def _launch_setup(context, *args, **kwargs):
     slam_params = _slam_params(context)[0]
+    ns = slam_params["robot_id"]
     return [
+        Node(
+            package="nav2_amcl",
+            executable="amcl",
+            name="localizing",
+            namespace="slam",
+            output="screen",
+            parameters=[slam_params["localization_params_file"], {
+                "use_sim_time": slam_params["use_sim_time"],
+                "base_frame_id": slam_params["base_frame"],
+                "odom_frame_id": slam_params["odom_frame"],
+                "global_frame_id": "map",
+            }],
+            remappings=[
+                ("scan", slam_params["scan_topic"]),
+                ("map", slam_params["static_map_topic"]),
+                ("initialpose", f"/{ns}/initial"),
+                ("amcl_pose", f"/{ns}/amcl_pose"),
+            ],
+        ),
         Node(
             package="manager",
             executable="stack_lifecycle_manager_node",
-            name="stack_lifecycle_manager",
+            name="lifecycle_manager",
+            namespace="slam",
             output="screen",
             parameters=[slam_params],
         )
@@ -96,8 +116,7 @@ def generate_launch_description():
                 default_value="",
                 description=(
                     "Occupancy grid yaml for map_server → /<ns>/map. "
-                    "Also required for initial_slam_mode:=localize. "
-                    "Posegraph (optional) is <stem>.posegraph/.data beside the yaml."
+                    "Required for initial_slam_mode:=localize."
                 ),
             ),
             DeclareLaunchArgument(
@@ -122,6 +141,7 @@ def generate_launch_description():
                                 "required_nodes": ["heartbeat"],
                             }
                         ],
+                        remappings=[("stack_lifecycle", "slam/stack_lifecycle")],
                     ),
                     Node(
                         package="manager",
@@ -137,6 +157,7 @@ def generate_launch_description():
                                 "required_nodes": ["heartbeat", "bt_navigator"],
                             }
                         ],
+                        remappings=[("stack_lifecycle", "slam/stack_lifecycle")],
                     ),
                     Node(
                         package="manager",

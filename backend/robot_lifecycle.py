@@ -10,8 +10,8 @@ Per-robot stack orchestration for the web console.
 - **仿真离线**：向 ``/<robot>/set_heartbeat_params`` 写入 ``robot_status=shutdown``，供各节点订阅
   ``/<robot>/robot_status`` 后自行收尾；再对 navigation / heartbeat 做 best-effort lifecycle shutdown，
   最后 ``pause`` 各托管项（已废弃 ``sim_shutdown.sh``）。
-- ``heartbeat`` / ``navigation``：经 ``set_stack_lifecycle_transition`` 驱动标准 Lifecycle；
-  ``slam``：同一服务切换模式（``mapping`` / ``localize`` / ``inactive``），由 ``stack_lifecycle_manager`` fork ``slam_toolbox``。
+- ``heartbeat`` / ``navigation``：经生命周期接口管理；
+  ``slam``：由 ``/<robot>/slam/lifecycle_manager`` 在 ``mapping`` 和 ``localizing`` 两个 Lifecycle 节点之间切换。
 """
 
 import os
@@ -72,7 +72,7 @@ class RobotLifecycleOrchestrator:
         if not rid or not nn or not tr:
             raise ValueError("robot_id, node_name and transition are required")
         cmd = (
-            f"ros2 service call /{rid}/set_stack_lifecycle_transition "
+            f"ros2 service call /{rid}/slam/set_stack_lifecycle_transition "
             f"custom_msgs_srvs/srv/SetStackLifecycleTransition "
             f"'{{node_name: \"{nn}\", transition: \"{tr}\"}}'"
         )
@@ -93,10 +93,10 @@ class RobotLifecycleOrchestrator:
                 "transitions": ["start", "shutdown"],
             },
             {
-                "id": "stack_lifecycle_manager",
-                "label_zh": "栈生命周期",
+                "id": "slam_lifecycle_manager",
+                "label_zh": "SLAM 生命周期",
                 "type": "stack_manager",
-                "node": f"/{rid}/stack_lifecycle_manager",
+                "node": f"/{rid}/slam/lifecycle_manager",
                 "transitions": [],
             },
             {
@@ -110,7 +110,7 @@ class RobotLifecycleOrchestrator:
                 "id": "slam",
                 "label_zh": "SLAM",
                 "type": "slam_mode",
-                "node": f"/{rid}/stack_lifecycle_manager",
+                "node": f"/{rid}/slam/lifecycle_manager",
                 "transitions": ["mapping", "localize", "inactive"],
             },
             {
@@ -515,22 +515,29 @@ class RobotLifecycleOrchestrator:
                     running = bool(mn and mn.get("running"))
                     lifecycle_state = "active" if running else "unconfigured"
                 elif ctype == "slam_mode":
-                    slam_ns = f"/{rid}/slam_bringup"
+                    slam_ns = f"/{rid}/slam"
                     running = any(
                         n in discovered_names
                         for n in (
-                            f"{slam_ns}/mapping_worker",
-                            f"{slam_ns}/localization_worker",
+                            f"{slam_ns}/mapping",
+                            f"{slam_ns}/localizing",
                         )
                     )
                     with self._lock:
                         lifecycle_state = str(
                             self._state.get(rid, {}).get("slam_mode") or "inactive"
                         )
-                    if running and lifecycle_state == "inactive":
-                        lifecycle_state = "mapping" if f"{slam_ns}/mapping_worker" in discovered_names else "localize"
+                    if running:
+                        mapping_present = f"{slam_ns}/mapping" in discovered_names
+                        localizing_state = self._lifecycle_get(f"{slam_ns}/localizing").get("state")
+                        if mapping_present:
+                            lifecycle_state = "mapping"
+                        elif localizing_state == "active":
+                            lifecycle_state = "localize"
+                        elif lifecycle_state not in ("mapping", "localize"):
+                            lifecycle_state = "inactive"
                 elif ctype == "stack_manager":
-                    running = f"/{rid}/stack_lifecycle_manager" in discovered_names
+                    running = f"/{rid}/slam/lifecycle_manager" in discovered_names
                     lifecycle_state = "active" if running else "missing"
                 elif node:
                     nn = _norm_ros_name(str(node))

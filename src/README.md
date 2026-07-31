@@ -2,7 +2,7 @@
 
 本目录为 **ROS 2** 工作区源码根（与历史 **ROS 1 / catkin**、`ud_*` 命名工程无关）。当前路线：
 
-- **SLAM**：`slam_toolbox`（建图 / 定位）
+- **SLAM**：GMapping + AMCL（建图 / 定位）
 - **导航**：`nav2` + `nav2_map_server`（规划与加载地图，按需接入）
 - **不再使用**：RTAB-Map
 
@@ -28,8 +28,8 @@
 
 | 包名 | 路径 | 功能简述 |
 |------|------|----------|
-| **slam_toolbox** | `slam/slam_toolbox/` | 上游 **Karto 2D SLAM** 源码（Foxy 用 `foxy-devel`）：同步/异步建图、定位、地图保存与序列化；发布 `OccupancyGrid` 与 **`map` → `odom` TF**。由 **`manager/stack_lifecycle_manager`** fork 子进程启动。 |
-| **karto_sdk** | `slam/slam_toolbox/lib/karto_sdk/` | **OpenKarto** 扫描匹配与位姿图库，`slam_toolbox` 的底层依赖（随源码一并编译）。 |
+| **slam_gmapping** | `slam/slam_gmapping/slam_gmapping/` | GMapping ROS 2 节点；建图时发布 OccupancyGrid 和 `map→odom`。 |
+| **openslam_gmapping** | `slam/slam_gmapping/openslam_gmapping/` | OpenSLAM GMapping 算法库。 |
 
 SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_params.yaml`。
 
@@ -86,7 +86,7 @@ map
 
 `→` 表示从父到子的链。URDF 中常见 **`robotN/odom` → `robotN/base_footprint` → `robotN/base_link`**；桥在说明里常写到 `base_link` 为止。多机时帧名带 **`robotN/`** 前缀，与 `/*/robot_status` 动态发现一致。
 
-**与仿真的分工（两棵 TF 树）**：**`map`** 及 **`map` → `odom`** 由 **SLAM**（`stack_lifecycle_manager` + `slam_toolbox`）维护；**Gazebo `simulate.launch.py` 只发布里程计树 **`robotN/odom` → … → `robotN/base_link`**，**不**发布 `map`，也不在仿真里做 `map→odom` 静态 TF。联调全栈时再同时起 SLAM 与仿真，由 SLAM 把 `map` 接到各机器人 `odom`。
+**与仿真的分工（两棵 TF 树）**：**`map`** 及 **`map` → `odom`** 由 **SLAM**（`stack_lifecycle_manager` + GMapping + AMCL）维护；**Gazebo `simulate.launch.py` 只发布里程计树 **`robotN/odom` → … → `robotN/base_link`**，**不**发布 `map`，也不在仿真里做 `map→odom` 静态 TF。联调全栈时再同时起 SLAM 与仿真，由 SLAM 把 `map` 接到各机器人 `odom`。
 
 ---
 
@@ -98,7 +98,7 @@ map
 
 ## 4. 节点命名（约定）
 
-在 **`/<robot_name>/`** 下：单节点包用 **包名** 作为节点名（如 `/robot2/heartbeat`）；SLAM worker 在 **`/<robot_name>/slam_bringup/mapping_worker`** 或 **`localization_worker`**；栈管理为 **`/<robot_name>/stack_lifecycle_manager`**。
+在 **`/<robot_name>/`** 下：单节点包用 **包名** 作为节点名（如 `/robot2/heartbeat`）；SLAM worker 在 **`/<robot_name>/slam/mapping`** 或 **`localizing`**；栈管理为 **`/<robot_name>/slam/lifecycle_manager`**。
 
 ---
 
@@ -122,19 +122,19 @@ map
 | **`/<R>/heartbeat`**（Lifecycle） | 周期发布 **`/<R>/robot_status`**（`RobotStatus`）；提供 **`/<R>/set_heartbeat_params`** 服务 |
 | **`/<R>/health_monitor`** | 监视必要节点与可选定位话题，推进 **`robot_status`** |
 | **`/<R>/task_manager`** | **`set_robot_task`**、**`localize_nav_command`** 等任务接口 |
-| **`/<R>/stack_lifecycle_manager`** | **栈生命周期**：SLAM 模式切换；代理 **`set_stack_lifecycle_transition`** 驱动 heartbeat / Nav2 等 Lifecycle 节点；发布 **`/<R>/stack_lifecycle`** |
+| **`/<R>/slam/lifecycle_manager`** | **栈生命周期**：SLAM 模式切换；代理 **`set_stack_lifecycle_transition`** 驱动 heartbeat / Nav2 等 Lifecycle 节点；发布 **`/<R>/stack_lifecycle`** |
 
 ### 5.3 SLAM（由 `stack_lifecycle_manager` 管理）
 
 | 节点 | 作用 |
 |------|------|
-| **`/<R>/slam_bringup/mapping_worker`** | **建图**（`sync_slam_toolbox_node`）：发布 **`/<R>/mapping`** 与 **`map`→`/<R>/odom` TF |
-| **`/<R>/slam_bringup/localization_worker`** | **定位**（`localization_slam_toolbox_node`）：发布 **`/<R>/map`** 与定位 TF；与 mapping **二选一** |
+| **`/<R>/slam/mapping`** | **建图**（`slam_gmapping`）：发布 **`/<R>/mapping`** 与 **`map`→`/<R>/odom` TF |
+| **`/<R>/slam/localizing`** | **定位**（`nav2_amcl`）：发布 **`/<R>/map`** 与定位 TF；与 mapping **二选一** |
 
 切换示例：
 
 ```bash
-ros2 service call /robot2/set_stack_lifecycle_transition \
+ros2 service call /robot2/slam/set_stack_lifecycle_transition \
   custom_msgs_srvs/srv/SetStackLifecycleTransition "{node_name: slam, transition: mapping}"
 ```
 
@@ -175,12 +175,12 @@ source /opt/ros/$ROS_DISTRO/setup.bash
 colcon build --symlink-install --packages-up-to simulate manager
 # 含心跳、栈管理、Nav2 bringup、log_bag（依赖会一并解析）：
 # colcon build --symlink-install --packages-up-to heartbeat nav_bringup log_bag
-# 若包含 slam_toolbox 源码：
-# colcon build --symlink-install --packages-select slam_toolbox simulate manager
+# GMapping 源码与 manager：
+# colcon build --symlink-install --packages-up-to slam_gmapping manager
 source install/setup.bash
 ```
 
-**源码构建 `slam_toolbox` 时**常见系统依赖（Foxy 示例）：`libceres-dev`、`ros-foxy-bondcpp`；仿真另需：`ros-foxy-gazebo-ros-pkgs`、`ros-foxy-xacro`、`ros-foxy-robot-state-publisher`。
+定位依赖系统包 `ros-foxy-nav2-amcl`；仿真另需：`ros-foxy-gazebo-ros-pkgs`、`ros-foxy-xacro`、`ros-foxy-robot-state-publisher`。
 
 ---
 
@@ -277,7 +277,7 @@ sudo apt-get install -y ros-foxy-gazebo-ros-pkgs ros-foxy-xacro ros-foxy-robot-s
 sudo apt-get install -y ros-foxy-nav2-map-server
 ```
 
-从源码编译 `slam_toolbox` 时，请使用与发行版匹配的分支（如 Foxy：**`foxy-devel`**），并安装 `libceres-dev`、`ros-foxy-bondcpp` 等。
+GMapping 源码已包含在工作区；定位使用系统包 `ros-foxy-nav2-amcl`。
 
 ### 8.4 故障排除
 
@@ -312,7 +312,7 @@ ros2 launch simulate test.launch.py
 
 `fake_pub` 不属于本包：见 **`params/launch/fake/fake_pub.launch.py`**（`bringup_launch/fake/fake_pub.launch.py`）。
 
-### 8.6 联动 slam_toolbox 建图 / 定位
+### 8.6 联动 GMapping + AMCL 建图 / 定位
 
 ```bash
 ros2 launch manager manager.launch.py namespace:=robot2 initial_slam_mode:=mapping
@@ -329,4 +329,4 @@ ros2 launch manager manager.launch.py namespace:=robot2 initial_slam_mode:=mappi
 ## 10. 其它文档
 
 - 工作区总览：`../README.md`
-- 上游 **`slam_toolbox`** 包内说明：`slam/slam_toolbox/README.md`（第三方）
+- 上游 **GMapping + AMCL** 包内说明：`slam/slam_gmapping/README.md`（第三方）

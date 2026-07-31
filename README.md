@@ -4,12 +4,12 @@ ROS 2 工作区：源码在 `src/`，构建产物在 `build/`、`install/`（已
 
 ## 技术路线
 
-- **建图与定位**：`slam_toolbox`
+- **建图与定位**：GMapping + AMCL
 - **导航**：`nav2`（Navigation2）
 - **地图加载**：`nav2_map_server`（`map_server`）
 - **不再使用**：RTAB-Map
 
-以**源码方式**组织依赖（如 `slam_toolbox`），便于二次开发与调试。
+GMapping 以项目内源码维护，AMCL 使用 ROS 2 Foxy 的 `nav2_amcl` 系统包。
 
 ## 单机节点一览（仿真上线）
 
@@ -19,7 +19,7 @@ ROS 2 工作区：源码在 `src/`，构建产物在 `build/`、`install/`（已
 
 | 层级 | 谁 | 管什么 |
 |------|-----|--------|
-| **整机开机 / 模式** | `sim_bringup` + `stack_lifecycle_manager` + Nav2 `lifecycle_manager_navigation` | 起进程、mapping/localize、导航栈 configure→activate |
+| **整机开机 / 模式** | `sim_bringup` + `slam/lifecycle_manager` + Nav2 `lifecycle_manager_navigation` | 起进程、mapping/localize、导航栈 configure→activate |
 | **业务任务 / 多任务** | `task_manager`、`health_monitor`、心跳 `robot_status` / `task_status`、Web | 切图、重定位、建图/空闲、就绪判定 |
 | **单次导航执行** | `bt_navigator` + BT XML | 一个 NavigateToPose：规划→跟踪→恢复 |
 
@@ -30,7 +30,7 @@ ROS 2 工作区：源码在 `src/`，构建产物在 `build/`、`install/`（已
 ```text
 sim_bringup / launch
     ├── heartbeat                    ← Lifecycle
-    ├── stack_lifecycle_manager      ← 整机级：SLAM 模式 + 跟踪 heartbeat / nav lifecycle
+    ├── slam/lifecycle_manager      ← 整机级：SLAM 模式 + 跟踪 heartbeat / nav lifecycle
     └── lifecycle_manager_navigation ← 导航子系统：controller / planner / BT / costmap …
               └── bt_navigator       ← 单次导航 BT
 ```
@@ -47,10 +47,10 @@ sim_bringup / launch
 | **Manager** | |
 | `health_monitor` | 看心跳与位姿协方差，推进 localizing→ready；采纳重定位后的 localization_lost |
 | `task_manager` | 订阅 `localize_nav_command` / `set_robot_task`；写心跳；发布 `/robot2/initial` 初值位姿 |
-| `stack_lifecycle_manager` | 整机级：切换 SLAM mapping/localize/inactive；跟踪 heartbeat 与导航 lifecycle 状态 |
+| `slam/lifecycle_manager` | 整机级：切换 SLAM mapping/localize/inactive；跟踪 heartbeat 与导航 lifecycle 状态 |
 | **SLAM（同时只跑一种）** | |
-| `slam_bringup/mapping_worker` | `slam_toolbox` 建图；出 `/robot2/mapping` 与 `map→odom` |
-| `slam_bringup/localization_worker` | `slam_toolbox` 定位；出 `/robot2/map` 与 `map→odom`；听 `/robot2/initial`（remap 自 `initialpose`） |
+| `slam/mapping` | GMapping 建图；出 `/robot2/mapping` 与 `map→odom` |
+| `slam/localizing` | AMCL 定位；出 `/robot2/map` 与 `map→odom`；听 `/robot2/initial`（remap 自 `initialpose`） |
 | **仿真本体** | |
 | `simulate/robot_state_publisher` | 由 URDF 发布 `robot2/*` 连杆 TF |
 | `simulate/spawn_entity` | 一次性把模型刷进 Gazebo（短生命周期） |
@@ -90,13 +90,7 @@ sim_bringup / launch
 
 ## 源码依赖
 
-`slam_toolbox` 以 Git submodule 固定版本，克隆工作区后初始化：
-
-```bash
-git submodule update --init --recursive
-```
-
-当前 submodule 使用 Foxy 对应的 `foxy-devel` 分支，并由父仓库 gitlink 固定实际提交。
+GMapping 源码位于 `src/slam/slam_gmapping`，基于 ROS 2 `eloquent-devel` 端口并补充多机器人 frame 参数。
 Nav2 使用系统 ROS 安装提供的包，不需要把 Navigation2 源码复制到本工作区。
 
 ## 仿真与 SLAM 联调（简要）

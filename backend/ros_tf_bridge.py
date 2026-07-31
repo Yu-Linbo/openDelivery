@@ -405,10 +405,11 @@ class OpenDeliveryTfBridgeNode(Node):
             not in ("0", "false", "no")
         ):
             scan_topic = str(spec.get("scan_2d_topic") or f"/{rid}{scan_suffix}")
+            base_frame = str(spec.get("base_frame") or f"{rid}/base_link")
             self._sub_scan[rid] = self.create_subscription(
                 LaserScan,
                 scan_topic,
-                self._make_scan_cb(rid, mf),
+                self._make_scan_cb(rid, base_frame),
                 10,
             )
             self.get_logger().info(f"subscribing LaserScan on {scan_topic}")
@@ -464,12 +465,22 @@ class OpenDeliveryTfBridgeNode(Node):
             if ros_map_store.get_snapshot(rid):
                 self._mapping_latch_attempts.pop(rid, None)
                 continue
+            topic = self._mapping_topic_by_rid.get(rid)
+            if not topic:
+                continue
+            try:
+                publisher_count = self.count_publishers(topic)
+            except Exception:  # noqa: BLE001
+                publisher_count = 0
+            if publisher_count <= 0:
+                # Localize mode normally has no /<robot>/mapping publisher. Keep
+                # the subscription ready, but do not churn it or consume retry
+                # attempts until a mapper actually appears.
+                self._mapping_latch_attempts.pop(rid, None)
+                continue
             attempts = self._mapping_latch_attempts.get(rid, 0) + 1
             self._mapping_latch_attempts[rid] = attempts
             if attempts > max_attempts:
-                continue
-            topic = self._mapping_topic_by_rid.get(rid)
-            if not topic:
                 continue
             self.get_logger().info(
                 f"re-subscribing OccupancyGrid on {topic} "
@@ -728,44 +739,6 @@ class OpenDeliveryTfBridgeNode(Node):
         self.get_logger().info(
             f"publish localize_nav_command {rid} map={map_name!r} set_initial_pose={set_pose}"
         )
-        # Sim: also teleport Gazebo entity. Occupancy-only maps have no slam posegraph,
-        # so /initial alone may not move TF; set_model_state updates the physical robot.
-        if set_pose:
-            self._maybe_gazebo_teleport_on_reloc(rid, msg.x, msg.y, msg.yaw)
-
-    def _maybe_gazebo_teleport_on_reloc(
-        self, rid: str, x: float, y: float, yaw: float
-    ) -> None:
-        status = self._robot_status_payload_by_id.get(rid) or {}
-        if not bool(status.get("is_simulation", False)):
-            return
-        try:
-            from gazebo_set_state_client import try_set_model_state_fast
-        except ImportError:
-            try:
-                from backend.gazebo_set_state_client import try_set_model_state_fast
-            except ImportError:
-                self.get_logger().warning("gazebo_set_state_client unavailable; skip sim teleport")
-                return
-        try:
-            result = try_set_model_state_fast(
-                model_name=rid,
-                x=float(x),
-                y=float(y),
-                z=0.05,
-                yaw=float(yaw),
-                reference_frame="world",
-            )
-            if result and result.get("ok"):
-                self.get_logger().info(
-                    f"gazebo teleport {rid} -> ({x:.3f}, {y:.3f}, yaw={yaw:.4f})"
-                )
-            else:
-                self.get_logger().warning(
-                    f"gazebo teleport {rid} skipped/failed (service down or model missing)"
-                )
-        except Exception as ex:  # noqa: BLE001
-            self.get_logger().warning(f"gazebo teleport {rid} error: {ex}")
 
     def _handle_web_command(self, cmd: Dict[str, Any]) -> None:
         ctype = str(cmd.get("type") or "").strip()
@@ -924,14 +897,14 @@ class OpenDeliveryTfBridgeNode(Node):
         except Exception:  # noqa: BLE001
             return
 
-    def _make_scan_cb(self, rid: str, map_frame: str):
+    def _make_scan_cb(self, rid: str, base_frame: str):
         stride = max(1, int(os.environ.get("ROS_SCAN_STRIDE", "3")))
         max_hits = max(50, int(os.environ.get("ROS_SCAN_MAX_HITS", "400")))
 
         def _cb(msg: LaserScan) -> None:
             try:
                 tr = self._buffer.lookup_transform(
-                    map_frame,
+                    base_frame,
                     msg.header.frame_id,
                     Time(),
                     timeout=Duration(seconds=0.05),
@@ -962,13 +935,14 @@ class OpenDeliveryTfBridgeNode(Node):
                 a = float(msg.angle_min + i * msg.angle_increment)
                 lx = rng * math.cos(a)
                 ly = rng * math.sin(a)
-                wx = cos_y * lx - sin_y * ly + tx
-                wy = sin_y * lx + cos_y * ly + ty
-                hits.append([round(wx, 3), round(wy, 3)])
+                bx = cos_y * lx - sin_y * ly + tx
+                by = sin_y * lx + cos_y * ly + ty
+                hits.append([round(bx, 3), round(by, 3)])
             ros_sensor_store.set_scan(
                 rid,
                 {
-                    "frame_id": map_frame,
+                    "frame_id": base_frame,
+                    "coordinates": "robot_base",
                     "origin": [round(tx, 3), round(ty, 3)],
                     "hits": hits,
                 },

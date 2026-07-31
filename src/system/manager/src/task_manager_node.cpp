@@ -245,24 +245,8 @@ void TaskManagerNode::on_localize_nav(
     return;
   }
 
-  // 1) task idle (mapping off)
-  if (!send_heartbeat("", "idle", "")) {
-    RCLCPP_ERROR(get_logger(), "localize_nav: failed to set task idle");
-    return;
-  }
-  // 2) current_map (切图)
-  if (!map.empty()) {
-    if (!send_heartbeat("", "", map)) {
-      RCLCPP_ERROR(get_logger(), "localize_nav: failed to set current_map");
-      return;
-    }
-  }
-  // 3) localization lost (health_monitor will drive -> ready from pose topic)
-  if (!send_heartbeat("localization_lost", "", "")) {
-    RCLCPP_ERROR(get_logger(), "localize_nav: failed to set robot_status localization_lost");
-    return;
-  }
-  // 4) initial pose for AMCL / stack
+  // The localization pose is authoritative. AMCL replaces its old
+  // localization buffer and processes the next scan around this pose.
   if (msg->set_initial_pose && initial_pub_) {
     geometry_msgs::msg::PoseWithCovarianceStamped pose;
     pose.header.stamp = now();
@@ -284,6 +268,22 @@ void TaskManagerNode::on_localize_nav(
       get_logger(),
       "localize_nav: published initial pose x=%.3f y=%.3f yaw=%.4f",
       msg->x, msg->y, yaw);
+  }
+
+  // State publication is best-effort metadata and happens after the pose so
+  // service delays or failures cannot postpone localization.
+  if (!send_heartbeat("", "idle", "")) {
+    RCLCPP_WARN(get_logger(), "localize_nav: failed to set task idle; continuing");
+  }
+  if (!map.empty()) {
+    if (!send_heartbeat("", "", map)) {
+      RCLCPP_WARN(get_logger(), "localize_nav: failed to set current_map; continuing");
+    }
+  }
+  if (!send_heartbeat("localization_lost", "", "")) {
+    RCLCPP_WARN(
+      get_logger(),
+      "localize_nav: failed to set robot_status localization_lost; continuing");
   }
 
   RCLCPP_INFO(get_logger(), "localize_nav_command applied for %s", rid.c_str());

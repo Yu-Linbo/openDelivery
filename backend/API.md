@@ -56,6 +56,9 @@ These endpoints are used by `web/app.js`.
   - Body: `{ "map_name": "...", "robot_id": "robot2" }`
   - Purpose: save current mapping result.
 
+- `GET /api/robot/{robot_id}/detail`
+  - Purpose: read-only robot detail payload: status, robot-scoped ROS nodes, process CPU/memory and log summary.
+
 - `GET /api/robot/{robot_id}/scan_2d`
   - Purpose: current 2D scan overlay. Returns HTTP 200 with `available: false` until data arrives.
 

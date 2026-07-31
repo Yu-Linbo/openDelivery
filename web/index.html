@@ -3,11 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="./icons/robot.svg" type="image/svg+xml" />
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260609-web-bootstrap" />
+    <link rel="stylesheet" href="./styles.css?v=20260731-robot-detail" />
   </head>
   <body>
     <div class="layout">
@@ -67,6 +68,25 @@
             <p id="robot-presence-new-msg" class="robot-presence-new-msg" role="status"></p>
           </div>
         </div>
+        <div id="robot-quick-dock" class="robot-quick-dock" aria-label="在线机器人快捷入口"></div>
+        <section id="robot-detail-panel" class="robot-detail-panel" role="dialog" aria-modal="false" aria-label="机器人详情" hidden>
+          <header class="robot-detail-head">
+            <div class="robot-detail-identity">
+              <span class="robot-detail-avatar"><img src="./icons/robot.svg" alt="" /></span>
+              <div><strong id="robot-detail-name">机器人</strong><span id="robot-detail-subtitle">—</span></div>
+            </div>
+            <button id="btn-robot-detail-close" class="robot-detail-close" type="button" aria-label="关闭机器人详情">×</button>
+          </header>
+          <nav id="robot-detail-tabs" class="robot-detail-tabs" aria-label="机器人详情分类">
+            <button type="button" data-robot-detail-tab="overview" class="active">概览</button>
+            <button type="button" data-robot-detail-tab="tree">行为树</button>
+            <button type="button" data-robot-detail-tab="tasks">待执行任务</button>
+            <button type="button" data-robot-detail-tab="cpu">CPU</button>
+            <button type="button" data-robot-detail-tab="logs">日志</button>
+            <button type="button" data-robot-detail-tab="params">参数</button>
+          </nav>
+          <div id="robot-detail-body" class="robot-detail-body"><p class="robot-detail-empty">正在读取…</p></div>
+        </section>
       </div>
 
       <button
@@ -397,6 +417,6 @@
       </aside>
     </div>
 
-    <script src="./app.js?v=20260731-sim-start-race"></script>
+    <script src="./app.js?v=20260731-robot-detail"></script>
   </body>
 </html>
