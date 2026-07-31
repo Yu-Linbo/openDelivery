@@ -95,7 +95,7 @@ else
 fi
 log "simulate: start_gazebo:=${START_GZ} spawn_robot:=true"
 
-STORE="${ROOT}/backend/data/robot_status_last.json"
+STORE="${OPEN_DELIVERY_STATUS_DB_PATH:-${ROOT}/backend/data/robot_status_last.json}"
 AUTO_MAPPING=0
 PERSISTED_MAP=""
 if [[ -f "${STORE}" ]]; then

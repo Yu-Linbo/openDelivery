@@ -88,22 +88,16 @@ sim_bringup / launch
 
 功能包列表、构建命令与运行流程见 **`src/README.md`**（替代原 `src/readme.md` 中的历史 catkin/`ud_*` 说明）。
 
-## 源码依赖（可选克隆）
+## 源码依赖
 
-在 `src` 下按需拉取：
+`slam_toolbox` 以 Git submodule 固定版本，克隆工作区后初始化：
 
 ```bash
-cd /path/to/openDelivery/src
-
-# slam_toolbox：Foxy 使用 foxy-devel（默认 ros2 分支可能不匹配旧发行版）
-git clone https://github.com/SteveMacenski/slam_toolbox.git
-cd slam_toolbox && git checkout foxy-devel && cd ..
-
-# nav2（含 map_server 等）
-git clone https://github.com/ros-navigation/navigation2.git
+git submodule update --init --recursive
 ```
 
-按发行版切换对应分支或 tag。
+当前 submodule 使用 Foxy 对应的 `foxy-devel` 分支，并由父仓库 gitlink 固定实际提交。
+Nav2 使用系统 ROS 安装提供的包，不需要把 Navigation2 源码复制到本工作区。
 
 ## 仿真与 SLAM 联调（简要）
 
