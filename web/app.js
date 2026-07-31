@@ -194,6 +194,7 @@ const simPostOfflineButtonUntilByRobot = {};
 const latestScanByRobot = {};
 const latestPathByRobot = {};
 let sensorPollTimer = null;
+let sensorPollInFlight = false;
 
 /** Live OccupancyGrid polling for floor like robot1_mapping → GET /api/mapping/live?robot_id= */
 let mapLiveTimer = null;
@@ -423,7 +424,8 @@ async function fetchJsonOptional(path) {
   if (!res.ok) {
     return null;
   }
-  return res.json();
+  const payload = await res.json();
+  return payload && payload.available === false ? null : payload;
 }
 
 async function fetchFloors(force = false) {
@@ -1672,17 +1674,17 @@ function renderRobotPresencePanel() {
       let simDisabled = false;
       let simTitle = "";
       let simExtraClass = "";
-      if (r.simButton) {
+      if (simBringupInFlightByRobot[r.id] || phase === "starting") {
+        simLabel = "仿真上线...";
+        simAction = "pending";
+        simDisabled = true;
+      } else if (r.simButton) {
         const sb = r.simButton || {};
         simLabel = String(sb.label || simLabel);
         simAction = String(sb.action || simAction);
         simDisabled = !!sb.disabled;
         simTitle = String(sb.title || "");
         simExtraClass = sb.extra_class ? ` ${String(sb.extra_class)}` : "";
-      } else if (phase === "starting") {
-        simLabel = "仿真上线...";
-        simAction = "pending";
-        simDisabled = true;
       } else if (phase === "sim_online") {
         simExtraClass = " btn-sim-bringup--offline";
         if (simShutdownBusyByRobot[r.id]) {
@@ -2341,14 +2343,19 @@ function startSensorPolling() {
     return;
   }
   sensorPollTimer = setInterval(async () => {
-    const here = getRobotsOnCurrentMap();
-    if (here.length === 0) {
+    if (sensorPollInFlight) {
       return;
     }
-    const ws = scan2dToggle && scan2dToggle.checked;
-    const wp = plannedPathToggle && plannedPathToggle.checked;
-    await Promise.all(
-      here.map(async (r) => {
+    sensorPollInFlight = true;
+    try {
+      const here = getRobotsOnCurrentMap();
+      if (here.length === 0) {
+        return;
+      }
+      const ws = scan2dToggle && scan2dToggle.checked;
+      const wp = plannedPathToggle && plannedPathToggle.checked;
+      await Promise.all(
+        here.map(async (r) => {
         const id = encodeURIComponent(r.id);
         if (ws) {
           const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/scan_2d`);
@@ -2366,9 +2373,12 @@ function startSensorPolling() {
             delete latestPathByRobot[r.id];
           }
         }
-      })
-    );
-    scheduleMapPaint();
+        })
+      );
+      scheduleMapPaint();
+    } finally {
+      sensorPollInFlight = false;
+    }
   }, 250);
 }
 

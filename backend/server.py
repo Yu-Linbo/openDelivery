@@ -1042,9 +1042,12 @@ class SimPresenceState:
                         mn = managed_by_id.get(rid) or {}
                         sim_proc_running = bool(mn.get("running"))
                         started = self._starting_at_ms.get(rid)
+                        startup_probe_grace_ms = 5_000
                         stale_ms = 120_000
-                        if not sim_proc_running or (
-                            started and now_ms - started > stale_ms
+                        age_ms = now_ms - started if started else 0
+                        if started and (
+                            age_ms > stale_ms
+                            or (age_ms > startup_probe_grace_ms and not sim_proc_running)
                         ):
                             self._phase_by_robot[rid] = "idle"
                             self._starting_at_ms.pop(rid, None)
@@ -2557,7 +2560,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             rid = unquote(m_scan.group(1))
             data = get_scan(rid)
             if not data:
-                self._send_json({"error": "no scan data", "robot_id": rid}, 404)
+                self._send_json(
+                    {"available": False, "reason": "no scan data", "robot_id": rid}, 200
+                )
             else:
                 clean = {k: v for k, v in data.items() if not str(k).startswith("_")}
                 self._send_json(clean)
@@ -2568,7 +2573,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             rid = unquote(m_path.group(1))
             data = get_planned_path(rid)
             if not data:
-                self._send_json({"error": "no path data", "robot_id": rid}, 404)
+                self._send_json(
+                    {"available": False, "reason": "no path data", "robot_id": rid}, 200
+                )
             else:
                 clean = {k: v for k, v in data.items() if not str(k).startswith("_")}
                 self._send_json(clean)

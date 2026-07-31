@@ -57,10 +57,10 @@ These endpoints are used by `web/app.js`.
   - Purpose: save current mapping result.
 
 - `GET /api/robot/{robot_id}/scan_2d`
-  - Purpose: current 2D scan overlay.
+  - Purpose: current 2D scan overlay. Returns HTTP 200 with `available: false` until data arrives.
 
 - `GET /api/robot/{robot_id}/planned_path`
-  - Purpose: current planned path overlay.
+  - Purpose: current planned path overlay. Returns HTTP 200 with `available: false` until data arrives.
 
 ### Robot Commands
 
