@@ -183,7 +183,7 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_topic: "@@OCC_GRID_TOPIC@@"
-        map_subscribe_transient_local: False
+        map_subscribe_transient_local: @@MAP_SUBSCRIBE_TRANSIENT_LOCAL@@
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0

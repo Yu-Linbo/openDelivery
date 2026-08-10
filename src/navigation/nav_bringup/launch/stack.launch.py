@@ -32,6 +32,7 @@ def _materialize_params(
     unknown_cost_value: str,
     allow_unknown: str,
     local_track_unknown_space: str,
+    map_subscribe_transient_local: str,
 ) -> str:
     template_path = os.path.join(pkg_share, "config", "nav2_params.yaml")
     with open(template_path, "r", encoding="utf-8") as f:
@@ -45,6 +46,7 @@ def _materialize_params(
     text = text.replace("@@UNKNOWN_COST_VALUE@@", unknown_cost_value)
     text = text.replace("@@ALLOW_UNKNOWN@@", allow_unknown)
     text = text.replace("@@LOCAL_TRACK_UNKNOWN_SPACE@@", local_track_unknown_space)
+    text = text.replace("@@MAP_SUBSCRIBE_TRANSIENT_LOCAL@@", map_subscribe_transient_local)
     data = yaml.safe_load(text)
     # Top-level keys must be node names; RewrittenYaml adds the namespace wrapper.
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="nav2_params_")
@@ -98,6 +100,7 @@ def _launch_setup(context, *_args, **_kwargs):
         unknown_cost_value=unknown_cost_value,
         allow_unknown=allow_unknown,
         local_track_unknown_space=local_track_unknown_space,
+        map_subscribe_transient_local=map_subscribe_transient_local,
     )
     bt_xml = os.path.join(
         get_package_share_directory("nav2_bt_navigator"),

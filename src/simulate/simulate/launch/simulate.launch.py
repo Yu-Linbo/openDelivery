@@ -231,7 +231,11 @@ def launch_setup(context, *_args, **_kwargs):
             name="robot_state_publisher",
             output="screen",
             parameters=[{"use_sim_time": use_sim, "robot_description": robot_desc}],
-            remappings=[("joint_states", js_topic)],
+            remappings=[
+                ("joint_states", js_topic),
+                ("tf", "/tf"),
+                ("tf_static", "/tf_static"),
+            ],
         )
         spawn_robot_node = Node(
             package="gazebo_ros",
