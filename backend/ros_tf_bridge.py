@@ -293,7 +293,7 @@ class OpenDeliveryTfBridgeNode(Node):
             self.get_logger().info(f"subscribing topdown image on {self._topdown_camera_topic}")
 
         scan_suffix = os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d")
-        path_suffix = os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path")
+        path_suffix = os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/navigation/plan")
 
         rate = float(os.environ.get("ROS_TF_LOOKUP_HZ", "20"))
         self._timer = self.create_timer(1.0 / max(rate, 1.0), self._tick)
@@ -348,7 +348,11 @@ class OpenDeliveryTfBridgeNode(Node):
             except Exception:  # noqa: BLE001
                 pass
             self._wait_enable_robot_specific_timer = None
-            self._enable_robot_specific_subs(self._specs, os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"), os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"))
+            self._enable_robot_specific_subs(
+                self._specs,
+                os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"),
+                os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/navigation/plan"),
+            )
 
     def _enable_robot_specific_subs(
         self,
@@ -409,7 +413,7 @@ class OpenDeliveryTfBridgeNode(Node):
             self._sub_scan[rid] = self.create_subscription(
                 LaserScan,
                 scan_topic,
-                self._make_scan_cb(rid, base_frame),
+                self._make_scan_cb(rid, base_frame, mf),
                 10,
             )
             self.get_logger().info(f"subscribing LaserScan on {scan_topic}")
@@ -568,7 +572,7 @@ class OpenDeliveryTfBridgeNode(Node):
             self._ensure_robot_specific_subs_for_spec(
                 spec,
                 os.environ.get("ROS_SCAN_2D_TOPIC_SUFFIX", "/scan_2d"),
-                os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/planned_path"),
+                os.environ.get("ROS_PLANNED_PATH_TOPIC_SUFFIX", "/navigation/plan"),
             )
 
         if rid not in self._robot_status_payload_by_id:
@@ -908,7 +912,7 @@ class OpenDeliveryTfBridgeNode(Node):
         except Exception:  # noqa: BLE001
             return
 
-    def _make_scan_cb(self, rid: str, base_frame: str):
+    def _make_scan_cb(self, rid: str, base_frame: str, map_frame: str):
         stride = max(1, int(os.environ.get("ROS_SCAN_STRIDE", "3")))
         max_hits = max(50, int(os.environ.get("ROS_SCAN_MAX_HITS", "400")))
 
@@ -932,6 +936,28 @@ class OpenDeliveryTfBridgeNode(Node):
             cos_y = math.cos(yaw)
             sin_y = math.sin(yaw)
             hits: List[List[float]] = []
+
+            # Project the robot-base scan into map coordinates before exposing
+            # it to the browser. Use the latest map <- base pose so scan points
+            # do not lag behind a rotating robot. When localization is missing,
+            # the documented fallback pose is map origin (0, 0, 0).
+            localized = True
+            try:
+                map_tr = self._buffer.lookup_transform(
+                    map_frame,
+                    base_frame,
+                    Time(),
+                    timeout=Duration(seconds=0.05),
+                )
+                robot_x = float(map_tr.transform.translation.x)
+                robot_y = float(map_tr.transform.translation.y)
+                rq = map_tr.transform.rotation
+                robot_yaw = _yaw_from_quat(float(rq.x), float(rq.y), float(rq.z), float(rq.w))
+            except Exception:  # noqa: BLE001
+                localized = False
+                robot_x = robot_y = robot_yaw = 0.0
+            map_cos = math.cos(robot_yaw)
+            map_sin = math.sin(robot_yaw)
             ranges = msg.ranges
             n = len(ranges)
             if n == 0:
@@ -948,13 +974,20 @@ class OpenDeliveryTfBridgeNode(Node):
                 ly = rng * math.sin(a)
                 bx = cos_y * lx - sin_y * ly + tx
                 by = sin_y * lx + cos_y * ly + ty
-                hits.append([round(bx, 3), round(by, 3)])
+                wx = robot_x + map_cos * bx - map_sin * by
+                wy = robot_y + map_sin * bx + map_cos * by
+                hits.append([round(wx, 3), round(wy, 3)])
             ros_sensor_store.set_scan(
                 rid,
                 {
-                    "frame_id": base_frame,
-                    "coordinates": "robot_base",
-                    "origin": [round(tx, 3), round(ty, 3)],
+                    "frame_id": map_frame,
+                    "source_frame_id": str(msg.header.frame_id or ""),
+                    "coordinates": "map",
+                    "localized": localized,
+                    "robot_pose": [
+                        round(robot_x, 4), round(robot_y, 4), round(robot_yaw, 4)
+                    ],
+                    "origin": [round(robot_x, 4), round(robot_y, 4)],
                     "stamp_sec": int(msg.header.stamp.sec),
                     "stamp_nanosec": int(msg.header.stamp.nanosec),
                     "hits": hits,
@@ -967,7 +1000,8 @@ class OpenDeliveryTfBridgeNode(Node):
         def _cb(msg: Path) -> None:
             pts: List[List[float]] = []
             for ps in msg.poses:
-                if ps.header.frame_id != map_frame:
+                pose_frame = str(ps.header.frame_id or msg.header.frame_id or "")
+                if pose_frame and pose_frame != map_frame:
                     continue
                 pts.append(
                     [
@@ -976,7 +1010,14 @@ class OpenDeliveryTfBridgeNode(Node):
                     ]
                 )
             ros_sensor_store.set_planned_path(
-                rid, {"frame_id": map_frame, "points": pts}
+                rid,
+                {
+                    "frame_id": map_frame,
+                    "source_frame_id": str(msg.header.frame_id or ""),
+                    "stamp_sec": int(msg.header.stamp.sec),
+                    "stamp_nanosec": int(msg.header.stamp.nanosec),
+                    "points": pts,
+                },
             )
 
         return _cb

@@ -1672,6 +1672,9 @@ button {
 /* Per-robot floating shortcuts and detail panel */
 .robot-quick-dock {
   display: flex;
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
@@ -1691,6 +1694,8 @@ button {
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
   cursor: pointer;
 }
+  pointer-events: auto;
+  touch-action: manipulation;
 
 .robot-quick-chip:hover,
 .robot-quick-chip.active {
@@ -1735,7 +1740,7 @@ button {
 
 .robot-detail-panel {
   position: fixed;
-  z-index: 80;
+  z-index: 100;
   top: 18px;
   right: 230px;
   width: min(720px, calc(100vw - 280px));

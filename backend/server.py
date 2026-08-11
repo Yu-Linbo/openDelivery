@@ -1447,15 +1447,45 @@ def _robot_detail_payload(robot_id: str) -> dict:
         raise ValueError("invalid robot_id")
     presence = _build_presence_rows()
     row = next((item for item in presence.get("items", []) if item.get("id") == rid), None)
+    pose_snapshot = POSE_PROVIDER.get_pose()
+    pose_row = next(
+        (item for item in (pose_snapshot.get("robots") or [])
+         if str((item or {}).get("id") or "") == rid),
+        None,
+    )
     table = ROS_DEBUG_NODES_TABLE.snapshot()
     prefix = f"/{rid}/"
     nodes = [
         node for node in (table.get("nodes") or [])
         if str((node or {}).get("name") or "").startswith(prefix)
     ]
-    logs = _list_log_bag_matches(rid)
+    scan_data = get_scan(rid) or {}
+    path_data = get_planned_path(rid) or {}
+    logs = _list_log_bag_matches(rid, limit_per_robot=12)
+    for robot_logs in logs.get("robots", []):
+        for bag in robot_logs.get("bags", []):
+            bag.pop("topics", None)
     return {
         "robot_id": rid, "status": row or {"id": rid, "online": False},
+        "pose": pose_row or {
+            "id": rid,
+            "localization": "lost",
+            "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+        },
+        "sensors": {
+            "scan_2d": {
+                "available": bool(scan_data),
+                "frame_id": str(scan_data.get("frame_id") or ""),
+                "coordinates": str(scan_data.get("coordinates") or ""),
+                "localized": bool(scan_data.get("localized", False)),
+                "point_count": len(scan_data.get("hits") or []),
+            },
+            "planned_path": {
+                "available": bool(path_data),
+                "frame_id": str(path_data.get("frame_id") or ""),
+                "point_count": len(path_data.get("points") or []),
+            },
+        },
         "nodes": nodes, "processes": _robot_process_metrics(rid),
         "logs": logs, "timestamp": time.time(),
     }
@@ -1535,7 +1565,10 @@ def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict
     }
 
 
-def _list_log_bag_matches(robot_filter: Optional[str] = None) -> dict:
+def _list_log_bag_matches(
+    robot_filter: Optional[str] = None,
+    limit_per_robot: Optional[int] = None,
+) -> dict:
     wanted = str(robot_filter or "").strip()
     robots = []
     if wanted:
@@ -1570,18 +1603,29 @@ def _list_log_bag_matches(robot_filter: Optional[str] = None) -> dict:
                 }
             )
             continue
-        bags = []
+        raw_entries = []
         raw_bags = data.get("bags")
         if isinstance(raw_bags, dict):
             for bag_path, meta in raw_bags.items():
                 if isinstance(meta, dict):
-                    bags.append(_normalize_log_bag_entry(robot_name, str(bag_path), meta))
+                    raw_entries.append((str(bag_path), meta))
         raw_records = data.get("records")
         if isinstance(raw_records, list):
             for item in raw_records:
                 if isinstance(item, dict) and item.get("bag"):
-                    bags.append(_normalize_log_bag_entry(robot_name, str(item.get("bag")), item))
-        bags.sort(key=lambda x: str(x.get("ended_at") or x.get("started_at") or ""), reverse=True)
+                    raw_entries.append((str(item.get("bag")), item))
+        raw_entries.sort(
+            key=lambda entry: str(
+                entry[1].get("ended_at") or entry[1].get("started_at") or ""
+            ),
+            reverse=True,
+        )
+        if limit_per_robot is not None:
+            raw_entries = raw_entries[:max(0, int(limit_per_robot))]
+        bags = [
+            _normalize_log_bag_entry(robot_name, bag_path, meta)
+            for bag_path, meta in raw_entries
+        ]
         robots.append(
             {
                 "robot_name": robot_name,
@@ -2263,6 +2307,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 )
             except ValueError as err:
                 self._send_json({"error": str(err)}, 400)
+                return
+            except rma.RosCommandTimeoutError as err:
+                self._send_json({"error": str(err)}, 504)
                 return
             except Exception as err:  # noqa: BLE001
                 self._send_json({"error": str(err)}, 500)

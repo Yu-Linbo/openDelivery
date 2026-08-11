@@ -146,6 +146,7 @@ let selectedDetailRobotId = "";
 let robotDetailActiveTab = "overview";
 let robotDetailPayload = null;
 let robotDetailPollTimer = null;
+let robotDetailRefreshInFlight = false;
 
 /** Per-robot: idle | starting | sim_online（仿真上线流程） */
 const simBringupPhaseByRobot = {};
@@ -422,16 +423,29 @@ async function postRobotCommand(payload) {
 }
 
 async function postRobotGoto(robotId, x, y, yaw) {
-  const res = await fetch(`${API_BASE_URL}/api/robot/motion/goto`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ robot_id: robotId, x, y, yaw }),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 30000);
+  let res;
   let data = {};
   try {
-    data = await res.json();
-  } catch {
-    /* ignore */
+    res = await fetch(`${API_BASE_URL}/api/robot/motion/goto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ robot_id: robotId, x, y, yaw }),
+      signal: ctrl.signal,
+    });
+    try {
+      data = await res.json();
+    } catch {
+      /* ignore */
+    }
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error("导航请求超时，请检查导航 action server");
+    }
+    throw new Error("无法连接 Web 后端，请检查 Web 栈");
+  } finally {
+    clearTimeout(timer);
   }
   if (!res.ok) {
     throw new Error(data.error || `请求失败 (${res.status})`);
@@ -1450,15 +1464,19 @@ function drawRelocPickOverlay() {
 }
 
 function drawPlannedPathOnMap(points) {
-  if (!activePgm || !points || points.length < 2) {
+  if (!activePgm || !points || points.length === 0) {
     return;
   }
   ctx.save();
-  ctx.strokeStyle = "rgba(96, 165, 250, 0.9)";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.98)";
+  ctx.fillStyle = "#38bdf8";
+  ctx.lineWidth = 3;
   ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(56, 189, 248, 0.65)";
+  ctx.shadowBlur = 5;
   ctx.beginPath();
   let started = false;
+  let lastScreen = null;
   points.forEach((pt) => {
     if (!pt || pt.length < 2) {
       return;
@@ -1468,6 +1486,7 @@ function drawPlannedPathOnMap(points) {
       return;
     }
     const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
+    lastScreen = { sx, sy };
     if (!started) {
       ctx.moveTo(sx, sy);
       started = true;
@@ -1475,7 +1494,14 @@ function drawPlannedPathOnMap(points) {
       ctx.lineTo(sx, sy);
     }
   });
-  ctx.stroke();
+  if (started) {
+    ctx.stroke();
+  }
+  if (lastScreen) {
+    ctx.beginPath();
+    ctx.arc(lastScreen.sx, lastScreen.sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
@@ -1483,17 +1509,14 @@ function drawScan2dOnMap(data, robot) {
   if (!activePgm || !data || !data.hits || data.hits.length === 0) {
     return;
   }
-  const robotPose = robot && robot.pose ? robot.pose : null;
+  const robotPose = robot && robot.pose ? robot.pose : { x: 0, y: 0, yaw: 0 };
   const robotBaseCoordinates = data.coordinates === "robot_base";
-  if (robotBaseCoordinates && !robotPose) {
-    return;
-  }
   const robotYaw = Number(robotPose && robotPose.yaw) || 0;
   const cosYaw = Math.cos(robotYaw);
   const sinYaw = Math.sin(robotYaw);
   ctx.save();
-  // scan_2d is cached in robot-base coordinates, then projected with the
-  // current robot pose so it remains attached to the robot during relocation.
+  // New bridge payloads are already in map coordinates. Keep robot_base support
+  // for older payloads; without localization its fallback pose is (0, 0, 0).
   const ptRadius = Math.max(1.25, Math.min(3.5, viewScale * 0.2));
   ctx.fillStyle = "#ef4444";
   data.hits.forEach((hit) => {
@@ -4172,22 +4195,46 @@ function renderRobotBehaviorTree(nodes) {
 function renderRobotDetailOverview(payload) {
   const status = payload.status || {};
   const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
-  const poseRow = (latestSnapshot && Array.isArray(latestSnapshot.robots)
-    ? latestSnapshot.robots.find((r) => String(r.id) === payload.robot_id)
-    : null) || {};
+  const poseRow =
+    payload.pose ||
+    ((latestSnapshot && Array.isArray(latestSnapshot.robots)
+      ? latestSnapshot.robots.find((r) => String(r.id) === payload.robot_id)
+      : null) || {});
   const pose = poseRow.pose || {};
+  const sensors = payload.sensors || {};
+  const scan = sensors.scan_2d || {};
+  const plannedPath = sensors.planned_path || {};
+  const robotModel = status.robot_model || poseRow.robot_model || "—";
+  const semanticPosition = status.current_position || poseRow.current_position || "unknown;";
+  const localization = poseRow.localization || (status.online ? "unknown" : "lost");
+  const isSimulation = Boolean(
+    status.live_is_simulation || status.persisted_is_simulation || poseRow.is_simulation
+  );
   return `<div class="robot-detail-grid">
+    <section class="robot-detail-card"><h3>机器人信息</h3>
+      <p>ID：<code>${escapeHtml(payload.robot_id)}</code></p>
+      <p>机型：<code>${escapeHtml(robotModel)}</code></p>
+      <p>仿真：<code>${isSimulation ? "是" : "否"}</code></p>
+      <p>心跳：<code>${status.online ? "正常" : "离线"}</code></p>
+    </section>
     <section class="robot-detail-card"><h3>运行状态</h3>
       <p>在线：<code>${status.online ? "是" : "否"}</code></p>
       <p>robot_status：<code>${escapeHtml(detailStatusValue(status, "live_robot_status", "persisted_robot_status"))}</code></p>
+      <p>定位：<code>${escapeHtml(localization)}</code></p>
       <p>task_status：<code>${escapeHtml(detailStatusValue(status, "live_task_status", "persisted_task_status"))}</code></p>
       <p>任务进度：<code>${Number(status.task_progress) >= 0 ? `${Math.round(Number(status.task_progress) * 100)}%` : "—"}</code></p>
     </section>
     <section class="robot-detail-card"><h3>位置</h3>
       <p>地图：<code>${escapeHtml(status.floor || status.persisted_current_map || "—")}</code></p>
+      <p>语义位置：<code>${escapeHtml(semanticPosition)}</code></p>
       <p>X：<code>${Number.isFinite(Number(pose.x)) ? Number(pose.x).toFixed(3) : "—"}</code></p>
       <p>Y：<code>${Number.isFinite(Number(pose.y)) ? Number(pose.y).toFixed(3) : "—"}</code></p>
       <p>Yaw：<code>${Number.isFinite(Number(pose.yaw)) ? Number(pose.yaw).toFixed(3) : "—"}</code></p>
+    </section>
+    <section class="robot-detail-card"><h3>可视化数据</h3>
+      <p>scan_2d：<code>${scan.available ? `${scan.point_count || 0} 点` : "无数据"}</code></p>
+      <p>scan 坐标：<code>${escapeHtml(scan.coordinates || "—")} / ${escapeHtml(scan.frame_id || "—")}</code></p>
+      <p>规划轨迹：<code>${plannedPath.available ? `${plannedPath.point_count || 0} 点` : "无数据"}</code></p>
     </section>
     <section class="robot-detail-card"><h3>ROS 节点</h3><p><code>${nodes.length}</code> 个该机器人节点</p></section>
     <section class="robot-detail-card"><h3>资源</h3><p><code>${(payload.processes || []).length}</code> 个关联进程</p></section>
@@ -4258,17 +4305,28 @@ function renderRobotDetail() {
 
 async function refreshRobotDetail() {
   if (!selectedDetailRobotId || !robotDetailPanel || robotDetailPanel.hidden) return;
-  const payload = await fetchJson(`${API_BASE_URL}/api/robot/${encodeURIComponent(selectedDetailRobotId)}/detail`, { cache: "no-store" });
-  robotDetailPayload = payload;
-  const status = payload.status || {};
-  if (robotDetailName) robotDetailName.textContent = status.name || payload.robot_id;
-  if (robotDetailSubtitle) robotDetailSubtitle.textContent = `${payload.robot_id} · ${status.online ? "在线" : "离线"} · ${status.floor || "无地图"}`;
-  renderRobotDetail();
-  renderRobotQuickDock();
+  if (robotDetailRefreshInFlight) return;
+  const requestedRobotId = selectedDetailRobotId;
+  robotDetailRefreshInFlight = true;
+  try {
+    const payload = await fetchJson(`${API_BASE_URL}/api/robot/${encodeURIComponent(requestedRobotId)}/detail`, { cache: "no-store" });
+    if (requestedRobotId !== selectedDetailRobotId || robotDetailPanel.hidden) return;
+    robotDetailPayload = payload;
+    const status = payload.status || {};
+    if (robotDetailName) robotDetailName.textContent = status.name || payload.robot_id;
+    if (robotDetailSubtitle) robotDetailSubtitle.textContent = `${payload.robot_id} · ${status.robot_model || "未知机型"} · ${status.online ? "在线" : "离线"} · ${status.floor || "无地图"} · ${status.current_position || "unknown;"}`;
+    renderRobotDetail();
+    renderRobotQuickDock();
+  } finally {
+    robotDetailRefreshInFlight = false;
+  }
 }
 
 function closeRobotDetail() {
-  if (robotDetailPanel) robotDetailPanel.hidden = true;
+  if (robotDetailPanel) {
+    robotDetailPanel.hidden = true;
+    robotDetailPanel.setAttribute("aria-hidden", "true");
+  }
   selectedDetailRobotId = "";
   robotDetailPayload = null;
   if (robotDetailPollTimer) clearInterval(robotDetailPollTimer);
@@ -4277,25 +4335,37 @@ function closeRobotDetail() {
 }
 
 function openRobotDetail(rid) {
-  selectedDetailRobotId = rid;
+  const normalizedRobotId = String(rid || "").trim();
+  if (!normalizedRobotId) {
+    return;
+  }
+  selectedDetailRobotId = normalizedRobotId;
   robotDetailActiveTab = "overview";
   robotDetailPayload = null;
-  if (robotDetailPanel) robotDetailPanel.hidden = false;
+  if (robotDetailPanel) {
+    robotDetailPanel.hidden = false;
+    robotDetailPanel.removeAttribute("hidden");
+    robotDetailPanel.setAttribute("aria-hidden", "false");
+  }
   if (robotDetailBody) robotDetailBody.innerHTML = '<p class="robot-detail-empty">正在读取机器人详情…</p>';
   if (robotDetailTabs) robotDetailTabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.robotDetailTab === "overview"));
   refreshRobotDetail().catch((err) => {
     if (robotDetailBody) robotDetailBody.innerHTML = `<p class="robot-detail-empty">读取失败：${escapeHtml(err.message || err)}</p>`;
   });
   if (robotDetailPollTimer) clearInterval(robotDetailPollTimer);
-  robotDetailPollTimer = setInterval(() => refreshRobotDetail().catch(() => {}), 2500);
+  robotDetailPollTimer = setInterval(() => refreshRobotDetail().catch(() => {}), 4000);
+  renderRobotQuickDock();
 }
 
 function initRobotDetailUi() {
   renderRobotQuickDock();
-  if (robotQuickDock) robotQuickDock.addEventListener("click", (ev) => {
-    const button = ev.target.closest("button[data-robot-quick-id]");
-    if (button) openRobotDetail(String(button.dataset.robotQuickId || ""));
-  });
+  document.addEventListener("click", (ev) => {
+    const target = ev.target instanceof Element ? ev.target : null;
+    const button = target && target.closest("button[data-robot-quick-id]");
+    if (!button) return;
+    ev.preventDefault();
+    openRobotDetail(String(button.dataset.robotQuickId || ""));
+  }, true);
   if (btnRobotDetailClose) btnRobotDetailClose.addEventListener("click", closeRobotDetail);
   if (robotDetailTabs) robotDetailTabs.addEventListener("click", (ev) => {
     const button = ev.target.closest("button[data-robot-detail-tab]");

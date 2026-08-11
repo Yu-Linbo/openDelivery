@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -14,6 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _LOCK = threading.Lock()
 _WAYPOINTS_PATH: Optional[Path] = None
+
+
+class RosCommandTimeoutError(RuntimeError):
+    """Raised when a ROS helper process cannot finish within its deadline."""
 
 
 def _root_dir() -> Path:
@@ -36,15 +41,40 @@ def _ros_run(cmd: str, timeout: float = 120.0) -> Dict[str, Any]:
         f'set -eo pipefail; source "/opt/ros/{distro}/setup.bash"; '
         f'cd "{root}" && {install_src}; {cmd}'
     )
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         ["bash", "-lc", full],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
         env=os.environ.copy(),
+        start_new_session=True,
     )
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # The shell launches ROS/Python children. Killing only the shell leaves
+        # those children holding stdout/stderr open, which can wedge the HTTP
+        # request indefinitely. Terminate the complete process group instead.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+        detail = (stderr or stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RosCommandTimeoutError(
+            f"ROS command timed out after {timeout:.1f}s{suffix}"
+        ) from exc
+
+    out = (stdout or "").strip()
+    err = (stderr or "").strip()
     if proc.returncode != 0:
         raise RuntimeError(err or out or "ros command failed")
     return {"ok": True, "output": out}
@@ -95,8 +125,8 @@ def send_navigate_to_pose(
     yaw: float = 0.0,
 ) -> Dict[str, Any]:
     rid = str(robot_id or "").strip()
-    if not rid:
-        raise ValueError("robot_id is required")
+    if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
+        raise ValueError("invalid robot_id")
     z, w = _yaw_quat(float(yaw))
     # Use rclpy action client directly to avoid ros2 CLI yaml parsing bugs
     script = f"""
@@ -107,27 +137,30 @@ from builtins import float as _float
 
 rclpy.init()
 node = rclpy.create_node("_goal_sender")
-client = ActionClient(node, NavigateToPose, "/{rid}/navigation/navigate_to_pose")
-if not client.wait_for_server(timeout_sec=10.0):
-    print("ERROR: action server not available")
-    exit(1)
-goal_msg = NavigateToPose.Goal()
-goal_msg.pose.header.frame_id = "map"
-goal_msg.pose.pose.position.x = _float({x})
-goal_msg.pose.pose.position.y = _float({y})
-goal_msg.pose.pose.orientation.z = _float({z})
-goal_msg.pose.pose.orientation.w = _float({w})
-send_goal_future = client.send_goal_async(goal_msg)
-rclpy.spin_until_future_complete(node, send_goal_future, timeout_sec=5.0)
-result = send_goal_future.result()
-if result and result.accepted:
+try:
+    client = ActionClient(node, NavigateToPose, "/{rid}/navigation/navigate_to_pose")
+    if not client.wait_for_server(timeout_sec=10.0):
+        raise RuntimeError("action server not available")
+    goal_msg = NavigateToPose.Goal()
+    goal_msg.pose.header.frame_id = "map"
+    goal_msg.pose.pose.position.x = _float({x})
+    goal_msg.pose.pose.position.y = _float({y})
+    goal_msg.pose.pose.orientation.z = _float({z})
+    goal_msg.pose.pose.orientation.w = _float({w})
+    send_goal_future = client.send_goal_async(goal_msg)
+    rclpy.spin_until_future_complete(node, send_goal_future, timeout_sec=5.0)
+    if not send_goal_future.done():
+        raise RuntimeError("action server did not answer the goal request")
+    result = send_goal_future.result()
+    if not result or not result.accepted:
+        raise RuntimeError("navigation goal rejected")
     print("Goal accepted")
-else:
-    print("Goal rejected")
-node.destroy_node()
-rclpy.shutdown()
+finally:
+    node.destroy_node()
+    if rclpy.ok():
+        rclpy.shutdown()
 """
-    return _ros_run(f'python3 -c {shlex.quote(script)}', timeout=300.0)
+    return _ros_run(f'python3 -c {shlex.quote(script)}', timeout=25.0)
 
 
 def _load_waypoints() -> Dict[str, Dict[str, Dict[str, float]]]:
