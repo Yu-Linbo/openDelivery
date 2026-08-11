@@ -152,7 +152,7 @@
               </div>
 
               <p class="map-hint">
-                开启右侧「地图选位姿」后：单击定位置，再单击定朝向；<kbd>Shift</kbd>+ 拖拽仍平移地图。
+                「地图选位姿」用于重定位；「地图选目标点」会按当前机器人 ID 下发导航。两者均为单击定位置、再单击定朝向；<kbd>Shift</kbd>+ 拖拽仍平移地图。
               </p>
 
               <div class="map-wrapper" id="map-wrapper">
@@ -172,6 +172,9 @@
                   <input type="checkbox" id="reloc-pick-toggle" />
                   地图选位姿
                 </label>
+                <button id="btn-reloc-pick-goal" type="button" class="btn-secondary">
+                  地图选目标点
+                </button>
                 <label class="reloc-field">
                   机器人 ID
                   <input id="reloc-robot-id" type="text" value="robot1" autocomplete="off" />
@@ -417,6 +420,6 @@
       </aside>
     </div>
 
-    <script src="./app.js?v=20260731-robot-detail"></script>
+    <script src="./app.js?v=20260810-map-goal"></script>
   </body>
 </html>

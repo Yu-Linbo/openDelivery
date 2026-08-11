@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    # ROS graph "ping": all named nodes must be discovered before localization
+    # is considered ready to accept an initial pose.  This is not a latency test.
+    ping_nodes:
+      - heartbeat
+      - task_manager
+      - health_monitor
+      - semantic_location_query
+      - slam/lifecycle_manager
+      - slam/localizing
+      - navigation/lifecycle_manager
+      - map_server

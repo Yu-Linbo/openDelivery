@@ -18,6 +18,7 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory("nav2_bringup")
 
     namespace = LaunchConfiguration("namespace")
+    robot_name = LaunchConfiguration("robot_name")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     params_file = LaunchConfiguration("params_file")
@@ -36,6 +37,10 @@ def generate_launch_description():
     remappings = [
         ("/tf", "/tf"),
         ("/tf_static", "/tf_static"),
+        ("cmd_vel", ["/", robot_name, "/cmd_vel"]),
+        ("navigate_to_pose", ["/", robot_name, "/navigate_to_pose"]),
+        ("navigate_through_poses", ["/", robot_name, "/navigate_through_poses"]),
+        ("follow_waypoints", ["/", robot_name, "/follow_waypoints"]),
         ("map", occupancy_grid_topic),
     ]
 
@@ -57,6 +62,7 @@ def generate_launch_description():
         [
             SetEnvironmentVariable("RCUTILS_LOGGING_BUFFERED_STREAM", "1"),
             DeclareLaunchArgument("namespace", default_value="", description="Top-level namespace"),
+            DeclareLaunchArgument("robot_name", default_value="robot2", description="Robot root namespace"),
             DeclareLaunchArgument(
                 "use_sim_time", default_value="false", description="Use simulation clock if true"
             ),
@@ -130,7 +136,7 @@ def generate_launch_description():
             Node(
                 package="nav2_lifecycle_manager",
                 executable="lifecycle_manager",
-                name="lifecycle_manager_navigation",
+                name="lifecycle_manager",
                 output="screen",
                 parameters=[
                     {"use_sim_time": use_sim_time},

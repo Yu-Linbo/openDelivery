@@ -118,7 +118,9 @@ double HeartbeatNode::publish_rate_hz_from_parameter(
 HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
 : rclcpp_lifecycle::LifecycleNode("heartbeat", options) {
   declare_parameter<std::string>("robot_name", "");
+  declare_parameter<std::string>("robot_model", "OP1");
   declare_parameter<std::string>("current_map", "");
+  declare_parameter<std::string>("current_position", "unknown;");
   declare_parameter<std::string>("robot_status", "initializing");
   declare_parameter<std::string>("task_status", "idle");
   declare_parameter<bool>("mapping_mode", false);
@@ -241,6 +243,8 @@ void HeartbeatNode::tick() {
   msg.header.stamp = now();
   msg.header.frame_id = "map";
   msg.robot_name = effective_robot_name();
+  msg.robot_model = strip_spaces(get_parameter("robot_model").as_string());
+  msg.current_position = get_parameter("current_position").as_string();
   msg.robot_status = resolved_robot_status_value();
   msg.task_status = resolved_task_status_value();
   if (msg.task_status == "mapping") {
@@ -265,8 +269,15 @@ void HeartbeatNode::on_set_params(
     if (!rn_in.empty()) {
       new_params.emplace_back("robot_name", rn_in);
     }
+    const std::string model_in = strip_spaces(request->robot_model);
+    if (!model_in.empty()) {
+      new_params.emplace_back("robot_model", model_in);
+    }
     if (request->current_map != "") {
       new_params.emplace_back("current_map", request->current_map);
+    }
+    if (request->current_position != "") {
+      new_params.emplace_back("current_position", request->current_position);
     }
     if (!strip_spaces(request->robot_status).empty()) {
       new_params.emplace_back("robot_status", normalize_robot_status(request->robot_status));
@@ -282,8 +293,6 @@ void HeartbeatNode::on_set_params(
     if (request->task_progress >= 0.0) {
       const double clamped = std::min(1.0, request->task_progress);
       new_params.emplace_back("task_progress", clamped);
-    } else if (request->task_progress < -0.5) {
-      new_params.emplace_back("task_progress", -1.0);
     }
 
     if (!new_params.empty()) {

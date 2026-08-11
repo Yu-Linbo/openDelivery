@@ -36,7 +36,7 @@ def _slam_params(context, *args, **kwargs):
             "initial_slam_mode": initial,
             "tracked_lifecycle_nodes": [
                 "heartbeat",
-                "lifecycle_manager_navigation",
+                "navigation/lifecycle_manager",
                 "map_server",
             ],
         }
@@ -86,16 +86,34 @@ def generate_launch_description():
                 description="PushRosNamespace for this robot (match heartbeat).",
             ),
             DeclareLaunchArgument(
+                "robot_model", default_value="OP1",
+                description="Robot model/profile used to select params/params/<model>/.",
+            ),
+            DeclareLaunchArgument(
                 "localization_pose_topic",
                 default_value="amcl_pose",
                 description="Empty string disables pose-based ready transition.",
             ),
             DeclareLaunchArgument(
+                "health_monitor_params_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("manager"), "config", "health_monitor_op1.yaml"]
+                ),
+                description="YAML profile containing health_monitor ping_nodes.",
+            ),
+            DeclareLaunchArgument(
+                "semantic_location_params_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("manager"), "config", "semantic_location_op1.yaml"]
+                ),
+                description="YAML profile containing semantic_regions for the robot model.",
+            ),
+            DeclareLaunchArgument(
                 "require_nav2",
                 default_value="false",
                 description=(
-                    "When 'true', bt_navigator must be running before health_monitor "
-                    "advances to the localizing phase."
+                    "Compatibility switch; navigation readiness is defined by "
+                    "health_monitor ping_nodes."
                 ),
             ),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
@@ -134,6 +152,7 @@ def generate_launch_description():
                         output="screen",
                         condition=UnlessCondition(LaunchConfiguration("require_nav2")),
                         parameters=[
+                            LaunchConfiguration("health_monitor_params_file"),
                             {
                                 "localization_pose_topic": LaunchConfiguration(
                                     "localization_pose_topic"
@@ -150,14 +169,30 @@ def generate_launch_description():
                         output="screen",
                         condition=IfCondition(LaunchConfiguration("require_nav2")),
                         parameters=[
+                            LaunchConfiguration("health_monitor_params_file"),
                             {
                                 "localization_pose_topic": LaunchConfiguration(
                                     "localization_pose_topic"
                                 ),
-                                "required_nodes": ["heartbeat", "bt_navigator"],
+                                "required_nodes": ["heartbeat"],
                             }
                         ],
                         remappings=[("stack_lifecycle", "slam/stack_lifecycle")],
+                    ),
+                    Node(
+                        package="manager",
+                        executable="semantic_location_query_node",
+                        name="semantic_location_query",
+                        output="screen",
+                        parameters=[
+                            LaunchConfiguration("semantic_location_params_file"),
+                            {
+                                "robot_model": LaunchConfiguration("robot_model"),
+                                "localization_pose_topic": LaunchConfiguration(
+                                    "localization_pose_topic"
+                                ),
+                            },
+                        ],
                     ),
                     Node(
                         package="manager",

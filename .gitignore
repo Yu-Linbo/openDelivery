@@ -20,4 +20,4 @@ backend/data/.robot_status_last.json.*.tmp
 backend/logs/
 
 # ROS bag files
-log_bag/
+/log_bag/

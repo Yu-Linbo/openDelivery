@@ -25,6 +25,12 @@ def get_scan(robot_id: str) -> Optional[Dict[str, Any]]:
         return json.loads(json.dumps(data)) if data else None
 
 
+def get_scans() -> Dict[str, Dict[str, Any]]:
+    """Return a thread-safe snapshot of every cached LaserScan payload."""
+    with _lock:
+        return json.loads(json.dumps(_scans))
+
+
 def set_planned_path(robot_id: str, payload: Dict[str, Any]) -> None:
     with _lock:
         _paths[str(robot_id)] = {**payload, "_cached_at": time.time()}

@@ -11,6 +11,7 @@
 #include "custom_msgs_srvs/msg/stack_lifecycle.hpp"
 #include "custom_msgs_srvs/srv/set_heartbeat_params.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
+#include "manager/node_ping_checker.hpp"
 #include "rclcpp/executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 
@@ -46,10 +47,12 @@ private:
   std::recursive_mutex mtx_;
   Phase phase_{Phase::Initializing};
   std::vector<std::string> required_nodes_;
+  std::vector<std::string> ping_nodes_;
   std::string pose_topic_;
   double cov_max_{0.45};
-  bool allow_ready_from_localizing_{true};
   bool have_map_baseline_{false};
+  bool localization_module_active_{false};
+  bool initial_ping_transition_done_{false};
   std::string map_baseline_;
 
   rclcpp::Client<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedPtr hb_client_;
@@ -57,6 +60,7 @@ private:
   rclcpp::Subscription<custom_msgs_srvs::msg::StackLifecycle>::SharedPtr stack_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
   rclcpp::TimerBase::SharedPtr poll_timer_;
+  std::unique_ptr<NodePingChecker> node_ping_checker_;
   std::shared_ptr<HealthMonitorNode> self_;
 };
 

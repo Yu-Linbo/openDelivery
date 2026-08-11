@@ -107,7 +107,7 @@ from builtins import float as _float
 
 rclpy.init()
 node = rclpy.create_node("_goal_sender")
-client = ActionClient(node, NavigateToPose, "/{rid}/navigate_to_pose")
+client = ActionClient(node, NavigateToPose, "/{rid}/navigation/navigate_to_pose")
 if not client.wait_for_server(timeout_sec=10.0):
     print("ERROR: action server not available")
     exit(1)

@@ -1084,10 +1084,9 @@ button {
   opacity: 0.68;
 }
 
-.ros-node-card--stale {
-  opacity: 0.55;
-  border-color: #6b7280;
-  background: rgba(31, 41, 55, 0.65);
+.ros-node-card--auxiliary {
+  opacity: 0.5;
+  filter: grayscale(0.65);
 }
 
 .ros-robot-groups {

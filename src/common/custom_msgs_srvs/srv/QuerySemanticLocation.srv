@@ -1,0 +1,8 @@
+# Query the semantic region containing the current localized pose and the distance
+# to one requested semantic region. `current_position` is `unknown` before a pose.
+string semantic_name
+---
+bool success
+string current_position
+float64 distance
+string message

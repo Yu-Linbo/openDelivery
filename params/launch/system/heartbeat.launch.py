@@ -23,6 +23,7 @@ def generate_launch_description():
                 description="ROS 2 namespace for this instance; overrides isolation prefix independent of other args",
             ),
             DeclareLaunchArgument("current_map", default_value="nh_102"),
+            DeclareLaunchArgument("robot_model", default_value="OP1"),
             DeclareLaunchArgument(
                 "robot_status",
                 default_value="initializing",
@@ -51,6 +52,7 @@ def generate_launch_description():
                         parameters=[
                             {
                                 "robot_name": LaunchConfiguration("namespace"),
+                                "robot_model": LaunchConfiguration("robot_model"),
                                 "current_map": LaunchConfiguration("current_map"),
                                 "robot_status": LaunchConfiguration("robot_status"),
                                 "task_status": LaunchConfiguration("task_status"),

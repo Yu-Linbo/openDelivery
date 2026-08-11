@@ -329,7 +329,9 @@ class FakeRobotNode(Node):
         st.header.stamp = now
         st.header.frame_id = "map"
         st.robot_name = self.robot_name
+        st.robot_model = "OP1"
         st.current_map = self.current_map
+        st.current_position = "unknown;"
         st.robot_status = RobotStatus.ROBOT_STATUS_READY
         st.task_status = RobotStatus.TASK_STATUS_IDLE
         st.is_simulation = True

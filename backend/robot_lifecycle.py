@@ -117,7 +117,7 @@ class RobotLifecycleOrchestrator:
                 "id": "navigation",
                 "label_zh": "导航",
                 "type": "group",
-                "node": f"/{rid}/lifecycle_manager_navigation",
+                "node": f"/{rid}/navigation/lifecycle_manager",
                 "transitions": ["configure", "activate", "deactivate", "cleanup", "shutdown"],
             },
         ]
@@ -239,8 +239,8 @@ class RobotLifecycleOrchestrator:
         """Publish shutdown by updating heartbeat params (``robot_status=shutdown``)."""
         # SetHeartbeatParams: empty strings leave name/map/task_status unchanged; rate_hz<=0 unchanged.
         yaml_req = (
-            '{robot_name: "", current_map: "", robot_status: "shutdown", '
-            'task_status: "", rate_hz: 0.0}'
+            '{robot_name: "", robot_model: "", current_map: "", current_position: "", '
+            'robot_status: "shutdown", task_status: "", rate_hz: 0.0, task_progress: -1.0}'
         )
         cmd = (
             f"ros2 service call /{rid}/set_heartbeat_params "
@@ -422,7 +422,7 @@ class RobotLifecycleOrchestrator:
         """Stop per-robot orchestrated stack (including simulate launch registered under robot id)."""
         rid = self._ensure_robot(robot_id)
         hb = f"/{rid}/heartbeat"
-        nav_mgr = f"/{rid}/lifecycle_manager_navigation"
+        nav_mgr = f"/{rid}/navigation/lifecycle_manager"
         # Let subscribers see SHUTDOWN on /{rid}/robot_status before tearing down lifecycle nodes.
         self._signal_shutdown_via_heartbeat(rid)
         time.sleep(0.5)
@@ -471,7 +471,7 @@ class RobotLifecycleOrchestrator:
         node = comp.get("node")
         if not node:
             raise ValueError(f"component {cid} is not lifecycle-addressable")
-        target = "lifecycle_manager_navigation" if cid == "navigation" else cid
+        target = "navigation/lifecycle_manager" if cid == "navigation" else cid
         self._stack_lifecycle_transition(rid, target, transition)
         return self.status(rid)
 

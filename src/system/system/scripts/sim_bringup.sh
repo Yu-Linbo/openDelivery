@@ -45,6 +45,7 @@ trap cleanup EXIT INT TERM
 
 RID="${1:?robot id required (e.g. robot2)}"
 SIM_MODE="${SIM_MODE:-sim}"
+ROBOT_MODEL="${ROBOT_MODEL:-OP1}"
 
 if [[ "${SIM_BRINGUP_VERBOSE:-0}" == "1" ]]; then
   set -x
@@ -197,6 +198,7 @@ log "heartbeat current_map=${HB_CURRENT_MAP} map_file=${MAP_FILE:-<none>}"
 # --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/startup.launch.py 维护）---
 ros2 launch system startup.launch.py \
   "robot_name:=${RID}" \
+  "robot_model:=${ROBOT_MODEL}" \
   "current_map:=${HB_CURRENT_MAP}" \
   "robot_status:=initializing" \
   "sim_mode:=${SIM_MODE}" \
@@ -256,7 +258,10 @@ else
 fi
 ros2 launch manager manager.launch.py \
   "namespace:=${RID}" \
+  "robot_model:=${ROBOT_MODEL}" \
   "localization_pose_topic:=${MANAGER_POSE_TOPIC}" \
+  "health_monitor_params_file:=${ROOT}/params/params/${ROBOT_MODEL}/health_monitor.yaml" \
+  "semantic_location_params_file:=${ROOT}/params/params/${ROBOT_MODEL}/semantic_location.yaml" \
   "use_sim_time:=true" \
   "initial_slam_mode:=${SLAM_INITIAL_MODE}" \
   "${MANAGER_EXTRA[@]}" &
@@ -278,7 +283,7 @@ ros2 launch nav_bringup stack.launch.py \
   "autostart:=true" &
 log "started nav stack.launch.py (pid $!)"
 
-NM="/${RID}/lifecycle_manager_navigation"
+NM="/${RID}/navigation/lifecycle_manager"
 for _ in $(seq 1 "${NAV_WAIT}"); do
   if ros2 node list 2>/dev/null | grep -q "^${NM}$"; then
     log "navigation lifecycle manager node visible at ${NM} (autostart=true)"

@@ -1,0 +1,9 @@
+/**:
+  ros__parameters:
+    # name,min_x,min_y,max_x,max_y. Edit these regions for an OP1 deployment.
+    semantic_regions:
+      - "loading_area,-14.50,12.00,-13.00,13.50"
+      - "charging_area,-12.80,12.00,-11.20,13.50"
+      - "dispatch_area,-10.80,12.00,-9.20,13.50"
+      - "waiting_area,-14.50,9.80,-13.00,11.40"
+    status_update_sec: 1.0

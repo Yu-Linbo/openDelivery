@@ -104,6 +104,7 @@ const btnRelocPoseOnly = document.getElementById("btn-reloc-pose-only");
 const btnRelocBoth = document.getElementById("btn-reloc-both");
 const btnRelocFillPose = document.getElementById("btn-reloc-fill-pose");
 const relocPickToggle = document.getElementById("reloc-pick-toggle");
+const btnRelocPickGoal = document.getElementById("btn-reloc-pick-goal");
 const btnRelocSkipHeading = document.getElementById("btn-reloc-skip-heading");
 const btnRelocClearPick = document.getElementById("btn-reloc-clear-pick");
 const mapNameInput = document.getElementById("map-name-input");
@@ -212,6 +213,9 @@ const latestScanByRobot = {};
 const latestPathByRobot = {};
 let sensorPollTimer = null;
 let sensorPollInFlight = false;
+let scanStream = null;
+let scanStreamActive = false;
+let scanStreamRetryAt = 0;
 
 /** Live OccupancyGrid polling for floor like robot1_mapping → GET /api/mapping/live?robot_id= */
 let mapLiveTimer = null;
@@ -243,6 +247,8 @@ let dragLastY = 0;
 
 /** 地图选位姿：0 定点，1 定朝向 */
 let relocPickStep = 0;
+/** 当前地图选点用途：重定位或导航目标。 */
+let relocPickAction = "relocalize";
 /** @type {{ x: number, y: number } | null} */
 let relocPickAnchorWorld = null;
 let relocPickHoverSx = null;
@@ -402,6 +408,24 @@ async function postRobotCommand(payload) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* ignore */
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `请求失败 (${res.status})`);
+  }
+  return data;
+}
+
+async function postRobotGoto(robotId, x, y, yaw) {
+  const res = await fetch(`${API_BASE_URL}/api/robot/motion/goto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ robot_id: robotId, x, y, yaw }),
   });
   let data = {};
   try {
@@ -963,25 +987,8 @@ async function runSimBringupForRobot(rid) {
   if (simBringupInFlightByRobot[rid]) {
     return;
   }
-  const backendOwnedPresence = robotStatusCacheItems.some((x) => x && x.id && x.sim_button);
-  if (backendOwnedPresence) {
-    const cacheRow = robotStatusCacheItems.find((x) => x && x.id === rid);
-    const sb = cacheRow && cacheRow.sim_button ? cacheRow.sim_button : null;
-    if (sb && (sb.disabled || sb.action === "pending")) {
-      return;
-    }
-  }
   if (pruneStaleSimOnlinePhaseIfNeeded(rid)) {
     persistSimBringupPhasesToSession();
-  }
-  if (
-    !backendOwnedPresence &&
-    (simBringupPhaseByRobot[rid] === "starting" || simBringupPhaseByRobot[rid] === "sim_online")
-  ) {
-    return;
-  }
-  if (!backendOwnedPresence && simBringupGlobalStartingId) {
-    return;
   }
   simBringupInFlightByRobot[rid] = true;
   delete simPostOfflineButtonUntilByRobot[rid];
@@ -1053,48 +1060,62 @@ function renderRosNodesStatus(data) {
   }
 
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-  const nowSec = Date.now() / 1000;
-  const staleThresholdSec = 10;
   const packageLabel = {
     simulate: "仿真",
     slam: "slam",
     system: "system",
     nav2: "navigation",
+    web_backend: "web_backend",
     other: "other",
   };
   const classifyRobot = (nodeName) => {
-    const m = String(nodeName || "").match(/^\/([^/]+)\//);
-    if (!m) return "system";
+    const raw = String(nodeName || "");
+    const legacyRecorder = raw.match(/^\/robot_log_recorder_(robot[0-9a-z_-]*)$/i);
+    if (legacyRecorder) return legacyRecorder[1];
+    if (raw === "/open_delivery_web_tf_bridge") return "web_backend";
+    if (raw.startsWith("/drawn_model/topdown_camera/")) return "simulation";
+    const m = raw.match(/^\/([^/]+)\//);
+    if (!m) {
+      return /\/(gazebo|spawn_entity|robot_state_publisher|joint_state_publisher)$/.test(raw)
+        ? "simulation"
+        : "system";
+    }
     const rid = String(m[1] || "").trim();
     if (/^robot[0-9a-z_-]*$/i.test(rid)) return rid;
     return "system";
   };
   const classifyPackage = (nodeName) => {
     const n = String(nodeName || "");
-    if (n.includes("/slam/")) return "slam";
+    if (n === "/open_delivery_web_tf_bridge") {
+      return "web_backend";
+    }
+    // System ownership takes precedence over the physical child namespace.
+    if (/\/(heartbeat|health_monitor|task_manager|semantic_location_query|map_server|robot_log_recorder(?:_robot[0-9a-z_-]*)?|log_bag)$/.test(n)) {
+      return "system";
+    }
     if (
-      n.includes("/bt_navigator") ||
-      n.includes("/planner_server") ||
-      n.includes("/controller_server") ||
-      n.includes("/recoveries_server") ||
-      n.includes("/waypoint_follower") ||
-      n.includes("/costmap") ||
-      n.includes("/lifecycle_manager_navigation")
+      n.includes("/navigation/") ||
+      /\/(bt_navigator|planner_server|controller_server|recoveries_server|waypoint_follower|behavior_server|smoother_server|velocity_smoother)$/.test(n) ||
+      n.includes("/costmap")
     ) {
       return "nav2";
     }
     if (
       n.includes("/simulate/") ||
-      n.includes("/diff_drive_controller") ||
-      n.includes("/laser_controller") ||
-      n.includes("/imu_plugin") ||
-      n.includes("/camera_controller")
+      n.startsWith("/drawn_model/topdown_camera/") ||
+      /\/(gazebo|spawn_entity|robot_state_publisher|joint_state_publisher|diff_drive_controller|laser_controller|imu_plugin|camera_controller)$/.test(n)
     ) {
       return "simulate";
     }
-    if (n.includes("/heartbeat")) return "system";
+    if (n.includes("/slam/")) {
+      return "slam";
+    }
     return "other";
   };
+  const isAuxiliaryNode = (nodeName) =>
+    /\/(transform_listener_impl_[^/]+|[^/]+_rclcpp_node|tf_listener|tf_static_listener)$/.test(
+      String(nodeName || "")
+    );
 
   const robotMap = new Map();
   nodes.forEach((n) => {
@@ -1105,26 +1126,16 @@ function renderRosNodesStatus(data) {
     if (!robotMap.has(rid)) {
       robotMap.set(rid, { id: rid, packages: new Map(), count: 0 });
     }
-    const g = robotMap.get(rid);
-    if (!g.packages.has(pkg)) g.packages.set(pkg, []);
-    g.packages.get(pkg).push(n);
-    g.count += 1;
+    const group = robotMap.get(rid);
+    if (!group.packages.has(pkg)) group.packages.set(pkg, []);
+    group.packages.get(pkg).push(n);
+    group.count += 1;
   });
   const robotGroups = Array.from(robotMap.values()).sort((a, b) => a.id.localeCompare(b.id));
-  const staleCount = nodes.filter((n) => {
-    const ts = Number(n && n.table_ts ? n.table_ts : 0);
-    return ts > 0 && nowSec - ts > staleThresholdSec;
-  }).length;
-  rosNodesSummary.textContent =
-    staleCount > 0
-      ? `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length} · 延迟节点: ${staleCount}`
-      : `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length}`;
+  rosNodesSummary.textContent = `机器人组: ${robotGroups.length} · 节点总数: ${nodes.length}`;
 
   const renderNodeCard = (n) => {
     const name = String(n && n.name ? n.name : "");
-    const tableTs = Number(n && n.table_ts ? n.table_ts : 0);
-    const ageSec = tableTs > 0 ? Math.max(0, nowSec - tableTs) : 0;
-    const isStale = tableTs > 0 && ageSec > staleThresholdSec;
     const lifecycle = n && n.lifecycle ? n.lifecycle : {};
     const lcAvailable = !!lifecycle.available;
     const lcState = String(lifecycle.state || (lcAvailable ? "unknown" : "missing"));
@@ -1132,11 +1143,11 @@ function renderRosNodesStatus(data) {
     const transitions = Array.isArray(n && n.lifecycle_transitions) ? n.lifecycle_transitions : [];
     const lcButtons = transitions
       .map(
-        (t) =>
+        (transition) =>
           `<button type="button" data-node-lifecycle="1" data-node-name="${escapeHtml(
             name
-          )}" data-transition="${escapeHtml(t)}"${lcAvailable ? "" : " disabled"}>${escapeHtml(
-            t
+          )}" data-transition="${escapeHtml(transition)}"${lcAvailable ? "" : " disabled"}>${escapeHtml(
+            transition
           )}</button>`
       )
       .join("");
@@ -1151,15 +1162,9 @@ function renderRosNodesStatus(data) {
           ${lcButtons || '<button type="button" disabled>lifecycle 不可用</button>'}
         </div>`
       : "";
-    const freshnessMeta = tableTs
-      ? `<div class="ros-node-meta">采样时间: <code>${ageSec.toFixed(1)}s 前</code>${
-          isStale ? "（已延迟）" : ""
-        }</div>`
-      : `<div class="ros-node-meta">采样时间: <code>unknown</code></div>`;
+    const auxiliaryClass = isAuxiliaryNode(name) ? " ros-node-card--auxiliary" : "";
     return `
-      <article class="ros-node-card ${n && n.running ? "" : "ros-node-card--missing"}${
-        isStale ? " ros-node-card--stale" : ""
-      }">
+      <article class="ros-node-card ${n && n.running ? "" : "ros-node-card--missing"}${auxiliaryClass}">
         <div class="ros-node-head">
           <div class="ros-node-head__titles">
             <strong><code>${escapeHtml(name)}</code></strong>
@@ -1167,7 +1172,6 @@ function renderRosNodesStatus(data) {
           <span class="ros-node-badge ${statusClass}">${n && n.running ? "运行中" : "未运行"}</span>
         </div>
         ${lifecycleMeta}
-        ${freshnessMeta}
         <div class="ros-node-controls">
           ${lifecycleActions}
           <div class="ros-node-actions">
@@ -1182,14 +1186,14 @@ function renderRosNodesStatus(data) {
 
   rosRobotGroups.innerHTML = robotGroups
     .map((group) => {
-      const pkgOrder = ["simulate", "slam", "system", "nav2", "other"];
+      const pkgOrder = ["simulate", "slam", "system", "nav2", "web_backend", "other"];
       const pkgBlocks = pkgOrder
-        .filter((k) => group.packages.has(k))
-        .map((k) => {
-          const items = group.packages.get(k) || [];
+        .filter((kind) => group.packages.has(kind))
+        .map((kind) => {
+          const items = group.packages.get(kind) || [];
           return `
             <div class="ros-package-block">
-              <div class="ros-package-title">${escapeHtml(packageLabel[k] || k)} · ${items.length}</div>
+              <div class="ros-package-title">${escapeHtml(packageLabel[kind] || kind)} · ${items.length}</div>
               <div class="ros-nodes-list">
                 ${items.map(renderNodeCard).join("")}
               </div>
@@ -1304,6 +1308,7 @@ function exitRelocPickModeAfterDone(message) {
   relocPickAnchorWorld = null;
   relocPickHoverSx = null;
   relocPickHoverSy = null;
+  relocPickAction = "relocalize";
   if (relocMessage && message) {
     relocMessage.textContent = message;
   }
@@ -1324,6 +1329,42 @@ function resetRelocPickState(hint) {
     relocMessage.textContent = hint;
   }
   renderScene();
+}
+
+async function publishPickedNavigationGoal(goal) {
+  const rid = relocRobotId && relocRobotId.value ? relocRobotId.value.trim() : "";
+  if (!rid) {
+    if (relocMessage) {
+      relocMessage.textContent = "请填写机器人 ID，未下发导航目标";
+    }
+    return;
+  }
+  if (relocMessage) {
+    relocMessage.textContent = `正在向 ${rid} 下发导航目标…`;
+  }
+  try {
+    await postRobotGoto(rid, goal.x, goal.y, goal.yaw);
+    if (relocMessage) {
+      relocMessage.textContent = `已向 ${rid} 下发导航目标`;
+    }
+    appendLog(`下发导航目标 → ${rid} (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)}, ${goal.yaw.toFixed(2)})`);
+  } catch (err) {
+    if (relocMessage) {
+      relocMessage.textContent = err.message || String(err);
+    }
+  }
+}
+
+function finishRelocMapPick(yaw) {
+  const action = relocPickAction;
+  const anchor = relocPickAnchorWorld;
+  if (action === "goto" && anchor) {
+    const goal = { x: anchor.x, y: anchor.y, yaw };
+    exitRelocPickModeAfterDone("目标点已设置，正在下发导航…");
+    publishPickedNavigationGoal(goal);
+    return;
+  }
+  exitRelocPickModeAfterDone("已设置朝向，可下发重定位");
 }
 
 /**
@@ -1361,7 +1402,10 @@ function handleRelocMapClick(ev) {
       relocY.value = String(Number(world.y.toFixed(3)));
     }
     if (relocMessage) {
-      relocMessage.textContent = "已定点，再点击地图设置朝向（或「跳过朝向」）";
+      relocMessage.textContent =
+        relocPickAction === "goto"
+          ? "已定导航目标位置，再点击地图设置朝向（或「跳过朝向」）"
+          : "已定点，再点击地图设置朝向（或「跳过朝向」）";
     }
     renderScene();
     return true;
@@ -1371,7 +1415,7 @@ function handleRelocMapClick(ev) {
   if (relocYaw) {
     relocYaw.value = String(Number(yaw.toFixed(4)));
   }
-  exitRelocPickModeAfterDone("已设置朝向，可下发重定位");
+  finishRelocMapPick(yaw);
   return true;
 }
 
@@ -2276,6 +2320,60 @@ function stopSensorPolling() {
   }
 }
 
+function stopScanStream() {
+  if (scanStream) {
+    scanStream.close();
+    scanStream = null;
+  }
+  scanStreamActive = false;
+}
+
+function startScanStream() {
+  if (
+    scanStream ||
+    Date.now() < scanStreamRetryAt ||
+    !(scan2dToggle && scan2dToggle.checked)
+  ) {
+    return;
+  }
+  const eventSource = new EventSource(`${API_BASE_URL}/api/robot/scan/stream`);
+  scanStream = eventSource;
+  eventSource.onopen = () => {
+    scanStreamActive = true;
+    scanStreamRetryAt = 0;
+  };
+  eventSource.onmessage = (event) => {
+    if (!(scan2dToggle && scan2dToggle.checked)) {
+      return;
+    }
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    const scans =
+      payload && payload.scans && typeof payload.scans === "object" ? payload.scans : {};
+    Object.entries(scans).forEach(([robotId, data]) => {
+      if (data && data.available && Array.isArray(data.hits)) {
+        latestScanByRobot[robotId] = data;
+      } else {
+        delete latestScanByRobot[robotId];
+      }
+    });
+    scheduleMapPaint();
+  };
+  eventSource.onerror = () => {
+    if (scanStream === eventSource) {
+      scanStreamRetryAt = Date.now() + 5000;
+      stopScanStream();
+      if (scan2dToggle && scan2dToggle.checked) {
+        startSensorPolling();
+      }
+    }
+  };
+}
+
 function stopMapLivePolling() {
   if (mapLiveTimer) {
     clearInterval(mapLiveTimer);
@@ -2373,6 +2471,11 @@ function startSensorPolling() {
   stopSensorPolling();
   const wantScan = scan2dToggle && scan2dToggle.checked;
   const wantPath = plannedPathToggle && plannedPathToggle.checked;
+  if (wantScan) {
+    startScanStream();
+  } else {
+    stopScanStream();
+  }
   if (!wantScan && !wantPath) {
     return;
   }
@@ -2391,7 +2494,7 @@ function startSensorPolling() {
       await Promise.all(
         here.map(async (r) => {
         const id = encodeURIComponent(r.id);
-        if (ws) {
+        if (ws && !scanStreamActive) {
           const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/scan_2d`);
           if (d) {
             latestScanByRobot[r.id] = d;
@@ -2861,10 +2964,38 @@ async function initMonitor() {
   if (relocPickToggle) {
     relocPickToggle.addEventListener("change", () => {
       syncRelocPickCursorClass();
-      if (!relocPickToggle.checked) {
+      if (relocPickToggle.checked) {
+        relocPickAction = "relocalize";
+        resetRelocPickState("单击地图定位置，再单击定朝向");
+      } else {
+        relocPickAction = "relocalize";
         resetRelocPickState("");
       }
       saveMonitorCheckboxPrefs();
+    });
+  }
+  if (btnRelocPickGoal) {
+    btnRelocPickGoal.addEventListener("click", () => {
+      const rid = relocRobotId && relocRobotId.value ? relocRobotId.value.trim() : "";
+      if (!rid) {
+        if (relocMessage) {
+          relocMessage.textContent = "请先填写机器人 ID";
+        }
+        return;
+      }
+      if (!activePgm || !activeMeta || !relocPickToggle) {
+        if (relocMessage) {
+          relocMessage.textContent = "请先选择并加载地图";
+        }
+        return;
+      }
+      relocPickAction = "goto";
+      resetRelocPickState("");
+      relocPickToggle.checked = true;
+      syncRelocPickCursorClass();
+      if (relocMessage) {
+        relocMessage.textContent = `为 ${rid} 选导航目标：单击地图定位置，再单击定朝向`;
+      }
     });
   }
   if (btnRelocSkipHeading) {
@@ -2872,7 +3003,8 @@ async function initMonitor() {
       if (relocPickStep !== 1) {
         return;
       }
-      exitRelocPickModeAfterDone("已定点，朝向请手填或保持原值");
+      const yaw = parseFloat((relocYaw && relocYaw.value) || "0");
+      finishRelocMapPick(Number.isFinite(yaw) ? yaw : 0);
     });
   }
   if (btnRelocClearPick) {

@@ -25,6 +25,25 @@ ament_target_dependencies(health_monitor_node
   geometry_msgs
 )
 
+add_executable(semantic_location_query_node
+  src/semantic_location_query_node.cpp
+)
+target_include_directories(semantic_location_query_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+ament_target_dependencies(semantic_location_query_node
+  rclcpp
+  custom_msgs_srvs
+  geometry_msgs
+)
+
+add_executable(semantic_location_query_example
+  examples/semantic_location_query_example.cpp
+)
+target_include_directories(semantic_location_query_example PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
 add_executable(task_manager_node
   src/task_manager_node.cpp
 )
@@ -52,7 +71,7 @@ ament_target_dependencies(stack_lifecycle_manager_node
   ament_index_cpp
 )
 
-install(TARGETS health_monitor_node task_manager_node stack_lifecycle_manager_node
+install(TARGETS health_monitor_node semantic_location_query_node semantic_location_query_example task_manager_node stack_lifecycle_manager_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config

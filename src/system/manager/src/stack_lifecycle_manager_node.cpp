@@ -129,7 +129,7 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   declare_parameter<std::string>("robot_id", "");
   declare_parameter<std::vector<std::string>>(
     "tracked_lifecycle_nodes",
-    std::vector<std::string>{"heartbeat", "lifecycle_manager_navigation", "map_server"});
+    std::vector<std::string>{"heartbeat", "navigation/lifecycle_manager", "map_server"});
 
   use_sim_time_ = get_parameter("use_sim_time").as_bool();
   mapper_params_file_ = get_parameter("mapper_params_file").as_string();
@@ -332,7 +332,7 @@ bool StackLifecycleManagerNode::call_lifecycle_transition(
 bool StackLifecycleManagerNode::navigation_active() {
   if (!navigation_active_client_) {
     navigation_active_client_ = create_client<std_srvs::srv::Trigger>(
-      resolve_lifecycle_node_fqn("lifecycle_manager_navigation") + "/is_active",
+      resolve_lifecycle_node_fqn("navigation/lifecycle_manager") + "/is_active",
       rmw_qos_profile_services_default,
       client_cb_group_);
   }

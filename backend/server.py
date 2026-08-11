@@ -22,6 +22,7 @@ from ros_sensor_store import (
     get_gazebo_models,
     get_planned_path,
     get_scan,
+    get_scans,
     augment_topdown_for_api,
     get_topdown_image,
     get_topdown_image_status,
@@ -1115,7 +1116,9 @@ def _build_presence_rows() -> dict:
                 "name": str(lr.get("name") or lr.get("id") or ci.get("robot_name") or rid),
                 "online": online,
                 "floor": floor,
+                "robot_model": str(lr.get("robot_model") or ci.get("robot_model") or ""),
                 "persisted_current_map": str(ci.get("current_map") or "").strip(),
+                "current_position": str(lr.get("current_position") or ci.get("current_position") or "unknown;"),
                 "persisted_robot_status": str(ci.get("robot_status") or "").strip(),
                 "persisted_task_status": str(ci.get("task_status") or "").strip(),
                 "live_robot_status": str(lr.get("robot_status") or "").strip(),
@@ -1287,7 +1290,7 @@ def _build_debug_nodes_view() -> dict:
         return (
             "/slam/lifecycle_manager" in n
             or "/heartbeat" in n
-            or "/lifecycle_manager_navigation" in n
+            or "/navigation/lifecycle_manager" in n
         )
 
     nodes = []
@@ -1305,11 +1308,12 @@ def _build_debug_nodes_view() -> dict:
                 "name": nm,
                 "running": True,
                 "lifecycle": lc,
+                "module_lifecycle_manager": nm.endswith("/slam/lifecycle_manager") or nm.endswith("/navigation/lifecycle_manager"),
                 "can_kill": True,
                 "kill_api": "/api/ros/nodes/discovered/kill",
                 "lifecycle_transitions": (
                     ["configure", "activate", "deactivate", "cleanup", "shutdown"]
-                    if lc_capable
+                    if nm.endswith("/slam/lifecycle_manager") or nm.endswith("/navigation/lifecycle_manager")
                     else []
                 ),
             }
@@ -2696,6 +2700,41 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 500)
             return
 
+        if path == "/api/robot/scan/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            try:
+                while True:
+                    now = time.time()
+                    scans = {}
+                    for rid, data in get_scans().items():
+                        received_at = float(data.pop("_cached_at", 0.0) or 0.0)
+                        age_sec = max(0.0, now - received_at) if received_at else None
+                        if age_sec is None or age_sec > 1.0:
+                            scans[rid] = {
+                                "available": False,
+                                "reason": "stale scan",
+                                "received_at": received_at,
+                                "age_sec": age_sec,
+                            }
+                            continue
+                        data["available"] = True
+                        data["received_at"] = received_at
+                        data["age_sec"] = round(age_sec, 3)
+                        scans[rid] = data
+                    payload = json.dumps(
+                        {"timestamp": now, "scans": scans}, ensure_ascii=False
+                    )
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(0.1)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
         if path == "/api/robot/pose/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -2708,7 +2747,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     payload = json.dumps(POSE_PROVIDER.get_pose(), ensure_ascii=False)
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                    time.sleep(0.25)
+                    time.sleep(0.1)
             except (BrokenPipeError, ConnectionResetError):
                 return
 

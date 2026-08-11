@@ -107,17 +107,19 @@ def _launch_setup(context, *_args, **_kwargs):
         "behavior_trees",
         "navigate_w_replanning_and_recovery.xml",
     )
+    navigation_namespace = f"{robot_name}/navigation"
 
     return [
         GroupAction(
             [
-                PushRosNamespace(robot_name),
+                PushRosNamespace(navigation_namespace),
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(
                         os.path.join(pkg_nav, "launch", "navigation_namespaced.launch.py")
                     ),
                     launch_arguments={
-                        "namespace": robot_name,
+                        "namespace": navigation_namespace,
+                        "robot_name": robot_name,
                         "use_sim_time": use_sim_str,
                         "autostart": autostart,
                         "params_file": params_path,

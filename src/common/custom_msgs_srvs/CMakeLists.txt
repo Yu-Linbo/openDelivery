@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/StackLifecycle.msg"
   "srv/SetHeartbeatParams.srv"
   "srv/SetRobotTask.srv"
+  "srv/QuerySemanticLocation.srv"
   "srv/SetStackLifecycleTransition.srv"
   DEPENDENCIES std_msgs
 )

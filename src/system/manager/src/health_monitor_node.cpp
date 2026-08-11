@@ -75,16 +75,17 @@ HealthMonitorNode::HealthMonitorNode()
 : rclcpp::Node("health_monitor") {
   declare_parameter<std::vector<std::string>>(
     "required_nodes", std::vector<std::string>{"heartbeat"});
+  declare_parameter<std::vector<std::string>>("ping_nodes", std::vector<std::string>{});
   declare_parameter<std::string>("localization_pose_topic", "amcl_pose");
   declare_parameter<double>("position_covariance_max", 0.45);
-  declare_parameter<bool>("allow_ready_from_localizing", true);
   declare_parameter<double>("poll_period_sec", 1.0);
 
   required_nodes_ = get_parameter("required_nodes").as_string_array();
+  ping_nodes_ = get_parameter("ping_nodes").as_string_array();
   pose_topic_ = strip(get_parameter("localization_pose_topic").as_string());
   cov_max_ = get_parameter("position_covariance_max").as_double();
-  allow_ready_from_localizing_ = get_parameter("allow_ready_from_localizing").as_bool();
   const double period = std::max(0.2, get_parameter("poll_period_sec").as_double());
+  node_ping_checker_ = std::make_unique<NodePingChecker>(this);
 
   hb_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>("set_heartbeat_params");
   status_sub_ = create_subscription<custom_msgs_srvs::msg::RobotStatus>(
@@ -109,10 +110,9 @@ HealthMonitorNode::HealthMonitorNode()
 
   RCLCPP_INFO(
     get_logger(),
-    "health_monitor: nodes=%zu pose_topic=%s allow_ready_from_localizing=%s",
-    required_nodes_.size(),
-    pose_topic_.empty() ? "(disabled)" : pose_topic_.c_str(),
-    allow_ready_from_localizing_ ? "true" : "false");
+    "health_monitor: required_nodes=%zu ping_nodes=%zu pose_topic=%s",
+    required_nodes_.size(), ping_nodes_.size(),
+    pose_topic_.empty() ? "(disabled)" : pose_topic_.c_str());
 }
 
 void HealthMonitorNode::set_self(std::shared_ptr<HealthMonitorNode> self) {
@@ -191,9 +191,21 @@ void HealthMonitorNode::on_poll() {
   if (phase_ == Phase::ShutdownSent) {
     return;
   }
-  // Node presence alone does not mean localization is active. State transitions
-  // are driven by stack_lifecycle in on_stack_lifecycle().
-  (void)required_satisfied();
+  if (!localization_module_active_ || phase_ != Phase::Localizing ||
+    initial_ping_transition_done_ || !required_satisfied() ||
+    !node_ping_checker_->all_present(ping_nodes_))
+  {
+    return;
+  }
+  // This is a one-time ROS graph reachability gate, never a latency check.
+  if (call_set_params("localization_lost", "")) {
+    phase_ = Phase::LocalizationLost;
+    initial_ping_transition_done_ = true;
+    reset_map_baseline();
+    RCLCPP_INFO(
+      get_logger(),
+      "robot_status localizing -> localization_lost (all configured nodes reachable)");
+  }
 }
 
 void HealthMonitorNode::on_stack_lifecycle(
@@ -208,21 +220,14 @@ void HealthMonitorNode::on_stack_lifecycle(
       localization_state = component.state;
     }
   }
-  if (localization_state == "active") {
+  localization_module_active_ = localization_state == "active";
+  if (localization_module_active_) {
     if (phase_ == Phase::Initializing && call_set_params("localizing", "")) {
       phase_ = Phase::Localizing;
       reset_map_baseline();
-      RCLCPP_INFO(get_logger(), "robot_status -> localizing (SLAM localization active)");
+      RCLCPP_INFO(get_logger(), "robot_status -> localizing (localization module active)");
     }
     return;
-  }
-  if (phase_ == Phase::Initializing && !localization_state.empty()) {
-    if (call_set_params("localization_lost", "")) {
-      phase_ = Phase::LocalizationLost;
-      RCLCPP_INFO(
-        get_logger(),
-        "robot_status -> localization_lost (localization module not active)");
-    }
   }
 }
 
@@ -268,12 +273,6 @@ void HealthMonitorNode::on_pose(const geometry_msgs::msg::PoseWithCovarianceStam
       RCLCPP_INFO(get_logger(), "robot_status -> ready (localization ok)");
     }
     return;
-  }
-  if (phase_ == Phase::Localizing && allow_ready_from_localizing_) {
-    if (call_set_params("ready", "")) {
-      phase_ = Phase::Ready;
-      RCLCPP_INFO(get_logger(), "robot_status -> ready (from localizing, covariance ok)");
-    }
   }
 }
 

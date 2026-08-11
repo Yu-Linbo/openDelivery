@@ -1,6 +1,10 @@
 std_msgs/Header header
 string robot_name
+# Robot model/profile identifier, e.g. OP1. It selects params/params/<model>/ at bringup.
+string robot_model
 string current_map
+# Semantic position summary: "current_position;next_position:distance;...;".
+string current_position
 
 # --- robot_status: 上线生命周期（health_monitor → set_heartbeat_params → heartbeat）---
 # echo 直接显示下列字面量；常量供代码引用，避免魔法字符串

@@ -14,6 +14,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("robot_name", default_value="robot2"),
+            DeclareLaunchArgument("robot_model", default_value="OP1"),
             DeclareLaunchArgument("current_map", default_value="nh_102"),
             DeclareLaunchArgument("robot_status", default_value="initializing"),
             DeclareLaunchArgument("sim_mode", default_value="sim"),
@@ -25,7 +26,7 @@ def generate_launch_description():
             Node(
                 package="log_bag",
                 executable="robot_log_recorder",
-                name="log_bag",
+                name="robot_log_recorder",
                 namespace=LaunchConfiguration("robot_name"),
                 output="screen",
                 arguments=[
@@ -45,6 +46,7 @@ def generate_launch_description():
                 ),
                 launch_arguments=[
                     ("robot_name", LaunchConfiguration("robot_name")),
+                    ("robot_model", LaunchConfiguration("robot_model")),
                     ("current_map", LaunchConfiguration("current_map")),
                     ("robot_status", LaunchConfiguration("robot_status")),
                     ("sim_mode", LaunchConfiguration("sim_mode")),

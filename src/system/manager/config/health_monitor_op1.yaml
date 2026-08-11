@@ -1,0 +1,12 @@
+/**:
+  ros__parameters:
+    # ROS graph reachability gate; this is deliberately not a latency measurement.
+    ping_nodes:
+      - heartbeat
+      - task_manager
+      - health_monitor
+      - semantic_location_query
+      - slam/lifecycle_manager
+      - slam/localizing
+      - navigation/lifecycle_manager
+      - map_server
