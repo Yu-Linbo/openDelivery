@@ -133,11 +133,26 @@ def send_navigate_to_pose(
 import rclpy
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
+from lifecycle_msgs.srv import GetState
 from builtins import float as _float
 
 rclpy.init()
-node = rclpy.create_node("_goal_sender")
+node = rclpy.create_node("_goal_sender_{rid}")
+client = None
+lifecycle = None
 try:
+    lifecycle = node.create_client(GetState, "/{rid}/navigation/bt_navigator/get_state")
+    if not lifecycle.wait_for_service(timeout_sec=3.0):
+        raise RuntimeError("navigation lifecycle service not available for {rid}")
+    state_future = lifecycle.call_async(GetState.Request())
+    rclpy.spin_until_future_complete(node, state_future, timeout_sec=3.0)
+    if not state_future.done() or state_future.result() is None:
+        raise RuntimeError("navigation lifecycle state unavailable for {rid}")
+    state = state_future.result().current_state.label
+    if state != "active":
+        raise RuntimeError("navigation stack for {rid} is not active: " + state)
+    node.destroy_client(lifecycle)
+    lifecycle = None
     client = ActionClient(node, NavigateToPose, "/{rid}/navigation/navigate_to_pose")
     if not client.wait_for_server(timeout_sec=10.0):
         raise RuntimeError("action server not available")
@@ -156,11 +171,26 @@ try:
         raise RuntimeError("navigation goal rejected")
     print("Goal accepted")
 finally:
+    if client is not None:
+        client.destroy()
+    if lifecycle is not None:
+        node.destroy_client(lifecycle)
     node.destroy_node()
     if rclpy.ok():
         rclpy.shutdown()
 """
-    return _ros_run(f'python3 -c {shlex.quote(script)}', timeout=25.0)
+    try:
+        return _ros_run(f'python3 -c {shlex.quote(script)}', timeout=25.0)
+    except RuntimeError as exc:
+        # rclpy writes a Python traceback to stderr; expose only the actual
+        # reason to the HTTP/Web caller.
+        lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+        detail = next(
+            (line.split("RuntimeError:", 1)[1].strip() for line in reversed(lines)
+             if "RuntimeError:" in line),
+            lines[-1] if lines else "navigation request failed",
+        )
+        raise RuntimeError(detail) from None
 
 
 def _load_waypoints() -> Dict[str, Dict[str, Dict[str, float]]]:

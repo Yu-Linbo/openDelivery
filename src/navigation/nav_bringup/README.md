@@ -46,7 +46,11 @@ sudo apt-get install -y \
 
 临时 `nav2` 参数文件必须是 **顶层为节点名**（`bt_navigator:`、`controller_server:`、…），由 `RewrittenYaml` 再包一层 `<namespace>/`。不要在生成该文件时额外再嵌套一层 `<robot_name>/`，否则参数落不到实际节点上（代价地图会退回默认层类型，`bt_navigator` 可能报缺少 BT 插件库）。
 
+## 多机器人隔离
+
+每台机器人使用独立的 ROS namespace、TF frame、地图、传感器、速度和 Nav2 action。Groot ZMQ 监控默认关闭，因为 Foxy 的固定 1666/1667 TCP 端口是主机级资源；同时启动多个 bt_navigator 时会导致第二个实例配置失败（Address already in use）。Web 行为树视图由 ROS 节点状态生成，不依赖 Groot。
+
 ## 动作接口
 
-- `/<robot_name>/navigate_to_pose`
-- `/<robot_name>/follow_waypoints`
+- `/<robot_name>/navigation/navigate_to_pose`
+- `/<robot_name>/navigation/follow_waypoints`

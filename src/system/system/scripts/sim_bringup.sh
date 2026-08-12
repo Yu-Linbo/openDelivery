@@ -293,5 +293,28 @@ for _ in $(seq 1 "${NAV_WAIT}"); do
   sleep 1
 done
 
-log "all stack processes started; waiting on background jobs (simulate is long-lived)"
+nav_ready=0
+NAV_REQUIRED=(controller_server planner_server recoveries_server bt_navigator waypoint_follower)
+for _ in $(seq 1 "${NAV_WAIT}"); do
+  nav_ready=1
+  for node in "${NAV_REQUIRED[@]}"; do
+    state="$(ros2 lifecycle get "/${RID}/navigation/${node}" 2>/dev/null || true)"
+    if [[ "${state}" != active* ]]; then
+      nav_ready=0
+      break
+    fi
+  done
+  if [[ "${nav_ready}" == "1" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "${nav_ready}" != "1" ]]; then
+  log "ERROR: navigation stack failed to become active for ${RID}"
+  for node in "${NAV_REQUIRED[@]}"; do
+    log "navigation state ${node}: $(ros2 lifecycle get "/${RID}/navigation/${node}" 2>/dev/null || echo missing)"
+  done
+  exit 1
+fi
+log "navigation stack active for ${RID}; all stack processes started"
 wait
