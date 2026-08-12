@@ -294,7 +294,7 @@ GMapping 源码已包含在工作区；定位使用系统包 `ros-foxy-nav2-amcl
 
 ### 8.5 启动（无头）
 
-主入口 **`simulate.launch.py`**：`robot_state_publisher` 与 `spawn_entity` 在 **`PushRosNamespace`** 下；**Gazebo** 进程全局；第二台车不重起 `gzserver` 时用 **`start_gazebo:=false namespace:=<其他>`**。
+主入口 **`simulate.launch.py`**：`robot_state_publisher` 与 `spawn_entity` 在 **`PushRosNamespace`** 下。Web 仿真上线由后端单独托管全局 Gazebo/Xvfb 世界；每个机器人栈固定使用 `start_gazebo:=false`，只生成自己的唯一 entity，并使用持久化且互不重叠的出生位姿。机器人离线仅删除本实体，不停止共享 Gazebo。
 
 `params/launch/simulate/` 与包内 `launch/` 同步，由 `system` 包安装到 **`bringup_launch/simulate/`**。
 

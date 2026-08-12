@@ -87,7 +87,11 @@ HealthMonitorNode::HealthMonitorNode()
   const double period = std::max(0.2, get_parameter("poll_period_sec").as_double());
   node_ping_checker_ = std::make_unique<NodePingChecker>(this);
 
-  hb_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>("set_heartbeat_params");
+  // Service responses must remain executable while a timer/subscription callback
+  // waits for them.
+  hb_client_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  hb_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>(
+    "set_heartbeat_params", rmw_qos_profile_services_default, hb_client_cb_group_);
   status_sub_ = create_subscription<custom_msgs_srvs::msg::RobotStatus>(
     "robot_status",
     rclcpp::QoS(10),

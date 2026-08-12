@@ -17,6 +17,8 @@ map/
 # Backend runtime files
 backend/data/robot_status_last.json
 backend/data/.robot_status_last.json.*.tmp
+backend/data/sim_spawn_slots.json
+backend/data/.sim_spawn_slots.json.*.tmp
 backend/logs/
 
 # ROS bag files

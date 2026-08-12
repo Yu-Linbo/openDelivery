@@ -249,7 +249,11 @@ void TaskManagerNode::on_localize_nav(
   // localization buffer and processes the next scan around this pose.
   if (msg->set_initial_pose && initial_pub_) {
     geometry_msgs::msg::PoseWithCovarianceStamped pose;
-    pose.header.stamp = now();
+    // Use the latest available TF. Stamping this with now() can put the pose a
+    // fraction ahead of odom->base_footprint and make AMCL reject an otherwise
+    // valid relocation with "extrapolation into the future".
+    pose.header.stamp.sec = 0;
+    pose.header.stamp.nanosec = 0;
     pose.header.frame_id = "map";
     pose.pose.pose.position.x = msg->x;
     pose.pose.pose.position.y = msg->y;

@@ -292,6 +292,47 @@ std::string StackLifecycleManagerNode::query_lifecycle_state(const std::string &
   }
 }
 
+std::string StackLifecycleManagerNode::wait_for_stable_lifecycle_state(
+  const std::string & node_fqn,
+  std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::string state = "missing";
+  do {
+    state = query_lifecycle_state(node_fqn);
+    if (state == "unconfigured" || state == "inactive" || state == "active" ||
+        state == "finalized") {
+      return state;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  } while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline);
+  return state;
+}
+
+bool StackLifecycleManagerNode::ensure_lifecycle_active(
+  const std::string & node_fqn,
+  std::string * err) {
+  std::string state = wait_for_stable_lifecycle_state(node_fqn, std::chrono::seconds(5));
+  if (state == "unconfigured") {
+    if (!call_lifecycle_transition(node_fqn, "configure", err)) {
+      return false;
+    }
+    state = wait_for_stable_lifecycle_state(node_fqn, std::chrono::seconds(3));
+  }
+  if (state == "inactive") {
+    if (!call_lifecycle_transition(node_fqn, "activate", err)) {
+      return false;
+    }
+    state = wait_for_stable_lifecycle_state(node_fqn, std::chrono::seconds(3));
+  }
+  if (state == "active") {
+    return true;
+  }
+  if (err) {
+    *err = "cannot activate " + node_fqn + ": lifecycle state is " + state;
+  }
+  return false;
+}
+
 bool StackLifecycleManagerNode::call_lifecycle_transition(
   const std::string & node_fqn,
   const std::string & transition,
@@ -555,16 +596,8 @@ bool StackLifecycleManagerNode::start_slam_child(const std::string & mode) {
     return false;
   }
   const std::string amcl = slam_node_fqn("localizing");
-  std::string state = query_lifecycle_state(amcl);
-  if (state == "unconfigured") {
-    if (!call_lifecycle_transition(amcl, "configure", &err)) {
-      RCLCPP_ERROR(get_logger(), "configure AMCL: %s", err.c_str());
-      return false;
-    }
-    state = "inactive";
-  }
-  if (state != "active" && !call_lifecycle_transition(amcl, "activate", &err)) {
-    RCLCPP_ERROR(get_logger(), "activate AMCL: %s", err.c_str());
+  if (!ensure_lifecycle_active(amcl, &err)) {
+    RCLCPP_ERROR(get_logger(), "start AMCL: %s", err.c_str());
     return false;
   }
   slam_mode_ = "localize";

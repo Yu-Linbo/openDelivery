@@ -85,24 +85,13 @@ else
 fi
 cd "${ROOT}"
 
-gazebo_running() {
-  if pgrep -f gzserver >/dev/null 2>&1; then
-    log "gzserver already running"
-    return 0
-  fi
-  if timeout 4 ros2 service list 2>/dev/null | grep -qE '/gazebo/'; then
-    log "/gazebo/ services present"
-    return 0
-  fi
-  return 1
-}
 
-if gazebo_running; then
-  START_GZ="false"
-else
-  START_GZ="true"
-fi
-log "simulate: start_gazebo:=${START_GZ} spawn_robot:=true"
+START_GZ="${SIM_START_GAZEBO:-false}"
+SPAWN_X="${SIM_SPAWN_X:--13.703}"
+SPAWN_Y="${SIM_SPAWN_Y:-12.825}"
+SPAWN_Z="${SIM_SPAWN_Z:-0.05}"
+SPAWN_YAW="${SIM_SPAWN_YAW:-0.0}"
+log "simulate: shared Gazebo start_gazebo=${START_GZ} spawn_robot=true pose=(${SPAWN_X},${SPAWN_Y},${SPAWN_Z},${SPAWN_YAW})"
 
 STORE="${OPEN_DELIVERY_STATUS_DB_PATH:-${ROOT}/backend/data/robot_status_last.json}"
 AUTO_MAPPING=0
@@ -163,6 +152,7 @@ resolve_floor_map_yaml() {
 }
 
 SIM_WAIT="${SIM_BRINGUP_SIM_WAIT:-6}"
+SIM_ENTITY_WAIT="${SIM_BRINGUP_ENTITY_WAIT_SEC:-30}"
 HB_WAIT="${SIM_BRINGUP_HEARTBEAT_WAIT_SEC:-20}"
 MANAGER_WAIT="${SIM_BRINGUP_MANAGER_WAIT:-2}"
 MANAGER_POSE_TOPIC="${SIM_BRINGUP_MANAGER_POSE_TOPIC:-amcl_pose}"
@@ -215,9 +205,27 @@ ros2 launch simulate simulate.launch.py \
   "namespace:=${RID}" \
   "start_gazebo:=${START_GZ}" \
   "spawn_robot:=true" \
+  "spawn_x:=${SPAWN_X}" \
+  "spawn_y:=${SPAWN_Y}" \
+  "spawn_z:=${SPAWN_Z}" \
+  "spawn_yaw:=${SPAWN_YAW}" \
   "use_sim_time:=true" &
 log "started simulate.launch.py (pid $!)"
 sleep "${SIM_WAIT}"
+
+entity_ready=0
+for _ in $(seq 1 "${SIM_ENTITY_WAIT}"); do
+  if ros2 node list 2>/dev/null | grep -q "^/${RID}/diff_drive_controller$"; then
+    entity_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${entity_ready}" != "1" ]]; then
+  log "ERROR: Gazebo entity/plugins failed to become ready for ${RID}"
+  exit 1
+fi
+log "Gazebo entity/plugins ready for ${RID}"
 
 # --- 2) 心跳 lifecycle 激活（节点由 startup.launch.py 启动）---
 HB="/${RID}/heartbeat"

@@ -1,6 +1,7 @@
 #ifndef MANAGER__STACK_LIFECYCLE_MANAGER_NODE_HPP_
 #define MANAGER__STACK_LIFECYCLE_MANAGER_NODE_HPP_
 
+#include <chrono>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -37,6 +38,9 @@ private:
     const std::string & node_fqn);
   bool call_lifecycle_transition(const std::string & node_fqn, const std::string & transition, std::string * err);
   std::string query_lifecycle_state(const std::string & node_fqn);
+  std::string wait_for_stable_lifecycle_state(
+    const std::string & node_fqn, std::chrono::milliseconds timeout);
+  bool ensure_lifecycle_active(const std::string & node_fqn, std::string * err);
   bool navigation_active();
 
   bool set_slam_mode(const std::string & mode, std::string * err);

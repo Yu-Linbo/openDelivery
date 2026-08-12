@@ -55,6 +55,7 @@ private:
   bool initial_ping_transition_done_{false};
   std::string map_baseline_;
 
+  rclcpp::CallbackGroup::SharedPtr hb_client_cb_group_;
   rclcpp::Client<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedPtr hb_client_;
   rclcpp::Subscription<custom_msgs_srvs::msg::RobotStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<custom_msgs_srvs::msg::StackLifecycle>::SharedPtr stack_sub_;

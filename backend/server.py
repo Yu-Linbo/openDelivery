@@ -233,6 +233,8 @@ class RosNodeManager:
                                 "start_cmd": str(item.get("start_cmd") or "").strip(),
                                 "stop_cmd": str(item.get("stop_cmd") or "").strip(),
                                 "match": str(item.get("match") or node_id).strip(),
+                                "match_regex": bool(item.get("match_regex")),
+                                "persistent": bool(item.get("persistent")),
                                 "note": str(item.get("note") or "").strip(),
                             }
                         )
@@ -243,13 +245,21 @@ class RosNodeManager:
 
         return [
             {
-                "id": "simulate",
-                "name": "simulate",
+                "id": "simulation_world",
+                "name": "simulation_world",
                 "persistent": True,
-                "start_cmd": "ros2 launch simulate simulate.launch.py",
-                "stop_cmd": "pkill -f 'ros2 launch simulate simulate.launch.py'",
-                "match": "simulate.launch.py",
-                "note": "仿真场景（示例）",
+                "start_cmd": (
+                    "ros2 launch simulate simulate.launch.py "
+                    "robot_name:=simulation_world namespace:=simulation_world "
+                    "start_gazebo:=true spawn_robot:=false use_sim_time:=true"
+                ),
+                "stop_cmd": (
+                    "pkill -f 'ros2 launch simulate simulate.launch.py.*"
+                    "robot_name:=simulation_world' || true"
+                ),
+                "match": "robot_name:=simulation_world",
+                "match_regex": False,
+                "note": "共享 Gazebo/Xvfb 世界（不属于任何单台机器人）",
             },
         ]
 
@@ -335,8 +345,12 @@ class RosNodeManager:
             f'cd "{self._root_dir}" && {install_src}; '
         )
 
-    def _find_pids(self, match_text: str):
+    def _find_pids(self, match_text: str, *, match_regex: bool = False):
         if not match_text:
+            return []
+        try:
+            pattern = re.compile(match_text) if match_regex else None
+        except re.error:
             return []
         try:
             proc = subprocess.run(
@@ -350,7 +364,10 @@ class RosNodeManager:
         pids = []
         for line in (proc.stdout or "").splitlines():
             txt = line.strip()
-            if not txt or match_text not in txt:
+            if not txt:
+                continue
+            matched = bool(pattern.search(txt)) if pattern else match_text in txt
+            if not matched:
                 continue
             parts = txt.split(None, 1)
             if not parts:
@@ -369,7 +386,10 @@ class RosNodeManager:
         with self._lock:
             proc = self._procs.get(node_id)
         proc_running = bool(proc and proc.poll() is None)
-        pids = self._find_pids(spec.get("match") or "")
+        pids = self._find_pids(
+            spec.get("match") or "",
+            match_regex=bool(spec.get("match_regex")),
+        )
         running = proc_running or bool(pids)
         return {
             "id": node_id,

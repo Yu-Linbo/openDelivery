@@ -14,16 +14,19 @@ Per-robot stack orchestration for the web console.
   ``slam``：由 ``/<robot>/slam/lifecycle_manager`` 在 ``mapping`` 和 ``localizing`` 两个 Lifecycle 节点之间切换。
 """
 
+import json
 import os
 import re
 import shlex
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+ROBOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 LIFECYCLE_TRANSITIONS = {"configure", "activate", "deactivate", "cleanup", "shutdown"}
 LIFECYCLE_STATE_RE = re.compile(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)")
 
@@ -43,6 +46,9 @@ class RobotLifecycleOrchestrator:
         self._root_dir = Path(root_dir)
         self._ros_node_manager = ros_node_manager
         self._lock = threading.Lock()
+        self._infrastructure_lock = threading.Lock()
+        self._operation_lock = threading.Lock()
+        self._spawn_slots_path = self._root_dir / "backend" / "data" / "sim_spawn_slots.json"
         self._state = {}
         self._last_error = ""
 
@@ -55,6 +61,75 @@ class RobotLifecycleOrchestrator:
             f'cd "{self._root_dir}" && {install_src}; '
         )
 
+    _SPAWN_POSES = (
+        (-13.703, 12.825, 0.05, 0.0),
+        (-12.703, 12.825, 0.05, 0.0),
+        (-13.703, 11.825, 0.05, 0.0),
+        (-12.703, 11.825, 0.05, 0.0),
+        (-11.703, 12.825, 0.05, 0.0),
+        (-13.703, 10.825, 0.05, 0.0),
+        (-11.703, 11.825, 0.05, 0.0),
+        (-12.703, 10.825, 0.05, 0.0),
+        (-10.703, 12.825, 0.05, 0.0),
+        (-13.703, 9.825, 0.05, 0.0),
+        (-10.703, 11.825, 0.05, 0.0),
+        (-11.703, 10.825, 0.05, 0.0),
+        (-12.703, 9.825, 0.05, 0.0),
+        (-10.703, 10.825, 0.05, 0.0),
+        (-11.703, 9.825, 0.05, 0.0),
+        (-10.703, 9.825, 0.05, 0.0),
+    )
+
+    def _read_spawn_slots(self) -> Dict[str, int]:
+        try:
+            with open(self._spawn_slots_path, encoding="utf-8") as stream:
+                raw = json.load(stream)
+        except (FileNotFoundError, OSError, ValueError):
+            return {}
+        result = {}
+        for robot_id, slot in (raw.items() if isinstance(raw, dict) else []):
+            if isinstance(robot_id, str) and isinstance(slot, int) and 0 <= slot < len(self._SPAWN_POSES):
+                result[robot_id] = slot
+        return result
+
+    def _write_spawn_slots(self, slots: Dict[str, int]) -> None:
+        self._spawn_slots_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=str(self._spawn_slots_path.parent),
+                prefix=f".{self._spawn_slots_path.name}.", suffix=".tmp", delete=False,
+            ) as stream:
+                json.dump(slots, stream, ensure_ascii=False, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+                tmp_path = Path(stream.name)
+            os.replace(tmp_path, self._spawn_slots_path)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _spawn_pose_for_robot(self, robot_id: str):
+        rid = self._ensure_robot(robot_id)
+        with self._infrastructure_lock:
+            slots = self._read_spawn_slots()
+            slot = slots.get(rid)
+            if slot is None:
+                used = set(slots.values())
+                candidates = range(len(self._SPAWN_POSES)) if rid == "robot2" else range(1, len(self._SPAWN_POSES))
+                slot = next((index for index in candidates if index not in used), None)
+                if slot is None:
+                    raise RuntimeError(
+                        f"no free simulation spawn slot; maximum is {len(self._SPAWN_POSES)} robots"
+                    )
+                slots[rid] = slot
+                self._write_spawn_slots(slots)
+            return slot, self._SPAWN_POSES[slot]
+
     def _run_shell(self, cmd: str, timeout: float = 10.0):
         full_cmd = self._bash_prefix() + cmd
         return subprocess.run(
@@ -64,6 +139,82 @@ class RobotLifecycleOrchestrator:
             timeout=timeout,
             env=os.environ.copy(),
         )
+
+    def _gazebo_services_ready(self) -> bool:
+        try:
+            proc = self._run_shell("ros2 service list", timeout=4.0)
+        except Exception:
+            return False
+        services = set((proc.stdout or "").split()) if proc.returncode == 0 else set()
+        return {"/spawn_entity", "/delete_entity"}.issubset(services)
+
+    def _wait_for_gazebo(self, timeout_sec: float = 60.0) -> None:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                proc = self._run_shell("ros2 service list", timeout=4.0)
+            except Exception:
+                proc = None
+            services = set((proc.stdout or "").split()) if proc and proc.returncode == 0 else set()
+            if "/spawn_entity" in services and "/delete_entity" in services:
+                return
+            time.sleep(0.5)
+        raise RuntimeError("Gazebo infrastructure did not expose spawn/delete services")
+
+    def _ensure_simulation_world(self) -> None:
+        # ThreadingHTTPServer may receive two sim-up requests concurrently. Keep the
+        # host-level Gazebo/Xvfb world a singleton; robot stacks never own it.
+        with self._infrastructure_lock:
+            world_cmd = (
+                    "ros2 launch simulate simulate.launch.py "
+                    "robot_name:=simulation_world namespace:=simulation_world "
+                    "start_gazebo:=true spawn_robot:=false use_sim_time:=true"
+                )
+            world_running = self._gazebo_services_ready()
+            self._start_if_needed(
+                "simulation_world", world_cmd,
+                    stop_cmd=(
+                        "pkill -f 'ros2 launch simulate simulate.launch.py.*"
+                        "robot_name:=simulation_world' || true"
+                    ),
+                    match="robot_name:=simulation_world",
+                note="shared Gazebo world; independent from every robot stack",
+                autostart=not world_running,
+                force=not world_running,
+            )
+            self._wait_for_gazebo()
+
+    def _simulation_entity_present(self, robot_id: str) -> Optional[bool]:
+        """Return entity presence from the fresh Web bridge cache, or None if unknown."""
+        rid = self._ensure_robot(robot_id)
+        try:
+            from ros_sensor_store import get_gazebo_models
+
+            snapshot = get_gazebo_models() or {}
+            cached_at = float(snapshot.get("_cached_at") or snapshot.get("stamp") or 0.0)
+            if not snapshot.get("available") or time.time() - cached_at > 3.0:
+                return None
+            names = {
+                str(item.get("name") or "").strip()
+                for item in snapshot.get("models") or []
+                if isinstance(item, dict)
+            }
+            return rid in names
+        except Exception:
+            return None
+
+    def _delete_simulation_entity(self, robot_id: str) -> bool:
+        rid = self._ensure_robot(robot_id)
+        request = shlex.quote(f"{{name: {rid}}}")
+        try:
+            proc = self._run_shell(
+                f"ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity {request}",
+                timeout=15.0,
+            )
+        except Exception:
+            return False
+        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        return proc.returncode == 0 and ("success: True" in text or "success=true" in text)
 
     def _stack_lifecycle_transition(self, robot_id: str, node_name: str, transition: str):
         rid = str(robot_id or "").strip()
@@ -89,7 +240,7 @@ class RobotLifecycleOrchestrator:
                 "label_zh": "仿真 / Gazebo",
                 "type": "process_wrapper",
                 "managed_node_id": rid,
-                "expected_node": "/gazebo",
+                "expected_node": f"/{rid}/simulate/robot_state_publisher",
                 "transitions": ["start", "shutdown"],
             },
             {
@@ -168,6 +319,8 @@ class RobotLifecycleOrchestrator:
         rid = str(robot_id or "").strip()
         if not rid:
             raise ValueError("robot_id is required")
+        if not ROBOT_ID_RE.fullmatch(rid):
+            raise ValueError("robot_id invalid: use [A-Za-z0-9_-], 1-64 chars")
         with self._lock:
             self._state.setdefault(
                 rid,
@@ -263,6 +416,7 @@ class RobotLifecycleOrchestrator:
         *,
         stop_cmd: Optional[str] = None,
         match: Optional[str] = None,
+        match_regex: bool = False,
         note: str = "lifecycle orchestrator managed",
         autostart: bool = True,
         force: bool = False,
@@ -282,10 +436,11 @@ class RobotLifecycleOrchestrator:
                         "start_cmd": cmd,
                         "stop_cmd": stop_cmd or f"pkill -f '{cmd}' || true",
                         "match": match or (cmd.split()[0] if cmd else ""),
+                        "match_regex": match_regex,
                         "note": note,
                     }
                 )
-        elif cur and force:
+        else:
             with self._ros_node_manager._lock:
                 for spec in self._ros_node_manager._managed_nodes:
                     if spec.get("id") == node_id:
@@ -294,12 +449,65 @@ class RobotLifecycleOrchestrator:
                             spec["stop_cmd"] = stop_cmd
                         if match:
                             spec["match"] = match
+                        spec["match_regex"] = match_regex
+                        spec["note"] = note
                         break
         if autostart:
             if cur and cur.get("running") and force:
                 self._ros_node_manager.control(node_id, "restart")
             else:
                 self._ros_node_manager.control(node_id, "start")
+
+    def _robot_process_spec(self, rid: str, sim_mode: str, pose) -> Dict[str, str]:
+        script = self._sim_bringup_script_path()
+        root_q = shlex.quote(str(self._root_dir.resolve()))
+        script_q = shlex.quote(str(script.resolve()))
+        rid_q = shlex.quote(rid)
+        sim_q = shlex.quote(sim_mode)
+        x, y, z, yaw = pose
+        env = (
+            f"SIM_MODE={sim_q} OPEN_DELIVERY_ROOT={root_q} "
+            f"SIM_SPAWN_X={x} SIM_SPAWN_Y={y} SIM_SPAWN_Z={z} SIM_SPAWN_YAW={yaw}"
+        )
+        return {
+            "cmd": f"{env} bash {script_q} {rid_q}",
+            "stop_cmd": (
+                f"pkill -f 'sim_bringup.sh {rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch system startup.launch.py.*robot_name:={rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch manager manager.launch.py.*namespace:={rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch heartbeat heartbeat.launch.py.*namespace:={rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch log_bag log_bag.launch.py.*robot_name:={rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'robot_log_recorder.*--robot-name {rid}([[:space:]]|$)' || true; "
+                f"pkill -f 'ros2 launch simulate simulate.launch.py.*robot_name:={rid}([[:space:]]|$)' || true"
+            ),
+        }
+
+    def _ensure_robot_specs(self, rid: str, sim_mode: str = "sim", pose=None) -> None:
+        if pose is None:
+            with self._infrastructure_lock:
+                slot = self._read_spawn_slots().get(rid)
+            pose = self._SPAWN_POSES[slot] if slot is not None else self._SPAWN_POSES[0]
+        spec = self._robot_process_spec(rid, sim_mode, pose)
+        self._start_if_needed(
+            rid, spec["cmd"], stop_cmd=spec["stop_cmd"],
+            match=rf"sim_bringup\.sh\s+{re.escape(rid)}(?![A-Za-z0-9_-])",
+            match_regex=True, autostart=False,
+            note="per-robot stack; shared Gazebo is managed separately",
+        )
+        nav_cmd = (
+            f"ros2 launch nav_bringup stack.launch.py "
+            f"robot_name:={rid} grid_mode:=localize autostart:=false"
+        )
+        self._start_if_needed(
+            f"navigation_{rid}", nav_cmd,
+            stop_cmd=(
+                f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}([[:space:]]|$)' || true"
+            ),
+            match=rf"stack\.launch\.py.*robot_name:={re.escape(rid)}(?![A-Za-z0-9_-])",
+            match_regex=True, autostart=False,
+            note="registered for status (started by per-robot stack)",
+        )
 
     def _sim_managed_running(self, rid: str) -> bool:
         status = self._ros_node_manager.status()
@@ -316,23 +524,41 @@ class RobotLifecycleOrchestrator:
         boot_grace_sec: float = 90.0,
         starting_age_sec: Optional[float] = None,
     ):
+        with self._operation_lock:
+            return self._startup_selected_robot_locked(
+                robot_id, sim_mode, is_online=is_online,
+                boot_grace_sec=boot_grace_sec, starting_age_sec=starting_age_sec,
+            )
+
+    def _startup_selected_robot_locked(
+        self,
+        robot_id: str,
+        sim_mode: str = "sim",
+        *,
+        is_online=None,
+        boot_grace_sec: float = 90.0,
+        starting_age_sec: Optional[float] = None,
+    ):
         rid = self._ensure_robot(robot_id)
         sim_mode = (sim_mode or "sim").strip() or "sim"
         online = bool(is_online(rid)) if callable(is_online) else False
-        if online:
+        world_ready = self._gazebo_services_ready()
+        entity_present = self._simulation_entity_present(rid) if world_ready else False
+        recovery_needed = online and (not world_ready or entity_present is False)
+        if online and not recovery_needed:
             with self._lock:
                 self._last_error = ""
             return self.status(rid)
 
         sim_running = self._sim_managed_running(rid)
         boot_age = starting_age_sec if starting_age_sec is not None else 0.0
-        if sim_running and boot_age < boot_grace_sec:
+        if sim_running and not recovery_needed and boot_age < boot_grace_sec:
             # sim_bringup.sh still running within grace window — idempotent wait.
             with self._lock:
                 self._last_error = ""
             return self.status(rid)
 
-        force_restart = sim_running and boot_age >= boot_grace_sec
+        force_restart = sim_running and (recovery_needed or boot_age >= boot_grace_sec)
         last: Dict[str, Any] = {}
         try:
             import ros_robot_status_store
@@ -343,60 +569,36 @@ class RobotLifecycleOrchestrator:
         last_rs = str(last.get("robot_status") or "").strip().lower()
         auto_mapping = _persisted_auto_mapping(last)
         try:
-            # 整栈仅在 sim_bringup.sh 内拉起；此处只启动该脚本（托管 id = robot id）
-            script = self._sim_bringup_script_path()
-            root_q = shlex.quote(str(self._root_dir.resolve()))
-            script_q = shlex.quote(str(script.resolve()))
-            rid_q = shlex.quote(rid)
-            sim_q = shlex.quote(sim_mode)
-            sim_cmd = f"SIM_MODE={sim_q} OPEN_DELIVERY_ROOT={root_q} bash {script_q} {rid_q}"
-            stop_all = (
-                f"pkill -f 'sim_bringup.sh {rid}' || true; "
-                f"pkill -f 'ros2 launch system startup.launch.py.*robot_name:={rid}' || true; "
-                f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}' || true; "
-                f"pkill -f 'ros2 launch manager manager.launch.py.*namespace:={rid}' || true; "
-                f"pkill -f 'ros2 launch heartbeat heartbeat.launch.py.*namespace:={rid}' || true; "
-                f"pkill -f 'ros2 launch log_bag log_bag.launch.py.*robot_name:={rid}' || true; "
-                f"pkill -f 'robot_log_recorder.*--robot-name {rid}' || true; "
-                f"pkill -f 'ros2 launch simulate simulate.launch.py.*robot_name:={rid}' || true"
-            )
+            slot, spawn_pose = self._spawn_pose_for_robot(rid)
+            self._ensure_simulation_world()
+            self._ensure_robot_specs(rid, sim_mode, spawn_pose)
             if force_restart:
                 try:
                     self._ros_node_manager.control(rid, "pause")
-                    time.sleep(0.8)
                 except Exception:
                     pass
+                if self._gazebo_services_ready():
+                    existing = self._simulation_entity_present(rid)
+                    deleted = self._delete_simulation_entity(rid)
+                    if existing is True and not deleted:
+                        raise RuntimeError(f"failed to delete stale Gazebo entity: {rid}")
+                time.sleep(0.8)
             elif not sim_running:
-                status = self._ros_node_manager.status()
-                managed = status.get("managed_nodes") or []
-                if any(m.get("id") == rid for m in managed):
-                    try:
-                        self._ros_node_manager.control(rid, "pause")
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
+                # Remove a stale entity left by an interrupted backend/robot stack.
+                existing = self._simulation_entity_present(rid)
+                deleted = self._delete_simulation_entity(rid)
+                if existing is True and not deleted:
+                    raise RuntimeError(f"failed to delete stale Gazebo entity: {rid}")
+            spec = self._robot_process_spec(rid, sim_mode, spawn_pose)
             self._start_if_needed(
-                rid,
-                sim_cmd,
-                stop_cmd=stop_all,
-                match=f"sim_bringup.sh {rid}",
-                note="full sim stack via sim_bringup.sh (managed id = robot id)",
-                force=force_restart,
-            )
-            # navigation 托管项仅用于状态展示（由 sim_bringup.sh 拉起）
-            nav_cmd = (
-                f"ros2 launch nav_bringup stack.launch.py "
-                f"robot_name:={rid} grid_mode:=localize autostart:=false"
-            )
-            self._start_if_needed(
-                f"navigation_{rid}",
-                nav_cmd,
-                stop_cmd=(
-                    f"pkill -f 'ros2 launch nav_bringup stack.launch.py.*robot_name:={rid}' || true"
+                rid, spec["cmd"], stop_cmd=spec["stop_cmd"],
+                match=rf"sim_bringup\.sh\s+{re.escape(rid)}(?![A-Za-z0-9_-])",
+                match_regex=True,
+                note=(
+                    f"per-robot stack; shared Gazebo; spawn_slot={slot} "
+                    f"pose={spawn_pose}"
                 ),
-                match=f"stack.launch.py robot_name:={rid}",
-                autostart=False,
-                note="registered for status (started by sim_bringup.sh)",
+                force=force_restart,
             )
         except Exception as exc:
             with self._lock:
@@ -419,8 +621,13 @@ class RobotLifecycleOrchestrator:
         return self.status(rid)
 
     def shutdown_selected_robot(self, robot_id: str):
+        with self._operation_lock:
+            return self._shutdown_selected_robot_locked(robot_id)
+
+    def _shutdown_selected_robot_locked(self, robot_id: str):
         """Stop per-robot orchestrated stack (including simulate launch registered under robot id)."""
         rid = self._ensure_robot(robot_id)
+        self._ensure_robot_specs(rid)
         hb = f"/{rid}/heartbeat"
         nav_mgr = f"/{rid}/navigation/lifecycle_manager"
         # Let subscribers see SHUTDOWN on /{rid}/robot_status before tearing down lifecycle nodes.
@@ -430,14 +637,17 @@ class RobotLifecycleOrchestrator:
             self._lifecycle_try(nav_mgr, t)
         for t in ("deactivate", "cleanup", "shutdown"):
             self._lifecycle_try(hb, t)
-        for node_id in (
-            f"navigation_{rid}",
-            rid,
-        ):
+        for node_id in (f"navigation_{rid}", rid):
             try:
                 self._ros_node_manager.control(node_id, "pause")
             except Exception:
                 pass
+        # Gazebo belongs to the host, not this robot. Delete only this entity.
+        if self._gazebo_services_ready():
+            existing = self._simulation_entity_present(rid)
+            deleted = self._delete_simulation_entity(rid)
+            if existing is True and not deleted:
+                raise RuntimeError(f"failed to delete Gazebo entity: {rid}")
         with self._lock:
             st = self._state.setdefault(rid, {})
             st.pop("slam_mode", None)
