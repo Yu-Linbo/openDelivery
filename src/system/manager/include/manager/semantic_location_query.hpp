@@ -30,6 +30,14 @@ public:
   explicit SemanticLocationQuery(std::vector<SemanticRegion> regions = {})
   : regions_(std::move(regions)) {}
 
+  void set_regions(std::vector<SemanticRegion> regions) {
+    regions_ = std::move(regions);
+  }
+
+  const std::vector<SemanticRegion> & regions() const {
+    return regions_;
+  }
+
   std::string query_current_location(double x, double y) const {
     for (const auto & region : regions_) {
       if (x >= region.min_x && x <= region.max_x &&

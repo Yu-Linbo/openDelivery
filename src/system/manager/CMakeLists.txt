@@ -12,6 +12,10 @@ find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
+find_package(jsoncpp REQUIRED)
 
 add_executable(health_monitor_node
   src/health_monitor_node.cpp
@@ -35,7 +39,13 @@ ament_target_dependencies(semantic_location_query_node
   rclcpp
   custom_msgs_srvs
   geometry_msgs
+  tf2
+  tf2_ros
 )
+target_include_directories(semantic_location_query_node PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(semantic_location_query_node
+  ${OpenCV_LIBRARIES}
+  jsoncpp_lib)
 
 add_executable(semantic_location_query_example
   examples/semantic_location_query_example.cpp

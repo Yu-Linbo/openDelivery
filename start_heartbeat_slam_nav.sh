@@ -173,6 +173,7 @@ PIDS+=("$!")
 
 ros2 launch manager manager.launch.py \
   "namespace:=${ROBOT}" \
+  "semantic_map_root:=${ROOT_DIR}/map" \
   "${SIM_ARG}" \
   "initial_slam_mode:=${SLAM_MODE}" \
   "${MAP_FILE_ARG}" &

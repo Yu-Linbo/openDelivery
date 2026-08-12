@@ -4,17 +4,22 @@
 #include <functional>
 #include <iomanip>
 #include <memory>
-#include <mutex>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "custom_msgs_srvs/msg/robot_status.hpp"
 #include "custom_msgs_srvs/srv/query_semantic_location.hpp"
 #include "custom_msgs_srvs/srv/set_heartbeat_params.hpp"
-#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "manager/semantic_location_query.hpp"
+#include "manager/semantic_raster_map.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "tf2/exceptions.h"
+#include "tf2/time.h"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 
 namespace {
 
@@ -58,6 +63,32 @@ std::string format_distance(double distance) {
   return stream.str();
 }
 
+std::string trim(const std::string & value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) {
+    return "";
+  }
+  return value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+std::string join_path(const std::string & base, const std::string & child) {
+  if (base.empty()) {
+    return child;
+  }
+  return base.back() == '/' ? base + child : base + "/" + child;
+}
+
+bool valid_map_name(const std::string & map_name) {
+  static const std::regex valid("^[A-Za-z0-9_-]+$");
+  if (map_name.empty() || map_name.size() > 128 ||
+    !std::regex_match(map_name, valid))
+  {
+    return false;
+  }
+  return map_name.size() < 8 ||
+         map_name.substr(map_name.size() - 8) != "_mapping";
+}
+
 }  // namespace
 
 namespace manager {
@@ -67,19 +98,30 @@ public:
   SemanticLocationQueryNode()
   : rclcpp::Node("semantic_location_query") {
     declare_parameter<std::string>("robot_model", "OP1");
-    declare_parameter<std::string>("localization_pose_topic", "amcl_pose");
+    declare_parameter<std::string>("map_frame", "map");
+    declare_parameter<std::string>("base_frame", "");
+    declare_parameter<std::string>("semantic_map_root", "");
     declare_parameter<double>("status_update_sec", 1.0);
-    declare_parameter<double>("position_covariance_max", 0.45);
-    declare_parameter<double>("pose_timeout_sec", 2.5);
+    declare_parameter<bool>("enable_region_fallback", false);
     declare_parameter<std::vector<std::string>>("semantic_regions", std::vector<std::string>{});
-    query_ = SemanticLocationQuery(parse_regions(
+    map_root_ = trim(get_parameter("semantic_map_root").as_string());
+    map_frame_ = trim(get_parameter("map_frame").as_string());
+    base_frame_ = trim(get_parameter("base_frame").as_string());
+    if (base_frame_.empty()) {
+      std::string robot_id = trim(get_namespace());
+      while (!robot_id.empty() && robot_id.front() == '/') {
+        robot_id.erase(robot_id.begin());
+      }
+      base_frame_ = robot_id.empty() ? "base_footprint" : robot_id + "/base_footprint";
+    }
+    enable_region_fallback_ = get_parameter("enable_region_fallback").as_bool();
+    fallback_query_.set_regions(parse_regions(
       get_parameter("semantic_regions").as_string_array(), get_logger()));
-    const auto pose_topic = get_parameter("localization_pose_topic").as_string();
-    covariance_max_ = get_parameter("position_covariance_max").as_double();
-    pose_timeout_sec_ = get_parameter("pose_timeout_sec").as_double();
-    pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      pose_topic, rclcpp::QoS(10),
-      std::bind(&SemanticLocationQueryNode::on_pose, this, std::placeholders::_1));
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this, false);
+    status_sub_ = create_subscription<custom_msgs_srvs::msg::RobotStatus>(
+      "robot_status", rclcpp::QoS(10),
+      std::bind(&SemanticLocationQueryNode::on_robot_status, this, std::placeholders::_1));
     heartbeat_client_ = create_client<custom_msgs_srvs::srv::SetHeartbeatParams>(
       "set_heartbeat_params");
     service_ = create_service<custom_msgs_srvs::srv::QuerySemanticLocation>(
@@ -89,42 +131,90 @@ public:
     timer_ = create_wall_timer(
       std::chrono::duration<double>(period), std::bind(&SemanticLocationQueryNode::update_status, this));
     RCLCPP_INFO(
-      get_logger(), "semantic_location_query: model=%s regions=%zu pose_topic=%s",
-      get_parameter("robot_model").as_string().c_str(), query_.nearest(0.0, 0.0, 999).size(), pose_topic.c_str());
+      get_logger(), "semantic_location_query: model=%s tf=%s->%s map_root=%s fallback=%s",
+      get_parameter("robot_model").as_string().c_str(), map_frame_.c_str(), base_frame_.c_str(),
+      map_root_.empty() ? "<unset>" : map_root_.c_str(),
+      enable_region_fallback_ ? "true" : "false");
   }
 
 private:
-  void on_pose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr message) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto & covariance = message->pose.covariance;
-    if (!std::isfinite(covariance[0]) || !std::isfinite(covariance[7]) ||
-      covariance[0] > covariance_max_ || covariance[7] > covariance_max_)
-    {
-      have_pose_ = false;
+  void on_robot_status(const custom_msgs_srvs::msg::RobotStatus::SharedPtr message) {
+    const std::string map_name = trim(message->current_map);
+    last_status_position_ = trim(message->current_position);
+    if (map_name == requested_map_) {
       return;
     }
-    x_ = message->pose.pose.position.x;
-    y_ = message->pose.pose.position.y;
-    have_pose_ = std::isfinite(x_) && std::isfinite(y_);
-    last_pose_received_ = std::chrono::steady_clock::now();
+    // current_map is the rising-edge trigger. Repeated heartbeat messages for
+    // the same map never reload the semantic YAML/image/legend.
+    requested_map_ = map_name;
+    loaded_map_.clear();
+    if (!valid_map_name(map_name)) {
+      RCLCPP_WARN(
+        get_logger(), "semantic map unavailable for current_map=%s", map_name.c_str());
+      return;
+    }
+    if (map_root_.empty()) {
+      RCLCPP_ERROR(
+        get_logger(), "semantic_map_root is empty; cannot load map=%s", map_name.c_str());
+      return;
+    }
+    const std::string yaml = join_path(
+      join_path(map_root_, map_name), map_name + "_semantic.yaml");
+    std::string error;
+    if (!loaded_map_.load(yaml, &error)) {
+      RCLCPP_ERROR(get_logger(), "semantic map load failed: %s", error.c_str());
+      return;
+    }
+    RCLCPP_INFO(
+      get_logger(), "semantic map loaded once: map=%s yaml=%s labels=%zu",
+      map_name.c_str(), yaml.c_str(), loaded_map_.label_count());
   }
 
-  bool pose(double * x, double * y) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const double age = std::chrono::duration<double>(
-      std::chrono::steady_clock::now() - last_pose_received_).count();
-    if (!have_pose_ || age > pose_timeout_sec_) {
+
+  bool pose(double * x, double * y) {
+    try {
+      const auto transform = tf_buffer_->lookupTransform(
+        map_frame_, base_frame_, tf2::TimePointZero);
+      *x = transform.transform.translation.x;
+      *y = transform.transform.translation.y;
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "semantic TF %s -> %s unavailable: %s",
+        map_frame_.c_str(), base_frame_.c_str(), error.what());
       return false;
     }
-    *x = x_;
-    *y = y_;
-    return true;
+    return std::isfinite(*x) && std::isfinite(*y);
+  }
+
+  std::string query_current(double x, double y) const {
+    if (loaded_map_.valid()) {
+      return loaded_map_.query_current_location(x, y);
+    }
+    return enable_region_fallback_ ? fallback_query_.query_current_location(x, y) : "unknown";
+  }
+
+  double query_distance(const std::string & name, double x, double y) const {
+    if (loaded_map_.valid()) {
+      return loaded_map_.distance_to(name, x, y);
+    }
+    return enable_region_fallback_ ? fallback_query_.distance_to(name, x, y) : -1.0;
+  }
+
+  std::vector<SemanticDistance> query_nearest(
+    double x, double y, const std::string & exclude) const
+  {
+    if (loaded_map_.valid()) {
+      return loaded_map_.nearest(x, y, 3, exclude);
+    }
+    return enable_region_fallback_ ? fallback_query_.nearest(x, y, 3, exclude) :
+           std::vector<SemanticDistance>{};
   }
 
   std::string current_position(double x, double y) const {
-    const std::string current = query_.query_current_location(x, y);
+    const std::string current = query_current(x, y);
     std::string summary = current + ";";
-    for (const auto & item : query_.nearest(x, y, 3, current == "unknown" ? "" : current)) {
+    for (const auto & item : query_nearest(x, y, current == "unknown" ? "" : current)) {
       summary += item.name + ":" + format_distance(item.distance) + ";";
     }
     return summary;
@@ -134,13 +224,32 @@ private:
     double x = 0.0;
     double y = 0.0;
     const std::string summary = pose(&x, &y) ? current_position(x, y) : "unknown;";
-    if (!heartbeat_client_->wait_for_service(std::chrono::milliseconds(50))) {
+    if (summary == last_status_position_ || update_in_flight_ ||
+      !heartbeat_client_->wait_for_service(std::chrono::milliseconds(50)))
+    {
       return;
     }
     auto request = std::make_shared<custom_msgs_srvs::srv::SetHeartbeatParams::Request>();
     request->current_position = summary;
     request->task_progress = -1.0;
-    heartbeat_client_->async_send_request(request);
+    update_in_flight_ = true;
+    heartbeat_client_->async_send_request(
+      request,
+      [this, summary](
+        rclcpp::Client<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedFuture future)
+      {
+        update_in_flight_ = false;
+        try {
+          const auto response = future.get();
+          if (response && response->success) {
+            last_status_position_ = summary;
+          } else {
+            RCLCPP_WARN(get_logger(), "set current_position was rejected");
+          }
+        } catch (const std::exception & error) {
+          RCLCPP_WARN(get_logger(), "set current_position failed: %s", error.what());
+        }
+      });
   }
 
   void on_query(
@@ -152,24 +261,28 @@ private:
       response->success = false;
       response->current_position = "unknown";
       response->distance = -1.0;
-      response->message = "localization pose unavailable";
+      response->message = "semantic TF unavailable";
       return;
     }
-    response->current_position = query_.query_current_location(x, y);
-    response->distance = query_.distance_to(request->semantic_name, x, y);
+    response->current_position = query_current(x, y);
+    response->distance = query_distance(request->semantic_name, x, y);
     response->success = response->distance >= 0.0;
-    response->message = response->success ? "ok" : "unknown semantic location";
+    response->message = response->success ? "ok" :
+      (loaded_map_.valid() ? "unknown semantic location" : "semantic map unavailable");
   }
 
-  SemanticLocationQuery query_;
-  mutable std::mutex mutex_;
-  bool have_pose_{false};
-  double x_{0.0};
-  double y_{0.0};
-  double covariance_max_{0.45};
-  double pose_timeout_sec_{2.5};
-  std::chrono::steady_clock::time_point last_pose_received_{};
-  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
+  SemanticLocationQuery fallback_query_;
+  SemanticRasterMap loaded_map_;
+  bool enable_region_fallback_{false};
+  bool update_in_flight_{false};
+  std::string map_root_;
+  std::string map_frame_;
+  std::string base_frame_;
+  std::string requested_map_;
+  std::string last_status_position_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  rclcpp::Subscription<custom_msgs_srvs::msg::RobotStatus>::SharedPtr status_sub_;
   rclcpp::Client<custom_msgs_srvs::srv::SetHeartbeatParams>::SharedPtr heartbeat_client_;
   rclcpp::Service<custom_msgs_srvs::srv::QuerySemanticLocation>::SharedPtr service_;
   rclcpp::TimerBase::SharedPtr timer_;

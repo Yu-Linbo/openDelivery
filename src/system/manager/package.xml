@@ -13,6 +13,10 @@
   <depend>lifecycle_msgs</depend>
   <depend>std_srvs</depend>
   <depend>ament_index_cpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>opencv</depend>
+  <depend>jsoncpp</depend>
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_amcl</exec_depend>
   <exec_depend>slam_gmapping</exec_depend>

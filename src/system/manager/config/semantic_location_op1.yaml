@@ -1,6 +1,9 @@
 /**:
   ros__parameters:
-    # name,min_x,min_y,max_x,max_y. Edit these regions for an OP1 deployment.
+    # Loads map/<current_map>/<current_map>_semantic.yaml once when
+    # RobotStatus.current_map changes. Fixed regions are legacy fallback only.
+    enable_region_fallback: false
+    # name,min_x,min_y,max_x,max_y
     semantic_regions:
       - "loading_area,-14.50,12.00,-13.00,13.50"
       - "charging_area,-12.80,12.00,-11.20,13.50"

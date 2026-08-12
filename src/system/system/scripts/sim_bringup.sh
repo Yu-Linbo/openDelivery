@@ -262,6 +262,7 @@ ros2 launch manager manager.launch.py \
   "localization_pose_topic:=${MANAGER_POSE_TOPIC}" \
   "health_monitor_params_file:=${ROOT}/params/params/${ROBOT_MODEL}/health_monitor.yaml" \
   "semantic_location_params_file:=${ROOT}/params/params/${ROBOT_MODEL}/semantic_location.yaml" \
+  "semantic_map_root:=${ROOT}/map" \
   "use_sim_time:=true" \
   "initial_slam_mode:=${SLAM_INITIAL_MODE}" \
   "${MANAGER_EXTRA[@]}" &

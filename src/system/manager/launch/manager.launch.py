@@ -109,6 +109,11 @@ def generate_launch_description():
                 description="YAML profile containing semantic_regions for the robot model.",
             ),
             DeclareLaunchArgument(
+                "semantic_map_root",
+                default_value="",
+                description="Root containing <current_map>/<current_map>_semantic.yaml.",
+            ),
+            DeclareLaunchArgument(
                 "require_nav2",
                 default_value="false",
                 description=(
@@ -188,8 +193,9 @@ def generate_launch_description():
                             LaunchConfiguration("semantic_location_params_file"),
                             {
                                 "robot_model": LaunchConfiguration("robot_model"),
-                                "localization_pose_topic": LaunchConfiguration(
-                                    "localization_pose_topic"
+                                "map_frame": "map",
+                                "semantic_map_root": LaunchConfiguration(
+                                    "semantic_map_root"
                                 ),
                             },
                         ],

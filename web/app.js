@@ -141,6 +141,8 @@ let webBootstrapData = null;
 let robotStatusCacheItems = [];
 let robotPresencePanelOpen = false;
 let robotPresenceCacheTimer = null;
+let robotPresenceListMarkup = "";
+let robotQuickDockMarkup = "";
 let selectedPresenceRobotId = "";
 let selectedDetailRobotId = "";
 let robotDetailActiveTab = "overview";
@@ -1721,7 +1723,10 @@ function renderRobotPresencePanel() {
   }
 
   if (rows.length === 0) {
-    robotPresenceList.innerHTML = "";
+    if (robotPresenceListMarkup !== "") {
+      robotPresenceList.innerHTML = "";
+      robotPresenceListMarkup = "";
+    }
     robotPresenceEmpty.hidden = false;
     return;
   }
@@ -1749,7 +1754,7 @@ function renderRobotPresencePanel() {
     // sessionStorage 可能残留 sim_online；当前已无 /…/robot_status 时不应再显示「仿真离线」
     pruneStaleSimOnlinePhaseIfNeeded(id);
   });
-  robotPresenceList.innerHTML = rows
+  const nextMarkup = rows
     .map((r) => {
       const selectedCls = selectedPresenceRobotId === r.id ? " robot-presence-item--selected" : "";
       const badge = r.online
@@ -1834,6 +1839,10 @@ function renderRobotPresencePanel() {
       </li>`;
     })
     .join("");
+  if (nextMarkup !== robotPresenceListMarkup) {
+    robotPresenceList.innerHTML = nextMarkup;
+    robotPresenceListMarkup = nextMarkup;
+  }
   persistSimBringupPhasesToSession();
   renderRobotQuickDock();
 }
@@ -1952,6 +1961,23 @@ function initRobotPresenceUi() {
     });
   }
   if (robotPresenceList) {
+    // Pose SSE can refresh the panel many times per second. Trigger the action
+    // on the primary pointer press so a concurrent status render cannot replace
+    // the button between pointerdown and the browser-generated click event.
+    robotPresenceList.addEventListener("pointerdown", (ev) => {
+      if ((ev.button != null && ev.button !== 0) || ev.isPrimary === false) {
+        return;
+      }
+      const target = ev.target instanceof Element ? ev.target : null;
+      const simBtn = target && target.closest("button[data-sim-bringup]");
+      if (!simBtn || simBtn.disabled || simBtn.dataset.simAction === "pending") {
+        return;
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
+      simBtn.focus({ preventScroll: true });
+      simBtn.click();
+    });
     robotPresenceList.addEventListener("click", async (ev) => {
       const simBtn = ev.target.closest("button[data-sim-bringup]");
       if (simBtn) {
@@ -4153,7 +4179,7 @@ function loadRobotDetailSettings(rid) {
 function renderRobotQuickDock() {
   if (!robotQuickDock) return;
   const online = mergePresenceRows().filter((row) => row.online);
-  robotQuickDock.innerHTML = online
+  const nextMarkup = online
     .map(
       (row) => `<button type="button" class="robot-quick-chip${
         selectedDetailRobotId === row.id && robotDetailPanel && !robotDetailPanel.hidden ? " active" : ""
@@ -4164,6 +4190,10 @@ function renderRobotQuickDock() {
       </button>`
     )
     .join("");
+  if (nextMarkup !== robotQuickDockMarkup) {
+    robotQuickDock.innerHTML = nextMarkup;
+    robotQuickDockMarkup = nextMarkup;
+  }
 }
 
 function robotNodeByHint(nodes, hints) {
