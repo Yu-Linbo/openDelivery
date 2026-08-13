@@ -17,7 +17,7 @@ These endpoints are used by `web/app.js`.
 ### Robot Presence And Lifecycle
 
 - `GET /api/robot/status/cache`
-  - Purpose: list known robots from persisted status plus live pose/managed process state.
+  - Purpose: list known robots from persisted status plus live pose/managed process state. The Web robot selector filters this response to `online: true`.
   - Returns: `{ items: [...] }`.
 
 - `GET /api/robot/pose`
@@ -59,14 +59,15 @@ These endpoints are used by `web/app.js`.
 - `GET /api/maps/{floor}/assets`
   - Purpose: load semantic PNG/legend and map-scoped semantic points.
   - Point file: `map/{floor}/{floor}_points.json`.
+  - Display rule: `elevator` and `standby` points are always visible; `custom` points follow the Web overlay toggle. The semantic PNG is a separate translucent overlay.
 
 - `POST /api/maps/{floor}/assets/points`
   - Body: `{ "points": [{ "id": "lift_a", "name": "A座电梯", "type": "elevator|standby|custom", "x": 1, "y": 2, "yaw": 0 }] }`.
-  - Purpose: atomically replace map-scoped points.
+  - Purpose: atomically replace map-scoped points. IDs must be unique; coordinates must be finite numbers.
 
 - `POST /api/maps/{floor}/assets/raster` / `semantic`
   - Body: PGM `pgm_data` or PNG `png_data` base64 data URL.
-  - Purpose: atomically save map-editor raster/semantic layers; dimensions are validated.
+  - Purpose: atomically save map-editor raster/semantic layers; image validity and dimensions are checked. Existing file permissions are preserved.
 
 - `GET /api/robot/{robot_id}/detail`
   - Purpose: read-only robot detail payload: status, robot-scoped ROS nodes, process CPU/memory and log summary.
@@ -136,7 +137,7 @@ These are safe for both Web and future AI workflows when called through backend.
 
 - `POST /api/robot/motion/teleop`
   - Body: `{ "robot_id": "robot2", "linear": 0.2, "angular": 0, "active": true, "confirmed": true, "session_id": "...", "sequence": 1 }`.
-  - Purpose: one publisher per robot for hold-to-drive Web teleop; release/stop replaces it and publishes zero. Stale sequence numbers are ignored; a short renewable lease automatically stops output after browser/network loss.
+  - Purpose: one publisher per robot for hold-to-drive Web teleop; release/stop replaces it and publishes zero. Stale sequence numbers are ignored; a 0.8 s renewable lease automatically stops output after browser/network loss. Backend shutdown also stops publishers and best-effort publishes zero.
 
 ## Reserved For AI / Debug
 
