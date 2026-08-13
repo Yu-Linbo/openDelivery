@@ -28,6 +28,7 @@ from ros_sensor_store import (
     get_topdown_image_status,
 )
 from robot_lifecycle import RobotLifecycleOrchestrator
+import map_assets
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -1749,6 +1750,32 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        m_assets = re.match(r"^/api/maps/([^/]+)/assets/(points|raster|semantic)$", path)
+        if m_assets:
+            floor = unquote(m_assets.group(1)).strip()
+            kind = m_assets.group(2)
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                if kind == "points":
+                    points = map_assets.save_points(MAP_DIR, floor, data.get("points"))
+                    out = {"ok": True, "floor": floor, "points": points}
+                elif kind == "raster":
+                    out = map_assets.save_raster(MAP_DIR, floor, data.get("pgm_data"))
+                else:
+                    out = map_assets.save_semantic(MAP_DIR, floor, data.get("png_data"))
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+                return
+            except (ValueError, json.JSONDecodeError) as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
         if path == "/api/log_bag/download":
             data = self._read_json_body()
             if data is None:
@@ -2289,6 +2316,31 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(body_out)
             return
 
+        if path == "/api/robot/motion/teleop":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                import robot_motion_api as rma
+
+                out = rma.set_teleop_velocity(
+                    str(data.get("robot_id") or ""),
+                    float(data.get("linear", 0)),
+                    float(data.get("angular", 0)),
+                    active=bool(data.get("active")),
+                    confirmed=bool(data.get("confirmed")),
+                    session_id=str(data.get("session_id") or ""),
+                    sequence=int(data.get("sequence", 0)),
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
+            return
+
         if path == "/api/robot/motion/velocity":
             data = self._read_json_body()
             if data is None:
@@ -2519,6 +2571,18 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        m_assets = re.match(r"^/api/maps/([^/]+)/assets$", path)
+        if m_assets:
+            floor = unquote(m_assets.group(1)).strip()
+            try:
+                self._send_json(map_assets.load_assets(MAP_DIR, floor))
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+            except (ValueError, json.JSONDecodeError) as err:
+                self._send_json({"error": str(err)}, 400)
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+            return
         if path == "/api/web/bootstrap":
             try:
                 self._send_json(
@@ -2829,8 +2893,21 @@ def main():
     host = os.environ.get("MAP_API_HOST", "0.0.0.0")
     port = int(os.environ.get("MAP_API_PORT", "8001"))
     server = ThreadingHTTPServer((host, port), ApiHandler)
+    def _shutdown_signal(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _shutdown_signal)
+    signal.signal(signal.SIGINT, _shutdown_signal)
     print(f"map api listening on http://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            import robot_motion_api as rma
+            rma.stop_all_teleop()
+        finally:
+            server.server_close()
 
 
 if __name__ == "__main__":

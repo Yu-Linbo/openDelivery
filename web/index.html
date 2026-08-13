@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260811-robot-detail-sensors" />
+    <link rel="stylesheet" href="./styles.css?v=20260813-map-editor-teleop" />
   </head>
   <body>
     <div class="layout">
@@ -128,6 +128,16 @@
                   显示规划路径
                 </label>
 
+                <label class="checkbox">
+                  <input type="checkbox" id="semantic-map-toggle" />
+                  叠加语义地图
+                </label>
+
+                <label class="checkbox">
+                  <input type="checkbox" id="custom-points-toggle" />
+                  显示自定义点位
+                </label>
+
                 <button id="btn-reset-view" type="button" title="重置缩放与平移">重置视图</button>
 
                 <span id="robot-status" class="robot-status">机器人: 未连接</span>
@@ -177,7 +187,7 @@
                 </button>
                 <label class="reloc-field">
                   机器人 ID
-                  <input id="reloc-robot-id" type="text" value="robot1" autocomplete="off" />
+                  <select id="reloc-robot-id"><option value="">暂无在线机器人</option></select>
                 </label>
                 <label class="reloc-field">
                   X (m)
@@ -207,6 +217,42 @@
                 </div>
                 
                 <span id="reloc-message" class="reloc-message-block"></span>
+              </div>
+
+              <div class="monitor-panel waypoint-panel">
+                <span class="reloc-title">设置点位</span>
+                <label class="reloc-field">名称<input id="waypoint-name" type="text" maxlength="80" placeholder="如 A座电梯" /></label>
+                <label class="reloc-field">语义类型
+                  <select id="waypoint-type"><option value="elevator">电梯点</option><option value="standby">待机点</option><option value="custom">自定义点位</option></select>
+                </label>
+                <button id="btn-waypoint-pick" type="button">地图选点</button>
+                <button id="btn-waypoint-save" type="button" class="btn-secondary">保存当前 X/Y/Yaw</button>
+                <div id="map-waypoint-list" class="map-waypoint-list"></div>
+                <span id="waypoint-message" class="reloc-message-block"></span>
+              </div>
+
+              <div class="monitor-panel map-editor-panel">
+                <span class="reloc-title">地图编辑</span>
+                <label class="reloc-field">编辑层<select id="map-editor-layer"><option value="raster">栅格地图</option><option value="semantic">语义地图</option><option value="points">点位信息</option></select></label>
+                <label class="reloc-field">工具<select id="map-editor-tool"><option value="paint">画笔</option><option value="erase">擦除</option><option value="move">移动点位</option><option value="delete">删除点位</option></select></label>
+                <label class="reloc-field">画笔大小 <input id="map-editor-brush" type="range" min="1" max="20" value="4" /></label>
+                <label class="reloc-field">栅格颜色<select id="map-editor-raster-value"><option value="0">障碍</option><option value="254">空闲</option><option value="205">未知</option></select></label>
+                <label class="reloc-field">语义标签<select id="map-editor-semantic-label"></select></label>
+                <button id="btn-map-editor-toggle" type="button">开始编辑</button>
+                <button id="btn-map-editor-save" type="button" class="btn-secondary" disabled>保存地图修改</button>
+                <span id="map-editor-message" class="reloc-message-block">编辑时拖动画笔；点位层可拖动或删除。</span>
+              </div>
+
+              <div class="monitor-panel teleop-panel">
+                <span class="reloc-title">简易遥控</span>
+                <div class="teleop-speed-row">
+                  <label>线速度 <input id="teleop-linear" type="number" min="0.02" max="1.2" step="0.02" value="0.20" /></label>
+                  <label>角速度 <input id="teleop-angular" type="number" min="0.05" max="1.5" step="0.05" value="0.50" /></label>
+                </div>
+                <div class="teleop-pad" aria-label="机器人遥控方向键">
+                  <button type="button" data-teleop="forward">▲</button><button type="button" data-teleop="left">◀</button><button type="button" data-teleop="stop" class="teleop-stop">■</button><button type="button" data-teleop="right">▶</button><button type="button" data-teleop="backward">▼</button>
+                </div>
+                <span id="teleop-message" class="reloc-message-block">按住按钮或 W/A/S/D；松开立即停车。</span>
               </div>
             </aside>
           </div>
@@ -420,6 +466,6 @@
       </aside>
     </div>
 
-    <script src="./app.js?v=20260811-sim-pointer-race"></script>
+    <script src="./app.js?v=20260813-map-editor-teleop"></script>
   </body>
 </html>

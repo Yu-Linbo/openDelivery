@@ -1875,3 +1875,27 @@ button {
   .robot-quick-chip__name { display: none; }
   .robot-quick-chip { padding-right: 5px; }
 }
+
+/* Monitor map assets editor + map-scoped waypoints + compact teleop */
+.monitor-aside { display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 36px); overflow: auto; padding-right: 3px; }
+.monitor-panel { display: flex; flex-direction: column; gap: 9px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(15, 23, 42, 0.72); }
+.reloc-field select { width: 100%; font-family: "Fira Code", monospace; font-size: 13px; }
+.map-wrapper.map-edit-mode { cursor: crosshair; box-shadow: 0 0 0 2px rgba(245, 158, 11, .7); }
+.map-waypoint-list { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+.map-waypoint-item { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 11px; }
+.map-waypoint-item strong { display: block; color: var(--text); }
+.map-waypoint-item span { color: var(--muted); }
+.map-waypoint-item button { padding: 4px 7px; border-color: #7f1d1d; color: #fecaca; }
+.teleop-speed-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.teleop-speed-row label { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
+.teleop-speed-row input { width: 100%; }
+.teleop-pad { display: grid; grid-template-columns: repeat(3, 48px); grid-template-areas: ". f ." "l s r" ". b ."; justify-content: center; gap: 6px; }
+.teleop-pad button { width: 48px; height: 42px; padding: 0; font-size: 17px; user-select: none; touch-action: none; }
+.teleop-pad [data-teleop="forward"] { grid-area: f; }
+.teleop-pad [data-teleop="left"] { grid-area: l; }
+.teleop-pad [data-teleop="stop"] { grid-area: s; }
+.teleop-pad [data-teleop="right"] { grid-area: r; }
+.teleop-pad [data-teleop="backward"] { grid-area: b; }
+.teleop-pad button.is-active { border-color: #22c55e; background: rgba(22, 101, 52, .65); }
+.teleop-pad .teleop-stop { border-color: #991b1b; color: #fecaca; }
+@media (max-width: 1100px) { .monitor-aside { max-height: none; overflow: visible; } }

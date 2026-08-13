@@ -10,11 +10,19 @@ import shlex
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _LOCK = threading.Lock()
 _WAYPOINTS_PATH: Optional[Path] = None
+_TELEOP_PROCESSES: Dict[str, subprocess.Popen] = {}
+_TELEOP_LOCK = threading.Lock()
+_TELEOP_SEQUENCE: Dict[str, Tuple[str, int]] = {}
+_TELEOP_STATE: Dict[str, Tuple[str, float, float]] = {}
+_TELEOP_LEASE_DEADLINE: Dict[str, float] = {}
+_TELEOP_WATCHDOG: Optional[threading.Thread] = None
+_TELEOP_LEASE_SEC = 0.8
 
 
 class RosCommandTimeoutError(RuntimeError):
@@ -116,6 +124,128 @@ def publish_cmd_vel_timed(
         f"{shlex.quote(msg)}; sleep {period}; done"
     )
     return _ros_run(cmd, timeout=sec + 25.0)
+
+
+def _validate_velocity(robot_id: str, linear: float, angular: float) -> Tuple[str, float, float]:
+    rid = str(robot_id or "").strip()
+    if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
+        raise ValueError("invalid robot_id")
+    lin = float(linear)
+    ang = float(angular)
+    if abs(lin) > 1.2 or abs(ang) > 1.5:
+        raise ValueError("teleop linear/angular out of safe range")
+    return rid, lin, ang
+
+
+def _velocity_pub_command(rid: str, linear: float, angular: float, *, once: bool = False) -> str:
+    topic = f"/{rid}/cmd_vel"
+    msg = (
+        f"{{linear: {{x: {linear}, y: 0.0, z: 0.0}}, "
+        f"angular: {{x: 0.0, y: 0.0, z: {angular}}}}}"
+    )
+    mode = "-1" if once else "-r 10"
+    return f"ros2 topic pub {mode} {shlex.quote(topic)} geometry_msgs/msg/Twist {shlex.quote(msg)}"
+
+
+def _start_ros_process(cmd: str) -> subprocess.Popen:
+    root = _root_dir()
+    install = root / "install" / "setup.bash"
+    distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+    install_src = f'source "{install}"' if install.is_file() else "true"
+    full = (
+        f'set -eo pipefail; source "/opt/ros/{distro}/setup.bash"; '
+        f'cd "{root}" && {install_src}; exec {cmd}'
+    )
+    return subprocess.Popen(
+        ["bash", "-lc", full], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=os.environ.copy(), start_new_session=True,
+    )
+
+
+def _stop_teleop_process(rid: str) -> None:
+    proc = _TELEOP_PROCESSES.pop(rid, None)
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=1.0)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _teleop_watchdog_loop() -> None:
+    while True:
+        time.sleep(0.1)
+        expired = []
+        now = time.monotonic()
+        with _TELEOP_LOCK:
+            for rid, deadline in list(_TELEOP_LEASE_DEADLINE.items()):
+                if now >= deadline:
+                    _stop_teleop_process(rid)
+                    _TELEOP_LEASE_DEADLINE.pop(rid, None)
+                    _TELEOP_STATE.pop(rid, None)
+                    expired.append(rid)
+        for rid in expired:
+            try:
+                _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
+            except Exception:
+                pass
+
+
+def _ensure_teleop_watchdog() -> None:
+    global _TELEOP_WATCHDOG
+    if _TELEOP_WATCHDOG is not None and _TELEOP_WATCHDOG.is_alive():
+        return
+    _TELEOP_WATCHDOG = threading.Thread(
+        target=_teleop_watchdog_loop, daemon=True, name="web-teleop-watchdog"
+    )
+    _TELEOP_WATCHDOG.start()
+
+
+def set_teleop_velocity(
+    robot_id: str, linear: float, angular: float, *, active: bool, confirmed: bool,
+    session_id: str = "", sequence: int = 0,
+) -> Dict[str, Any]:
+    """Maintain exactly one browser teleop publisher per robot; stop always sends zero."""
+    if not confirmed:
+        raise ValueError("velocity command requires user confirmation (confirmed=true)")
+    rid, lin, ang = _validate_velocity(robot_id, linear, angular)
+    session = str(session_id or "").strip()
+    if not re.match(r"^[A-Za-z0-9_-]{1,80}$", session) or int(sequence) < 1:
+        raise ValueError("teleop session_id and positive sequence are required")
+    seq = int(sequence)
+    with _TELEOP_LOCK:
+        previous = _TELEOP_SEQUENCE.get(rid)
+        if previous and previous[0] == session and seq <= previous[1]:
+            return {"ok": True, "robot_id": rid, "active": bool(active), "stale": True}
+        _TELEOP_SEQUENCE[rid] = (session, seq)
+        if active and (lin != 0.0 or ang != 0.0):
+            state = (session, lin, ang)
+            proc = _TELEOP_PROCESSES.get(rid)
+            if _TELEOP_STATE.get(rid) != state or proc is None or proc.poll() is not None:
+                _stop_teleop_process(rid)
+                _TELEOP_PROCESSES[rid] = _start_ros_process(_velocity_pub_command(rid, lin, ang))
+                _TELEOP_STATE[rid] = state
+            _TELEOP_LEASE_DEADLINE[rid] = time.monotonic() + _TELEOP_LEASE_SEC
+            _ensure_teleop_watchdog()
+            return {"ok": True, "robot_id": rid, "active": True, "linear": lin, "angular": ang, "lease_sec": _TELEOP_LEASE_SEC}
+        _stop_teleop_process(rid)
+        _TELEOP_STATE.pop(rid, None)
+        _TELEOP_LEASE_DEADLINE.pop(rid, None)
+    _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
+    return {"ok": True, "robot_id": rid, "active": False, "linear": 0.0, "angular": 0.0}
+
+
+def stop_all_teleop() -> None:
+    """Stop managed teleop publishers during backend shutdown."""
+    with _TELEOP_LOCK:
+        for rid in list(_TELEOP_PROCESSES):
+            _stop_teleop_process(rid)
+        _TELEOP_STATE.clear()
+        _TELEOP_LEASE_DEADLINE.clear()
 
 
 def send_navigate_to_pose(

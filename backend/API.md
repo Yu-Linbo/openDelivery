@@ -56,6 +56,18 @@ These endpoints are used by `web/app.js`.
   - Body: `{ "map_name": "...", "robot_id": "robot2" }`
   - Purpose: save current mapping result.
 
+- `GET /api/maps/{floor}/assets`
+  - Purpose: load semantic PNG/legend and map-scoped semantic points.
+  - Point file: `map/{floor}/{floor}_points.json`.
+
+- `POST /api/maps/{floor}/assets/points`
+  - Body: `{ "points": [{ "id": "lift_a", "name": "A座电梯", "type": "elevator|standby|custom", "x": 1, "y": 2, "yaw": 0 }] }`.
+  - Purpose: atomically replace map-scoped points.
+
+- `POST /api/maps/{floor}/assets/raster` / `semantic`
+  - Body: PGM `pgm_data` or PNG `png_data` base64 data URL.
+  - Purpose: atomically save map-editor raster/semantic layers; dimensions are validated.
+
 - `GET /api/robot/{robot_id}/detail`
   - Purpose: read-only robot detail payload: status, robot-scoped ROS nodes, process CPU/memory and log summary.
 
@@ -121,6 +133,10 @@ These are safe for both Web and future AI workflows when called through backend.
 - `POST /api/robot/motion/velocity`
   - Body: `{ "robot_id": "robot2", "linear": 0.1, "angular": 0.0, "seconds": 1, "confirmed": true }`
   - Confirmed timed velocity command.
+
+- `POST /api/robot/motion/teleop`
+  - Body: `{ "robot_id": "robot2", "linear": 0.2, "angular": 0, "active": true, "confirmed": true, "session_id": "...", "sequence": 1 }`.
+  - Purpose: one publisher per robot for hold-to-drive Web teleop; release/stop replaces it and publishes zero. Stale sequence numbers are ignored; a short renewable lease automatically stops output after browser/network loss.
 
 ## Reserved For AI / Debug
 

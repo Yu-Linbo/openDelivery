@@ -13,6 +13,10 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 未安装，无法启动。"
   exit 1
 fi
+if ! python3 -c "from PIL import Image" >/dev/null 2>&1; then
+  echo "python3-pil / Pillow 未安装，地图编辑 API 无法启动。"
+  exit 1
+fi
 
 # Ensure custom message package is available for web/ROS bridge.
 if [ -f "${ROOT_DIR}/install/setup.bash" ]; then

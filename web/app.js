@@ -94,6 +94,25 @@ const btnDownloadLogBag = document.getElementById("btn-download-log-bag");
 const btnResetView = document.getElementById("btn-reset-view");
 const scan2dToggle = document.getElementById("scan-2d-toggle");
 const plannedPathToggle = document.getElementById("planned-path-toggle");
+const semanticMapToggle = document.getElementById("semantic-map-toggle");
+const customPointsToggle = document.getElementById("custom-points-toggle");
+const waypointName = document.getElementById("waypoint-name");
+const waypointType = document.getElementById("waypoint-type");
+const btnWaypointPick = document.getElementById("btn-waypoint-pick");
+const btnWaypointSave = document.getElementById("btn-waypoint-save");
+const mapWaypointList = document.getElementById("map-waypoint-list");
+const waypointMessage = document.getElementById("waypoint-message");
+const mapEditorLayer = document.getElementById("map-editor-layer");
+const mapEditorTool = document.getElementById("map-editor-tool");
+const mapEditorBrush = document.getElementById("map-editor-brush");
+const mapEditorRasterValue = document.getElementById("map-editor-raster-value");
+const mapEditorSemanticLabel = document.getElementById("map-editor-semantic-label");
+const btnMapEditorToggle = document.getElementById("btn-map-editor-toggle");
+const btnMapEditorSave = document.getElementById("btn-map-editor-save");
+const mapEditorMessage = document.getElementById("map-editor-message");
+const teleopLinear = document.getElementById("teleop-linear");
+const teleopAngular = document.getElementById("teleop-angular");
+const teleopMessage = document.getElementById("teleop-message");
 const relocRobotId = document.getElementById("reloc-robot-id");
 const relocX = document.getElementById("reloc-x");
 const relocY = document.getElementById("reloc-y");
@@ -132,6 +151,15 @@ let activePgm = null;
 let activeMeta = null;
 /** @type {HTMLCanvasElement | null} */
 let mapBitmap = null;
+let semanticBitmap = null;
+let semanticEditCanvas = null;
+let mapPoints = [];
+let semanticLegend = [];
+let mapEditorActive = false;
+let mapEditorDirty = false;
+let mapEditorPainting = false;
+let mapEditorMovedPointId = "";
+let relocRobotOptionsSignature = "";
 
 /** Latest snapshot from backend: { timestamp, source, robots: [...] } */
 let latestSnapshot = null;
@@ -623,6 +651,115 @@ function buildMapBitmap(pgm, options = {}) {
   return c;
 }
 
+function buildSemanticBitmapFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    if (!dataUrl) { resolve(null); return; }
+    const image = new Image();
+    image.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = image.naturalWidth;
+      c.height = image.naturalHeight;
+      c.getContext("2d").drawImage(image, 0, 0);
+      resolve(c);
+    };
+    image.onerror = () => reject(new Error("语义地图图片加载失败"));
+    image.src = dataUrl;
+  });
+}
+
+function createBlankSemanticCanvas() {
+  if (!activePgm) return null;
+  const c = document.createElement("canvas");
+  c.width = activePgm.width;
+  c.height = activePgm.height;
+  const cctx = c.getContext("2d");
+  cctx.fillStyle = "#ffffff";
+  cctx.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+
+async function loadActiveMapAssets() {
+  semanticBitmap = null;
+  semanticEditCanvas = null;
+  mapPoints = [];
+  semanticLegend = [];
+  if (!activeFloor || isMappingFloor(activeFloor)) {
+    renderMapWaypointList();
+    return;
+  }
+  const assets = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets`, { cache: "no-store" });
+  mapPoints = Array.isArray(assets.points) ? assets.points : [];
+  const labels = assets.semantic_legend && Array.isArray(assets.semantic_legend.labels)
+    ? assets.semantic_legend.labels : [];
+  semanticLegend = labels;
+  semanticBitmap = await buildSemanticBitmapFromDataUrl(assets.semantic_png || "");
+  semanticEditCanvas = semanticBitmap || createBlankSemanticCanvas();
+  renderSemanticLabelOptions();
+  renderMapWaypointList();
+}
+
+function renderSemanticLabelOptions() {
+  if (!mapEditorSemanticLabel) return;
+  mapEditorSemanticLabel.innerHTML = "";
+  semanticLegend.forEach((label) => {
+    const option = document.createElement("option");
+    option.value = String(label.color || "#ffffff");
+    option.textContent = `${label.name || label.id} · ${label.color || ""}`;
+    mapEditorSemanticLabel.appendChild(option);
+  });
+  if (!mapEditorSemanticLabel.options.length) {
+    mapEditorSemanticLabel.innerHTML = '<option value="#ffffff">背景</option><option value="#6c5ce7">电梯区域</option><option value="#f39c12">走廊</option>';
+  }
+}
+
+function pointTypeLabel(type) {
+  return type === "elevator" ? "电梯点" : type === "standby" ? "待机点" : "自定义点位";
+}
+
+function visibleMapPoints() {
+  return mapPoints.filter((point) => point.type === "elevator" || point.type === "standby" || (customPointsToggle && customPointsToggle.checked));
+}
+
+function drawMapPointsOverlay() {
+  visibleMapPoints().forEach((point) => {
+    const pix = worldToMapPixels(point);
+    if (!pix) return;
+    const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
+    const color = point.type === "elevator" ? "#a78bfa" : point.type === "standby" ? "#22c55e" : "#fb923c";
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(sx, sy, point.type === "custom" ? 5 : 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#f8fafc"; ctx.font = '11px "Fira Code", monospace';
+    ctx.fillText(point.name || point.id, sx + 9, sy - 7);
+    ctx.restore();
+  });
+}
+
+function renderMapWaypointList() {
+  if (!mapWaypointList) return;
+  if (!mapPoints.length) { mapWaypointList.innerHTML = '<span class="reloc-message-block">本地图暂无点位</span>'; return; }
+  mapWaypointList.innerHTML = mapPoints.map((point) => `<div class="map-waypoint-item"><span><strong>${escapeHtml(point.name || point.id)}</strong>${escapeHtml(pointTypeLabel(point.type))} · ${Number(point.x).toFixed(2)}, ${Number(point.y).toFixed(2)}</span><button type="button" data-delete-map-point="${escapeHtml(point.id)}">删除</button></div>`).join("");
+}
+
+async function saveMapPoints() {
+  if (!activeFloor || isMappingFloor(activeFloor)) throw new Error("请先选择已保存地图");
+  const out = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/points`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: mapPoints }),
+  });
+  mapPoints = Array.isArray(out.points) ? out.points : mapPoints;
+  renderMapWaypointList(); renderScene();
+  return out;
+}
+
+function nextMapPointId(name) {
+  const base = String(name || "point").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "point";
+  let id = base, n = 2;
+  while (mapPoints.some((point) => point.id === id)) { id = `${base}_${n}`; n += 1; }
+  return id;
+}
+
 function resetViewToFit() {
   if (!activePgm || !mapBitmap) {
     return;
@@ -807,6 +944,8 @@ function saveMonitorCheckboxPrefs() {
         grid: !!(gridToggle && gridToggle.checked),
         scan2d: !!(scan2dToggle && scan2dToggle.checked),
         plannedPath: !!(plannedPathToggle && plannedPathToggle.checked),
+        semanticMap: !!(semanticMapToggle && semanticMapToggle.checked),
+        customPoints: !!(customPointsToggle && customPointsToggle.checked),
         relocPick: !!(relocPickToggle && relocPickToggle.checked),
       })
     );
@@ -834,6 +973,8 @@ function loadAndApplyMonitorCheckboxPrefs() {
     if (plannedPathToggle && typeof p.plannedPath === "boolean") {
       plannedPathToggle.checked = p.plannedPath;
     }
+    if (semanticMapToggle && typeof p.semanticMap === "boolean") { semanticMapToggle.checked = p.semanticMap; }
+    if (customPointsToggle && typeof p.customPoints === "boolean") { customPointsToggle.checked = p.customPoints; }
     if (relocPickToggle && typeof p.relocPick === "boolean") {
       relocPickToggle.checked = p.relocPick;
     }
@@ -1374,6 +1515,12 @@ async function publishPickedNavigationGoal(goal) {
 function finishRelocMapPick(yaw) {
   const action = relocPickAction;
   const anchor = relocPickAnchorWorld;
+  if (action === "waypoint" && anchor) {
+    if (relocYaw) relocYaw.value = String(Number(yaw.toFixed(4)));
+    exitRelocPickModeAfterDone("点位位置已填入，填写名称后保存");
+    if (waypointMessage) waypointMessage.textContent = "点位位置已填入，填写名称后保存";
+    return;
+  }
   if (action === "goto" && anchor) {
     const goal = { x: anchor.x, y: anchor.y, yaw };
     exitRelocPickModeAfterDone("目标点已设置，正在下发导航…");
@@ -1421,7 +1568,9 @@ function handleRelocMapClick(ev) {
       relocMessage.textContent =
         relocPickAction === "goto"
           ? "已定导航目标位置，再点击地图设置朝向（或「跳过朝向」）"
-          : "已定点，再点击地图设置朝向（或「跳过朝向」）";
+          : relocPickAction === "waypoint"
+            ? "已定点位位置，再点击地图设置朝向（或「跳过朝向」）"
+            : "已定点，再点击地图设置朝向（或「跳过朝向」）";
     }
     renderScene();
     return true;
@@ -2059,6 +2208,10 @@ function renderScene() {
 
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(mapBitmap, viewPanX, viewPanY, mw * viewScale, mh * viewScale);
+  const sem = mapEditorActive && mapEditorLayer && mapEditorLayer.value === "semantic" ? semanticEditCanvas : semanticBitmap;
+  if (sem && ((semanticMapToggle && semanticMapToggle.checked) || mapEditorActive)) {
+    ctx.save(); ctx.globalAlpha = 0.38; ctx.drawImage(sem, viewPanX, viewPanY, mw * viewScale, mh * viewScale); ctx.restore();
+  }
 
   drawGridScreen();
 
@@ -2079,6 +2232,8 @@ function renderScene() {
       }
     });
   }
+
+  drawMapPointsOverlay();
 
   robotsHere.forEach((r) => {
     const pixels = worldToMapPixels(r.pose);
@@ -2102,8 +2257,29 @@ function renderScene() {
   drawRelocPickOverlay();
 }
 
+function syncOnlineRobotSelect() {
+  if (!relocRobotId) return;
+  const previous = relocRobotId.value;
+  const online = mergePresenceRows().filter((row) => row.online);
+  const fallback = latestSnapshot && Array.isArray(latestSnapshot.robots)
+    ? latestSnapshot.robots.filter((row) => row && row.heartbeat_online !== false).map((row) => ({ id: row.id, name: row.name || row.id })) : [];
+  const rows = online.length ? online : fallback;
+  const clean = [], seen = new Set();
+  rows.forEach((row) => { const id = String(row.id || "").trim(); if (id && !seen.has(id)) { seen.add(id); clean.push({ id, name: row.name || id }); } });
+  const signature = JSON.stringify(clean);
+  if (signature === relocRobotOptionsSignature) return;
+  relocRobotOptionsSignature = signature;
+  relocRobotId.innerHTML = "";
+  clean.forEach((row) => {
+    const option = document.createElement("option"); option.value = row.id; option.textContent = `${row.name} (${row.id})`; relocRobotId.appendChild(option);
+  });
+  if (!clean.length) { relocRobotId.innerHTML = '<option value="">暂无在线机器人</option>'; relocRobotId.disabled = true; }
+  else { relocRobotId.disabled = false; relocRobotId.value = seen.has(previous) ? previous : clean[0].id; }
+}
+
 function updateRobotStatus() {
   try {
+    syncOnlineRobotSelect();
     if (!robotStatus) {
       return;
     }
@@ -2143,12 +2319,6 @@ function updateRobotStatus() {
       return `${nm} [${loc}] (${p.x?.toFixed?.(2) ?? "?"},${p.y?.toFixed?.(2) ?? "?"})`;
     });
     robotStatus.textContent = `本图定位 (${here.length}): ${parts.join(" · ")}`;
-    if (relocRobotId && relocRobotId.dataset.userEdited !== "1") {
-      const pick = here[0] || (latestSnapshot?.robots || [])[0];
-      if (pick?.id) {
-        relocRobotId.value = pick.id;
-      }
-    }
   } finally {
     updateRobotPresenceTriggerSummary();
     renderRobotQuickDock();
@@ -2246,9 +2416,14 @@ async function loadFloorMap(floor) {
       throw new Error("后端返回的地图数据格式不正确");
     }
     activeFloor = floor;
+    mapEditorActive = false; mapEditorDirty = false; mapEditorPainting = false;
+    if (mapWrapper) mapWrapper.classList.remove("map-edit-mode");
+    if (btnMapEditorToggle) btnMapEditorToggle.textContent = "开始编辑";
+    if (btnMapEditorSave) btnMapEditorSave.disabled = true;
     activePgm = pgm;
     activeMeta = parseYaml(yamlText);
     mapBitmap = buildMapBitmap(pgm);
+    await loadActiveMapAssets();
     resetViewToFit();
     renderScene();
     updateRobotStatus();
@@ -2311,10 +2486,84 @@ function onWheel(ev) {
   }
 }
 
+function canvasEventMapPixel(ev) {
+  const rect = canvas.getBoundingClientRect();
+  return screenToMapPixel(ev.clientX - rect.left, ev.clientY - rect.top);
+}
+
+function nearestMapPoint(mapX, mapY, radiusPx = 14) {
+  let best = null, bestD = radiusPx / Math.max(viewScale, 0.01);
+  mapPoints.forEach((point) => {
+    const pix = worldToMapPixels(point); if (!pix) return;
+    const d = Math.hypot(pix.mapX - mapX, pix.mapY - mapY);
+    if (d <= bestD) { bestD = d; best = point; }
+  });
+  return best;
+}
+
+function paintMapEditorAt(ev) {
+  if (!mapEditorActive || !activePgm || ev.shiftKey) return false;
+  const { mapX, mapY } = canvasEventMapPixel(ev);
+  if (mapX < 0 || mapY < 0 || mapX >= activePgm.width || mapY >= activePgm.height) return true;
+  const layer = mapEditorLayer.value;
+  const tool = mapEditorTool.value;
+  if (layer === "points") {
+    const point = nearestMapPoint(mapX, mapY);
+    if (tool === "delete" && point) {
+      mapPoints = mapPoints.filter((row) => row.id !== point.id); mapEditorDirty = true; renderMapWaypointList(); renderScene();
+    } else if (tool === "move") {
+      if (!mapEditorMovedPointId && point) mapEditorMovedPointId = point.id;
+      const moving = mapPoints.find((row) => row.id === mapEditorMovedPointId);
+      const world = mapPixelsToWorld(mapX, mapY);
+      if (moving && world) { moving.x = world.x; moving.y = world.y; mapEditorDirty = true; renderScene(); }
+    }
+    return true;
+  }
+  const c = layer === "semantic" ? (semanticEditCanvas || (semanticEditCanvas = createBlankSemanticCanvas())) : mapBitmap;
+  if (!c) return true;
+  const cctx = c.getContext("2d");
+  const radius = Math.max(1, Number(mapEditorBrush.value || 4));
+  cctx.save(); cctx.beginPath(); cctx.arc(mapX, mapY, radius, 0, Math.PI * 2);
+  if (layer === "raster") {
+    const val = tool === "erase" ? 254 : Number(mapEditorRasterValue.value || 0);
+    cctx.fillStyle = `rgb(${val},${val},${val})`;
+  } else {
+    cctx.fillStyle = tool === "erase" ? "#ffffff" : (mapEditorSemanticLabel.value || "#ffffff");
+  }
+  cctx.fill(); cctx.restore(); mapEditorDirty = true; renderScene(); return true;
+}
+
+function canvasToPgmDataUrl(c) {
+  const cctx = c.getContext("2d");
+  const img = cctx.getImageData(0, 0, c.width, c.height).data;
+  const header = `P5\n${c.width} ${c.height}\n255\n`;
+  const bytes = new Uint8Array(header.length + c.width * c.height);
+  for (let i = 0; i < header.length; i += 1) bytes[i] = header.charCodeAt(i);
+  for (let i = 0; i < c.width * c.height; i += 1) bytes[header.length + i] = img[i * 4];
+  let binary = ""; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return "data:image/x-portable-graymap;base64," + btoa(binary);
+}
+
+async function saveActiveMapEditor() {
+  const layer = mapEditorLayer.value;
+  if (layer === "points") { await saveMapPoints(); }
+  else if (layer === "raster") {
+    await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/raster`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pgm_data: canvasToPgmDataUrl(mapBitmap) }) });
+    activePgm = { ...activePgm, data: Array.from(mapBitmap.getContext("2d").getImageData(0, 0, mapBitmap.width, mapBitmap.height).data).filter((_, i) => i % 4 === 0) };
+  } else {
+    const out = semanticEditCanvas || createBlankSemanticCanvas();
+    await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/semantic`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ png_data: out.toDataURL("image/png") }) });
+    semanticBitmap = out;
+  }
+  mapEditorDirty = false;
+}
+
 function onMouseDown(ev) {
   if (ev.button !== 0) {
     return;
   }
+  if (mapEditorActive && !ev.shiftKey && paintMapEditorAt(ev)) { mapEditorPainting = true; return; }
   const pickOn = relocPickToggle && relocPickToggle.checked;
   if (pickOn && activePgm && !ev.shiftKey && handleRelocMapClick(ev)) {
     return;
@@ -2344,6 +2593,7 @@ function onMouseMove(ev) {
       }
     }
   }
+  if (mapEditorPainting && mapEditorActive) { paintMapEditorAt(ev); return; }
   if (!isDragging) {
     return;
   }
@@ -2358,6 +2608,7 @@ function onMouseMove(ev) {
 }
 
 function onMouseUp() {
+  mapEditorPainting = false; mapEditorMovedPointId = "";
   isDragging = false;
   canvas.style.cursor = "";
 }
@@ -2984,8 +3235,20 @@ function initLogs() {
   refreshLogBags();
 }
 
+function syncMapEditorControls() {
+  if (!mapEditorLayer || !mapEditorTool) return;
+  const layer = mapEditorLayer.value;
+  const choices = layer === "points" ? [["move", "移动点位"], ["delete", "删除点位"]] : [["paint", "画笔"], ["erase", "擦除"]];
+  mapEditorTool.innerHTML = choices.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+  if (mapEditorBrush) mapEditorBrush.disabled = layer === "points";
+  if (mapEditorRasterValue) mapEditorRasterValue.disabled = layer !== "raster";
+  if (mapEditorSemanticLabel) mapEditorSemanticLabel.disabled = layer !== "semantic";
+}
+
 async function initMonitor() {
   loadAndApplyMonitorCheckboxPrefs();
+  syncMapEditorControls();
+  if (mapEditorLayer) mapEditorLayer.addEventListener("change", syncMapEditorControls);
 
   bindMapInteractions();
 
@@ -2998,11 +3261,38 @@ async function initMonitor() {
     });
   }
 
-  if (relocRobotId) {
-    relocRobotId.addEventListener("input", () => {
-      relocRobotId.dataset.userEdited = "1";
+  if (btnWaypointPick) {
+    btnWaypointPick.addEventListener("click", () => {
+      if (!activePgm || isMappingFloor(activeFloor)) { waypointMessage.textContent = "请先选择已保存地图"; return; }
+      relocPickAction = "waypoint"; resetRelocPickState("单击地图设置点位位置，再单击设置朝向"); relocPickToggle.checked = true; syncRelocPickCursorClass();
     });
   }
+  async function recordCurrentMapPoint() {
+    const name = String(waypointName.value || "").trim();
+    const x = Number(relocX.value), y = Number(relocY.value), yaw = Number(relocYaw.value || 0);
+    if (!name || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error("请填写名称并在地图选点或填写 X/Y");
+    mapPoints.push({ id: nextMapPointId(name), name, type: waypointType.value, x, y, yaw: Number.isFinite(yaw) ? yaw : 0 });
+    await saveMapPoints(); waypointName.value = ""; waypointMessage.textContent = "点位已保存";
+  }
+  if (btnWaypointSave) btnWaypointSave.addEventListener("click", () => recordCurrentMapPoint().catch((err) => { waypointMessage.textContent = err.message || err; }));
+  if (mapWaypointList) mapWaypointList.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("button[data-delete-map-point]"); if (!btn) return;
+    mapPoints = mapPoints.filter((point) => point.id !== btn.dataset.deleteMapPoint);
+    saveMapPoints().catch((err) => { waypointMessage.textContent = err.message || err; });
+  });
+  if (btnMapEditorToggle) btnMapEditorToggle.addEventListener("click", () => {
+    if (!activePgm || isMappingFloor(activeFloor)) { mapEditorMessage.textContent = "请先选择已保存地图"; return; }
+    mapEditorActive = !mapEditorActive; mapEditorPainting = false;
+    mapWrapper.classList.toggle("map-edit-mode", mapEditorActive); btnMapEditorToggle.textContent = mapEditorActive ? "结束编辑" : "开始编辑"; btnMapEditorSave.disabled = !mapEditorActive;
+    mapEditorMessage.textContent = mapEditorActive ? "编辑已开启；Shift+拖拽仍可平移。" : (mapEditorDirty ? "有未保存修改" : "编辑已结束"); renderScene();
+  });
+  if (btnMapEditorSave) btnMapEditorSave.addEventListener("click", async () => {
+    btnMapEditorSave.disabled = true; mapEditorMessage.textContent = "保存中…";
+    try { await saveActiveMapEditor(); mapEditorMessage.textContent = "地图修改已保存"; }
+    catch (err) { mapEditorMessage.textContent = `保存失败：${err.message || err}`; }
+    finally { btnMapEditorSave.disabled = !mapEditorActive; }
+  });
+
   if (btnRelocFillPose) {
     btnRelocFillPose.addEventListener("click", () => {
       fillRelocPoseFromScreenRobot();
@@ -3207,6 +3497,7 @@ async function initMonitor() {
 
   floorSelect.addEventListener("change", async (e) => {
     const floor = e.target.value;
+    if (mapEditorDirty && !window.confirm("当前地图有未保存修改，确定切换地图吗？")) { e.target.value = activeFloor || ""; return; }
     await loadFloorMap(floor);
     saveFloorPreference(floor);
     appendLog(`切换楼层到 ${floor}`);
@@ -3241,7 +3532,60 @@ async function initMonitor() {
       renderScene();
     });
   }
+  if (semanticMapToggle) semanticMapToggle.addEventListener("change", () => { saveMonitorCheckboxPrefs(); renderScene(); });
+  if (customPointsToggle) customPointsToggle.addEventListener("change", () => { saveMonitorCheckboxPrefs(); renderScene(); });
+  initMonitorTeleop();
   startSensorPolling();
+}
+
+let teleopHeldAction = "";
+let teleopRequestSeq = 0;
+let teleopHeartbeatTimer = null;
+const teleopSessionId = (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "_");
+function teleopVector(action) {
+  const lin = Math.min(1.2, Math.max(0.02, Number(teleopLinear && teleopLinear.value) || 0.2));
+  const ang = Math.min(1.5, Math.max(0.05, Number(teleopAngular && teleopAngular.value) || 0.5));
+  if (action === "forward") return [lin, 0];
+  if (action === "backward") return [-lin, 0];
+  if (action === "left") return [0, ang];
+  if (action === "right") return [0, -ang];
+  return [0, 0];
+}
+async function postTeleop(action, active) {
+  const rid = relocRobotId && relocRobotId.value;
+  if (!rid) throw new Error("没有在线机器人可遥控");
+  const [linear, angular] = teleopVector(action);
+  const seq = ++teleopRequestSeq;
+  const res = await fetch(`${API_BASE_URL}/api/robot/motion/teleop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ robot_id: rid, linear, angular, active, confirmed: true, session_id: teleopSessionId, sequence: seq }) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `遥控失败 (${res.status})`);
+  if (seq === teleopRequestSeq && teleopMessage) teleopMessage.textContent = active ? `${rid}：${action}` : `${rid}：已停车`;
+}
+function setTeleopHeld(action) {
+  if (!action || action === "stop") { releaseTeleop(true); return; }
+  if (teleopHeldAction === action) return;
+  teleopHeldAction = action;
+  if (teleopHeartbeatTimer) clearInterval(teleopHeartbeatTimer);
+  document.querySelectorAll("[data-teleop]").forEach((button) => button.classList.toggle("is-active", button.dataset.teleop === action));
+  postTeleop(action, true).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
+  teleopHeartbeatTimer = setInterval(() => { if (teleopHeldAction === action) postTeleop(action, true).catch(() => {}); }, 250);
+}
+function releaseTeleop(force = false) {
+  const old = teleopHeldAction; teleopHeldAction = "";
+  if (teleopHeartbeatTimer) { clearInterval(teleopHeartbeatTimer); teleopHeartbeatTimer = null; }
+  document.querySelectorAll("[data-teleop]").forEach((button) => button.classList.remove("is-active"));
+  if (old || force) postTeleop(old || "stop", false).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
+}
+function initMonitorTeleop() {
+  document.querySelectorAll("button[data-teleop]").forEach((button) => {
+    button.addEventListener("pointerdown", (ev) => { ev.preventDefault(); button.setPointerCapture?.(ev.pointerId); setTeleopHeld(button.dataset.teleop); });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((name) => button.addEventListener(name, releaseTeleop));
+  });
+  const keys = { KeyW: "forward", ArrowUp: "forward", KeyS: "backward", ArrowDown: "backward", KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right" };
+  window.addEventListener("keydown", (ev) => { if (document.activeElement && /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return; if (keys[ev.code]) { ev.preventDefault(); setTeleopHeld(keys[ev.code]); } });
+  window.addEventListener("keyup", (ev) => { if (keys[ev.code] && teleopHeldAction === keys[ev.code]) releaseTeleop(); });
+  window.addEventListener("blur", releaseTeleop);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseTeleop(); });
 }
 
 function initGazeboPage() {
