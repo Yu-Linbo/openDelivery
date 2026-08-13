@@ -2523,6 +2523,19 @@ function paintMapEditorAt(ev) {
   const layer = mapEditorLayer.value;
   const tool = mapEditorTool.value;
   if (layer === "points") {
+    if (tool === "add") {
+      const name = String(waypointName && waypointName.value || "").trim();
+      const world = mapPixelsToWorld(mapX, mapY);
+      if (!name || !world) {
+        if (mapEditorMessage) mapEditorMessage.textContent = "请先在设置点位中填写名称和语义类型，再点击地图";
+        return true;
+      }
+      mapPoints.push({ id: nextMapPointId(name), name, type: waypointType.value, x: world.x, y: world.y, yaw: Number(relocYaw.value || 0) || 0 });
+      waypointName.value = "";
+      markMapEditorDirty("points"); renderMapWaypointList(); renderScene();
+      if (mapEditorMessage) mapEditorMessage.textContent = "点位已添加，点击保存地图修改后落盘";
+      return true;
+    }
     const point = nearestMapPoint(mapX, mapY);
     if (tool === "delete" && point) {
       mapPoints = mapPoints.filter((row) => row.id !== point.id); markMapEditorDirty("points"); renderMapWaypointList(); renderScene();
@@ -3258,7 +3271,7 @@ function initLogs() {
 function syncMapEditorControls() {
   if (!mapEditorLayer || !mapEditorTool) return;
   const layer = mapEditorLayer.value;
-  const choices = layer === "points" ? [["move", "移动点位"], ["delete", "删除点位"]] : [["paint", "画笔"], ["erase", "擦除"]];
+  const choices = layer === "points" ? [["add", "新增点位"], ["move", "移动点位"], ["delete", "删除点位"]] : [["paint", "画笔"], ["erase", "擦除"]];
   mapEditorTool.innerHTML = choices.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
   if (mapEditorBrush) mapEditorBrush.disabled = layer === "points";
   if (mapEditorRasterValue) mapEditorRasterValue.disabled = layer !== "raster";

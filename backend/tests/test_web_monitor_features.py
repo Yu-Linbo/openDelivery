@@ -95,6 +95,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("teleopHeldRobotId", js)
         self.assertIn("mapEditorDirtyLayers", js)
         self.assertIn("editingPoints", js)
+        self.assertIn('tool === "add"', js)
+        self.assertIn('["add", "新增点位"]', js)
 
 
 if __name__ == "__main__":
