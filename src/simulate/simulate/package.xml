@@ -2,7 +2,7 @@
 <package format="3">
   <name>simulate</name>
   <version>0.0.1</version>
-  <description>Minimal 2D robot simulation with lidar, imu, odom and front camera.</description>
+  <description>Minimal 2D robot simulation with lidar, IMU, odometry, front camera and downward front camera.</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,7 @@
   <depend>robot_state_publisher</depend>
   <depend>xacro</depend>
   <depend>gazebo_ros</depend>
+  <depend>gazebo_dev</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch_ros</exec_depend>

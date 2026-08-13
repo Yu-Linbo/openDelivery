@@ -62,6 +62,18 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
                 (robot110_slot, robot110_pose),
             )
 
+    def test_spawn_slot_assigns_unique_lidar_collision_bit(self):
+        orchestrator = self._orchestrator()
+        first = orchestrator._robot_process_spec(
+            "robot2", "sim", orchestrator._SPAWN_POSES[0], slot=0
+        )
+        second = orchestrator._robot_process_spec(
+            "robot110", "sim", orchestrator._SPAWN_POSES[1], slot=1
+        )
+
+        self.assertIn("SIM_COLLISION_BIT=4", first["cmd"])
+        self.assertIn("SIM_COLLISION_BIT=8", second["cmd"])
+
     def test_invalid_robot_id_is_rejected_before_shell_commands(self):
         orchestrator = self._orchestrator()
         with self.assertRaisesRegex(ValueError, "robot_id invalid"):
@@ -192,6 +204,31 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
                 manager._find_pids(pattern, match_regex=True),
                 [10001],
             )
+
+    def test_robot_model_has_peer_visible_shell_and_downward_camera(self):
+        model = (
+            PROJECT_ROOT
+            / "src"
+            / "simulate"
+            / "simulate"
+            / "urdf"
+            / "simple_2d_robot.urdf.xacro"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('outer_shell_link', model)
+        self.assertIn('name="shell_height" value="0.22"', model)
+        self.assertIn('<min>0.10</min>', model)
+        self.assertIn('<xacro:arg name="collision_filter_plugin"', model)
+        self.assertIn('filename="$(arg collision_filter_plugin)"', model)
+        self.assertIn('<own_category_bits>$(arg collision_bit)</own_category_bits>', model)
+        self.assertIn('name="front_down_camera_joint"', model)
+        self.assertIn('rpy="0 0.436332 0"', model)
+        self.assertIn('name="front_down_camera"', model)
+        self.assertIn('front_down_camera/image_raw', model)
+        # The front-mounted lidar uses a forward field of view so its rays never cross
+        # the robot shell, while the shell remains visible to peer lidars.
+        self.assertIn('<min_angle>-1.5708</min_angle>', model)
+        self.assertIn('<max_angle>1.5708</max_angle>', model)
 
     def test_per_robot_script_never_starts_gazebo(self):
         text = (

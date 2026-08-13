@@ -7,7 +7,7 @@ The **map** frame and ``map``→``odom`` are owned by **SLAM** (or other localiz
 import os
 import subprocess
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -37,18 +37,23 @@ def _resolve_world_path(share: str, world_arg: str) -> str:
     return os.path.join(share, "worlds", world_arg or "drawn_model.world")
 
 
-def _run_xacro_robot_description(namespace: str) -> str:
+def _run_xacro_robot_description(namespace: str, collision_bit: int) -> str:
     """Namespace for ROS plugins; frame_prefix for TF link names (empty if global)."""
     ns = (namespace or "").strip()
     fp = "" if ns in ("/", "") else f"{ns}/"
     share = get_package_share_directory("simulate")
     urdf = os.path.join(share, "urdf", "simple_2d_robot.urdf.xacro")
+    collision_filter_plugin = os.path.join(
+        get_package_prefix("simulate"), "lib", "libray_collision_filter_plugin.so"
+    )
     out = subprocess.check_output(
         [
             "xacro",
             urdf,
             f"robot_namespace:={ns}",
             f"frame_prefix:={fp}",
+            f"collision_bit:={collision_bit}",
+            f"collision_filter_plugin:={collision_filter_plugin}",
         ],
         stderr=subprocess.STDOUT,
     )
@@ -99,6 +104,7 @@ def launch_setup(context, *_args, **_kwargs):
     start_gz = _as_bool(LaunchConfiguration("start_gazebo").perform(context))
     start_xvfb = _as_bool(LaunchConfiguration("start_xvfb").perform(context))
     spawn_robot = _as_bool(LaunchConfiguration("spawn_robot").perform(context))
+    collision_bit = int(LaunchConfiguration("collision_bit").perform(context))
     xvfb_display = LaunchConfiguration("xvfb_display").perform(context).strip() or ":99"
     world = LaunchConfiguration("world").perform(context)
     share = get_package_share_directory("simulate")
@@ -218,7 +224,7 @@ def launch_setup(context, *_args, **_kwargs):
     if spawn_robot:
         spawn_x, spawn_y, spawn_z, spawn_yaw = _resolve_spawn_pose(context)
         try:
-            robot_desc = _run_xacro_robot_description(ns)
+            robot_desc = _run_xacro_robot_description(ns, collision_bit)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
 
@@ -298,6 +304,11 @@ def generate_launch_description():
                 "start_gazebo",
                 default_value="true",
                 description="If false, skip starting Gazebo (use after a first full launch is running).",
+            ),
+            DeclareLaunchArgument(
+                "collision_bit",
+                default_value="4",
+                description="Unique power-of-two collision category used to hide only this robot shell from its own lidar.",
             ),
             DeclareLaunchArgument(
                 "spawn_robot",

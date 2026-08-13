@@ -91,6 +91,7 @@ SPAWN_X="${SIM_SPAWN_X:--13.703}"
 SPAWN_Y="${SIM_SPAWN_Y:-12.825}"
 SPAWN_Z="${SIM_SPAWN_Z:-0.05}"
 SPAWN_YAW="${SIM_SPAWN_YAW:-0.0}"
+COLLISION_BIT="${SIM_COLLISION_BIT:-4}"
 log "simulate: shared Gazebo start_gazebo=${START_GZ} spawn_robot=true pose=(${SPAWN_X},${SPAWN_Y},${SPAWN_Z},${SPAWN_YAW})"
 
 STORE="${OPEN_DELIVERY_STATUS_DB_PATH:-${ROOT}/backend/data/robot_status_last.json}"
@@ -209,6 +210,7 @@ ros2 launch simulate simulate.launch.py \
   "spawn_y:=${SPAWN_Y}" \
   "spawn_z:=${SPAWN_Z}" \
   "spawn_yaw:=${SPAWN_YAW}" \
+  "collision_bit:=${COLLISION_BIT}" \
   "use_sim_time:=true" &
 log "started simulate.launch.py (pid $!)"
 sleep "${SIM_WAIT}"

@@ -22,7 +22,7 @@
 
 | 包名 | 路径 | 功能简述 |
 |------|------|----------|
-| **simulate** | `simulate/simulate/` | Gazebo 无头 **2D 差速车**仿真：URDF、世界、`robot_state_publisher`、实体生成；插件发布 `/<R>/scan_2d`、`odom`、`cmd_vel`、IMU、相机等；**仅维护 `odom` 树，不发布 `map`**。`simulate/` 为容器目录，包在子目录中。 |
+| **simulate** | `simulate/simulate/` | Gazebo 无头 **2D 差速车**仿真：URDF、世界、`robot_state_publisher`、实体生成；插件发布 `/<R>/scan_2d`、`odom`、`cmd_vel`、IMU、前视相机 `/<R>/front_camera/*`、前向下倾相机 `/<R>/front_down_camera/*`；**仅维护 `odom` 树，不发布 `map`**。`simulate/` 为容器目录，包在子目录中。 |
 
 ### 1.3 SLAM `slam/`
 
@@ -260,7 +260,7 @@ ros2 launch manager manager.launch.py namespace:=robot2 initial_slam_mode:=local
 
 ### 8.2 话题与 TF（Gazebo）
 
-命名空间由 launch **`namespace`** 决定（默认随 **`robot_name`**）。插件话题在 **`/<namespace>/...`**（激光为 **`scan_2d`**，另有 `imu/data`、`cmd_vel`、`odom`、`camera/...`），与 **`PushRosNamespace`** 一致；详见 `simulate/launch/simulate.launch.py` 与 `urdf/simple_2d_robot.urdf.xacro` 中 **`robot_namespace`**。
+命名空间由 launch **`namespace`** 决定（默认随 **`robot_name`**）。插件话题在 **`/<namespace>/...`**（激光为 **`scan_2d`**，另有 `imu/data`、`cmd_vel`、`odom`、`camera/...`、前向下倾相机 `front_down_camera/...`），与 **`PushRosNamespace`** 一致；详见 `simulate/launch/simulate.launch.py` 与 `urdf/simple_2d_robot.urdf.xacro` 中 **`robot_namespace`**。
 
 单机 Gazebo 差速模型在 URDF 内常见链：**`robotN/odom` → `robotN/base_footprint` → `robotN/base_link`**（帧名带 **`robotN/`** 前缀）；**不含 `map`**，与 §2「整栈」TF 图的区别见上节。
 

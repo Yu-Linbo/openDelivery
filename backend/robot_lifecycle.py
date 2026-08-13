@@ -458,16 +458,18 @@ class RobotLifecycleOrchestrator:
             else:
                 self._ros_node_manager.control(node_id, "start")
 
-    def _robot_process_spec(self, rid: str, sim_mode: str, pose) -> Dict[str, str]:
+    def _robot_process_spec(self, rid: str, sim_mode: str, pose, slot: int = 0) -> Dict[str, str]:
         script = self._sim_bringup_script_path()
         root_q = shlex.quote(str(self._root_dir.resolve()))
         script_q = shlex.quote(str(script.resolve()))
         rid_q = shlex.quote(rid)
         sim_q = shlex.quote(sim_mode)
         x, y, z, yaw = pose
+        collision_bit = 1 << (int(slot) + 2)
         env = (
             f"SIM_MODE={sim_q} OPEN_DELIVERY_ROOT={root_q} "
-            f"SIM_SPAWN_X={x} SIM_SPAWN_Y={y} SIM_SPAWN_Z={z} SIM_SPAWN_YAW={yaw}"
+            f"SIM_SPAWN_X={x} SIM_SPAWN_Y={y} SIM_SPAWN_Z={z} SIM_SPAWN_YAW={yaw} "
+            f"SIM_COLLISION_BIT={collision_bit}"
         )
         return {
             "cmd": f"{env} bash {script_q} {rid_q}",
@@ -488,7 +490,9 @@ class RobotLifecycleOrchestrator:
             with self._infrastructure_lock:
                 slot = self._read_spawn_slots().get(rid)
             pose = self._SPAWN_POSES[slot] if slot is not None else self._SPAWN_POSES[0]
-        spec = self._robot_process_spec(rid, sim_mode, pose)
+        with self._infrastructure_lock:
+            slot = self._read_spawn_slots().get(rid, 0)
+        spec = self._robot_process_spec(rid, sim_mode, pose, slot)
         self._start_if_needed(
             rid, spec["cmd"], stop_cmd=spec["stop_cmd"],
             match=rf"sim_bringup\.sh\s+{re.escape(rid)}(?![A-Za-z0-9_-])",
@@ -589,7 +593,7 @@ class RobotLifecycleOrchestrator:
                 deleted = self._delete_simulation_entity(rid)
                 if existing is True and not deleted:
                     raise RuntimeError(f"failed to delete stale Gazebo entity: {rid}")
-            spec = self._robot_process_spec(rid, sim_mode, spawn_pose)
+            spec = self._robot_process_spec(rid, sim_mode, spawn_pose, slot)
             self._start_if_needed(
                 rid, spec["cmd"], stop_cmd=spec["stop_cmd"],
                 match=rf"sim_bringup\.sh\s+{re.escape(rid)}(?![A-Za-z0-9_-])",
