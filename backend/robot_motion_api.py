@@ -179,20 +179,25 @@ def _stop_teleop_process(rid: str) -> None:
 def _teleop_watchdog_loop() -> None:
     while True:
         time.sleep(0.1)
-        expired = []
-        now = time.monotonic()
-        with _TELEOP_LOCK:
-            for rid, deadline in list(_TELEOP_LEASE_DEADLINE.items()):
-                if now >= deadline:
-                    _stop_teleop_process(rid)
-                    _TELEOP_LEASE_DEADLINE.pop(rid, None)
-                    _TELEOP_STATE.pop(rid, None)
-                    expired.append(rid)
-        for rid in expired:
-            try:
-                _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
-            except Exception:
-                pass
+        _expire_teleop_leases()
+
+
+def _expire_teleop_leases(now: Optional[float] = None) -> List[str]:
+    expired: List[str] = []
+    current = time.monotonic() if now is None else float(now)
+    with _TELEOP_LOCK:
+        for rid, deadline in list(_TELEOP_LEASE_DEADLINE.items()):
+            if current >= deadline:
+                _stop_teleop_process(rid)
+                _TELEOP_LEASE_DEADLINE.pop(rid, None)
+                _TELEOP_STATE.pop(rid, None)
+                expired.append(rid)
+    for rid in expired:
+        try:
+            _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
+        except Exception:
+            pass
+    return expired
 
 
 def _ensure_teleop_watchdog() -> None:
@@ -241,11 +246,18 @@ def set_teleop_velocity(
 
 def stop_all_teleop() -> None:
     """Stop managed teleop publishers during backend shutdown."""
+    robot_ids: List[str] = []
     with _TELEOP_LOCK:
-        for rid in list(_TELEOP_PROCESSES):
+        robot_ids = list(_TELEOP_PROCESSES)
+        for rid in robot_ids:
             _stop_teleop_process(rid)
         _TELEOP_STATE.clear()
         _TELEOP_LEASE_DEADLINE.clear()
+    for rid in robot_ids:
+        try:
+            _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=2.0)
+        except Exception:
+            pass
 
 
 def send_navigate_to_pose(

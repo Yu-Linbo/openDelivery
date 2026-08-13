@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 import os
 import re
 import tempfile
@@ -31,6 +32,8 @@ def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
+        mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
             stream.flush()
@@ -82,6 +85,8 @@ def _normalize_point(raw: Dict[str, Any], used: set) -> Dict[str, Any]:
         yaw = float(raw.get("yaw", 0.0))
     except (TypeError, ValueError) as exc:
         raise ValueError("point x, y, yaw must be numeric") from exc
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        raise ValueError("point x, y, yaw must be finite")
     used.add(point_id)
     return {"id": point_id, "name": name, "type": point_type, "x": x, "y": y, "yaw": yaw}
 

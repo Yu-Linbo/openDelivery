@@ -157,6 +157,7 @@ let mapPoints = [];
 let semanticLegend = [];
 let mapEditorActive = false;
 let mapEditorDirty = false;
+const mapEditorDirtyLayers = new Set();
 let mapEditorPainting = false;
 let mapEditorMovedPointId = "";
 let relocRobotOptionsSignature = "";
@@ -717,7 +718,19 @@ function pointTypeLabel(type) {
 }
 
 function visibleMapPoints() {
-  return mapPoints.filter((point) => point.type === "elevator" || point.type === "standby" || (customPointsToggle && customPointsToggle.checked));
+  const editingPoints = mapEditorActive && mapEditorLayer && mapEditorLayer.value === "points";
+  return mapPoints.filter((point) => point.type === "elevator" || point.type === "standby" || editingPoints || (customPointsToggle && customPointsToggle.checked));
+}
+
+function markMapEditorDirty(layer) {
+  if (layer) mapEditorDirtyLayers.add(layer);
+  mapEditorDirty = mapEditorDirtyLayers.size > 0;
+}
+
+function clearMapEditorDirty(layer) {
+  if (layer) mapEditorDirtyLayers.delete(layer);
+  else mapEditorDirtyLayers.clear();
+  mapEditorDirty = mapEditorDirtyLayers.size > 0;
 }
 
 function drawMapPointsOverlay() {
@@ -749,6 +762,7 @@ async function saveMapPoints() {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: mapPoints }),
   });
   mapPoints = Array.isArray(out.points) ? out.points : mapPoints;
+  clearMapEditorDirty("points");
   renderMapWaypointList(); renderScene();
   return out;
 }
@@ -2208,8 +2222,9 @@ function renderScene() {
 
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(mapBitmap, viewPanX, viewPanY, mw * viewScale, mh * viewScale);
-  const sem = mapEditorActive && mapEditorLayer && mapEditorLayer.value === "semantic" ? semanticEditCanvas : semanticBitmap;
-  if (sem && ((semanticMapToggle && semanticMapToggle.checked) || mapEditorActive)) {
+  const editingSemantic = mapEditorActive && mapEditorLayer && mapEditorLayer.value === "semantic";
+  const sem = editingSemantic ? semanticEditCanvas : semanticBitmap;
+  if (sem && ((semanticMapToggle && semanticMapToggle.checked) || editingSemantic)) {
     ctx.save(); ctx.globalAlpha = 0.38; ctx.drawImage(sem, viewPanX, viewPanY, mw * viewScale, mh * viewScale); ctx.restore();
   }
 
@@ -2416,7 +2431,7 @@ async function loadFloorMap(floor) {
       throw new Error("后端返回的地图数据格式不正确");
     }
     activeFloor = floor;
-    mapEditorActive = false; mapEditorDirty = false; mapEditorPainting = false;
+    mapEditorActive = false; clearMapEditorDirty(); mapEditorPainting = false;
     if (mapWrapper) mapWrapper.classList.remove("map-edit-mode");
     if (btnMapEditorToggle) btnMapEditorToggle.textContent = "开始编辑";
     if (btnMapEditorSave) btnMapEditorSave.disabled = true;
@@ -2510,12 +2525,12 @@ function paintMapEditorAt(ev) {
   if (layer === "points") {
     const point = nearestMapPoint(mapX, mapY);
     if (tool === "delete" && point) {
-      mapPoints = mapPoints.filter((row) => row.id !== point.id); mapEditorDirty = true; renderMapWaypointList(); renderScene();
+      mapPoints = mapPoints.filter((row) => row.id !== point.id); markMapEditorDirty("points"); renderMapWaypointList(); renderScene();
     } else if (tool === "move") {
       if (!mapEditorMovedPointId && point) mapEditorMovedPointId = point.id;
       const moving = mapPoints.find((row) => row.id === mapEditorMovedPointId);
       const world = mapPixelsToWorld(mapX, mapY);
-      if (moving && world) { moving.x = world.x; moving.y = world.y; mapEditorDirty = true; renderScene(); }
+      if (moving && world) { moving.x = world.x; moving.y = world.y; markMapEditorDirty("points"); renderScene(); }
     }
     return true;
   }
@@ -2530,7 +2545,7 @@ function paintMapEditorAt(ev) {
   } else {
     cctx.fillStyle = tool === "erase" ? "#ffffff" : (mapEditorSemanticLabel.value || "#ffffff");
   }
-  cctx.fill(); cctx.restore(); mapEditorDirty = true; renderScene(); return true;
+  cctx.fill(); cctx.restore(); markMapEditorDirty(layer); renderScene(); return true;
 }
 
 function canvasToPgmDataUrl(c) {
@@ -2546,17 +2561,22 @@ function canvasToPgmDataUrl(c) {
 }
 
 async function saveActiveMapEditor() {
-  const layer = mapEditorLayer.value;
-  if (layer === "points") { await saveMapPoints(); }
-  else if (layer === "raster") {
-    await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/raster`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pgm_data: canvasToPgmDataUrl(mapBitmap) }) });
-    activePgm = { ...activePgm, data: Array.from(mapBitmap.getContext("2d").getImageData(0, 0, mapBitmap.width, mapBitmap.height).data).filter((_, i) => i % 4 === 0) };
-  } else {
-    const out = semanticEditCanvas || createBlankSemanticCanvas();
-    await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/semantic`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ png_data: out.toDataURL("image/png") }) });
-    semanticBitmap = out;
+  const layers = mapEditorDirtyLayers.size ? Array.from(mapEditorDirtyLayers) : [mapEditorLayer.value];
+  for (const layer of layers) {
+    if (layer === "points") {
+      await saveMapPoints();
+    } else if (layer === "raster") {
+      await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/raster`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pgm_data: canvasToPgmDataUrl(mapBitmap) }) });
+      activePgm = { ...activePgm, data: Array.from(mapBitmap.getContext("2d").getImageData(0, 0, mapBitmap.width, mapBitmap.height).data).filter((_, i) => i % 4 === 0) };
+      clearMapEditorDirty("raster");
+    } else if (layer === "semantic") {
+      const out = semanticEditCanvas || createBlankSemanticCanvas();
+      await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/semantic`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ png_data: out.toDataURL("image/png") }) });
+      semanticBitmap = out;
+      clearMapEditorDirty("semantic");
+    }
   }
-  mapEditorDirty = false;
+  mapEditorDirty = mapEditorDirtyLayers.size > 0;
 }
 
 function onMouseDown(ev) {
@@ -3243,6 +3263,7 @@ function syncMapEditorControls() {
   if (mapEditorBrush) mapEditorBrush.disabled = layer === "points";
   if (mapEditorRasterValue) mapEditorRasterValue.disabled = layer !== "raster";
   if (mapEditorSemanticLabel) mapEditorSemanticLabel.disabled = layer !== "semantic";
+  renderScene();
 }
 
 async function initMonitor() {
@@ -3539,6 +3560,7 @@ async function initMonitor() {
 }
 
 let teleopHeldAction = "";
+let teleopHeldRobotId = "";
 let teleopRequestSeq = 0;
 let teleopHeartbeatTimer = null;
 const teleopSessionId = (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "_");
@@ -3551,8 +3573,8 @@ function teleopVector(action) {
   if (action === "right") return [0, -ang];
   return [0, 0];
 }
-async function postTeleop(action, active) {
-  const rid = relocRobotId && relocRobotId.value;
+async function postTeleop(action, active, robotId = "") {
+  const rid = robotId || (relocRobotId && relocRobotId.value);
   if (!rid) throw new Error("没有在线机器人可遥控");
   const [linear, angular] = teleopVector(action);
   const seq = ++teleopRequestSeq;
@@ -3563,18 +3585,23 @@ async function postTeleop(action, active) {
 }
 function setTeleopHeld(action) {
   if (!action || action === "stop") { releaseTeleop(true); return; }
-  if (teleopHeldAction === action) return;
+  const rid = relocRobotId && relocRobotId.value;
+  if (!rid) { if (teleopMessage) teleopMessage.textContent = "没有在线机器人可遥控"; return; }
+  if (teleopHeldAction === action && teleopHeldRobotId === rid) return;
+  if (teleopHeldAction && teleopHeldRobotId && teleopHeldRobotId !== rid) releaseTeleop();
   teleopHeldAction = action;
+  teleopHeldRobotId = rid;
   if (teleopHeartbeatTimer) clearInterval(teleopHeartbeatTimer);
   document.querySelectorAll("[data-teleop]").forEach((button) => button.classList.toggle("is-active", button.dataset.teleop === action));
-  postTeleop(action, true).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
-  teleopHeartbeatTimer = setInterval(() => { if (teleopHeldAction === action) postTeleop(action, true).catch(() => {}); }, 250);
+  postTeleop(action, true, rid).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
+  teleopHeartbeatTimer = setInterval(() => { if (teleopHeldAction === action && teleopHeldRobotId === rid) postTeleop(action, true, rid).catch(() => {}); }, 250);
 }
 function releaseTeleop(force = false) {
-  const old = teleopHeldAction; teleopHeldAction = "";
+  const old = teleopHeldAction; const oldRobotId = teleopHeldRobotId; const targetRobotId = oldRobotId || (force && relocRobotId ? relocRobotId.value : "");
+  teleopHeldAction = ""; teleopHeldRobotId = "";
   if (teleopHeartbeatTimer) { clearInterval(teleopHeartbeatTimer); teleopHeartbeatTimer = null; }
   document.querySelectorAll("[data-teleop]").forEach((button) => button.classList.remove("is-active"));
-  if (old || force) postTeleop(old || "stop", false).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
+  if ((old || force) && targetRobotId) postTeleop(old || "stop", false, targetRobotId).catch((err) => { if (teleopMessage) teleopMessage.textContent = err.message || err; });
 }
 function initMonitorTeleop() {
   document.querySelectorAll("button[data-teleop]").forEach((button) => {

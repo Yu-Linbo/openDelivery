@@ -67,6 +67,19 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("robot2", motion._TELEOP_LEASE_DEADLINE)
         ensure_watchdog.assert_called_once()
 
+    def test_expired_teleop_stops_publisher_and_publishes_zero(self):
+        motion._TELEOP_PROCESSES["robot2"] = mock.Mock()
+        motion._TELEOP_STATE["robot2"] = ("browser", 0.2, 0.0)
+        motion._TELEOP_LEASE_DEADLINE["robot2"] = 10.0
+        with mock.patch.object(motion, "_stop_teleop_process") as stop, mock.patch.object(
+            motion, "_ros_run", return_value={"ok": True}
+        ) as ros_run:
+            expired = motion._expire_teleop_leases(now=10.1)
+        self.assertEqual(expired, ["robot2"])
+        stop.assert_called_once_with("robot2")
+        self.assertNotIn("robot2", motion._TELEOP_LEASE_DEADLINE)
+        self.assertIn("linear: {x: 0.0", ros_run.call_args.args[0])
+
     def test_monitor_dom_and_script_contain_requested_features(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -79,6 +92,9 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("/api/robot/motion/teleop", js)
         self.assertIn("visibilitychange", js)
         self.assertIn("teleopHeartbeatTimer", js)
+        self.assertIn("teleopHeldRobotId", js)
+        self.assertIn("mapEditorDirtyLayers", js)
+        self.assertIn("editingPoints", js)
 
 
 if __name__ == "__main__":

@@ -68,6 +68,13 @@ class MapAssetsTest(unittest.TestCase):
                 [{"id": "bad/path", "type": "custom", "x": 0, "y": 0}],
             )
 
+        with self.assertRaisesRegex(ValueError, "finite"):
+            map_assets.save_points(
+                self.map_dir,
+                self.floor,
+                [{"id": "bad", "name": "bad", "type": "custom", "x": float("nan"), "y": 0}],
+            )
+
     def test_semantic_round_trip(self):
         result = map_assets.save_semantic(self.map_dir, self.floor, self._png_url())
         self.assertEqual((result["width"], result["height"]), (2, 2))
