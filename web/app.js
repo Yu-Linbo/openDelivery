@@ -9,6 +9,7 @@ let API_BASE_URL =
 
 const menuButtons = Array.from(document.querySelectorAll(".menu-item"));
 const layoutEl = document.querySelector(".layout");
+const contentEl = document.querySelector(".content");
 const btnSidebarCollapse = document.getElementById("btn-sidebar-collapse");
 const btnSidebarReveal = document.getElementById("btn-sidebar-reveal");
 const robotPresenceAnchor = document.getElementById("robot-presence-anchor");
@@ -102,11 +103,23 @@ const btnWaypointPick = document.getElementById("btn-waypoint-pick");
 const btnWaypointSave = document.getElementById("btn-waypoint-save");
 const mapWaypointList = document.getElementById("map-waypoint-list");
 const waypointMessage = document.getElementById("waypoint-message");
+const waypointX = document.getElementById("waypoint-x");
+const waypointY = document.getElementById("waypoint-y");
+const waypointYaw = document.getElementById("waypoint-yaw");
 const mapEditorLayer = document.getElementById("map-editor-layer");
 const mapEditorTool = document.getElementById("map-editor-tool");
 const mapEditorBrush = document.getElementById("map-editor-brush");
 const mapEditorRasterValue = document.getElementById("map-editor-raster-value");
 const mapEditorSemanticLabel = document.getElementById("map-editor-semantic-label");
+const mapEditorSemanticSwatch = document.getElementById("map-editor-semantic-swatch");
+const mapEditorSemanticName = document.getElementById("map-editor-semantic-name");
+const btnMapEditorOpen = document.getElementById("btn-map-editor-open");
+const mapEditorDialog = document.getElementById("map-editor-dialog");
+const mapEditorBackdrop = document.getElementById("map-editor-backdrop");
+const btnMapEditorClose = document.getElementById("btn-map-editor-close");
+const mapEditorFloor = document.getElementById("map-editor-floor");
+const btnMapEditorUndo = document.getElementById("btn-map-editor-undo");
+const btnMapEditorCancel = document.getElementById("btn-map-editor-cancel");
 const btnMapEditorToggle = document.getElementById("btn-map-editor-toggle");
 const btnMapEditorSave = document.getElementById("btn-map-editor-save");
 const mapEditorMessage = document.getElementById("map-editor-message");
@@ -154,11 +167,17 @@ let mapBitmap = null;
 let semanticBitmap = null;
 let semanticEditCanvas = null;
 let mapPoints = [];
+let savedMapPoints = [];
 let semanticLegend = [];
 let mapEditorActive = false;
 let mapEditorDirty = false;
 const mapEditorDirtyLayers = new Set();
+const mapEditorUndoStack = [];
+const MAP_EDITOR_UNDO_LIMIT = 12;
+const MAP_EDITOR_UNDO_MAX_BYTES = 64 * 1024 * 1024;
+let mapEditorUndoBytes = 0;
 let mapEditorPainting = false;
+let mapEditorResumeAfterPick = false;
 let mapEditorMovedPointId = "";
 let relocRobotOptionsSignature = "";
 
@@ -288,6 +307,9 @@ let relocPickHoverSy = null;
 
 function activateView(target, persist = true) {
   const next = views[target] ? target : "monitor";
+  if (contentEl) {
+    contentEl.classList.toggle("content--monitor", next === "monitor");
+  }
   menuButtons.forEach((b) => b.classList.toggle("active", b.dataset.view === next));
   Object.entries(views).forEach(([key, pane]) => {
     if (pane) {
@@ -679,38 +701,172 @@ function createBlankSemanticCanvas() {
   return c;
 }
 
+function cloneMapPointRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((point) => ({ ...point }));
+}
+
+function cloneCanvasElement(source) {
+  if (!source) return null;
+  const clone = document.createElement("canvas");
+  clone.width = source.width;
+  clone.height = source.height;
+  clone.getContext("2d").drawImage(source, 0, 0);
+  return clone;
+}
+
+function captureCanvasSnapshot(source) {
+  if (!source) return null;
+  const image = source.getContext("2d").getImageData(0, 0, source.width, source.height);
+  return { width: source.width, height: source.height, data: new Uint8ClampedArray(image.data) };
+}
+
+function restoreCanvasSnapshot(target, snapshot) {
+  if (!snapshot) return target;
+  const canvasTarget = target && target.width === snapshot.width && target.height === snapshot.height
+    ? target
+    : document.createElement("canvas");
+  canvasTarget.width = snapshot.width;
+  canvasTarget.height = snapshot.height;
+  const targetCtx = canvasTarget.getContext("2d");
+  const image = targetCtx.createImageData(snapshot.width, snapshot.height);
+  image.data.set(snapshot.data);
+  targetCtx.putImageData(image, 0, 0);
+  return canvasTarget;
+}
+
+function clearMapEditorUndoHistory() {
+  mapEditorUndoStack.length = 0;
+  mapEditorUndoBytes = 0;
+  syncMapEditorUi();
+}
+
+function pushMapEditorUndoSnapshot(layer) {
+  if (!layer) return;
+  const snapshot = { layer, dirtyLayers: Array.from(mapEditorDirtyLayers), byteSize: 0 };
+  if (layer === "points") {
+    snapshot.points = cloneMapPointRows(mapPoints);
+    snapshot.byteSize = Math.max(1024, JSON.stringify(snapshot.points).length * 2);
+  } else {
+    const source = layer === "semantic" ? semanticEditCanvas : mapBitmap;
+    snapshot.canvas = captureCanvasSnapshot(source);
+    if (!snapshot.canvas) return;
+    snapshot.byteSize = snapshot.canvas.data.byteLength;
+  }
+  mapEditorUndoStack.push(snapshot);
+  mapEditorUndoBytes += snapshot.byteSize;
+  while (mapEditorUndoStack.length > 1 && (mapEditorUndoStack.length > MAP_EDITOR_UNDO_LIMIT || mapEditorUndoBytes > MAP_EDITOR_UNDO_MAX_BYTES)) {
+    const removed = mapEditorUndoStack.shift();
+    mapEditorUndoBytes -= removed.byteSize || 0;
+  }
+  syncMapEditorUi();
+}
+
+function undoMapEditorChange() {
+  const snapshot = mapEditorUndoStack.pop();
+  if (!snapshot) {
+    if (mapEditorMessage) mapEditorMessage.textContent = "没有可撤销的修改";
+    return;
+  }
+  mapEditorUndoBytes = Math.max(0, mapEditorUndoBytes - (snapshot.byteSize || 0));
+  if (snapshot.layer === "points") {
+    mapPoints = cloneMapPointRows(snapshot.points);
+    renderMapWaypointList();
+  } else if (snapshot.layer === "semantic") {
+    semanticEditCanvas = restoreCanvasSnapshot(semanticEditCanvas, snapshot.canvas);
+  } else {
+    mapBitmap = restoreCanvasSnapshot(mapBitmap, snapshot.canvas);
+  }
+  mapEditorDirtyLayers.clear();
+  snapshot.dirtyLayers.forEach((layer) => mapEditorDirtyLayers.add(layer));
+  mapEditorDirty = mapEditorDirtyLayers.size > 0;
+  syncMapEditorUi();
+  renderScene();
+  if (mapEditorMessage) mapEditorMessage.textContent = "已撤销上一步修改";
+}
+
+function discardMapEditorChanges() {
+  if (!mapEditorDirty || !activePgm) return;
+  if (!window.confirm("确定放弃当前地图的全部未保存修改吗？")) return;
+  mapBitmap = buildMapBitmap(activePgm);
+  semanticEditCanvas = semanticBitmap ? cloneCanvasElement(semanticBitmap) : createBlankSemanticCanvas();
+  mapPoints = cloneMapPointRows(savedMapPoints);
+  mapEditorDirtyLayers.clear();
+  mapEditorDirty = false;
+  clearMapEditorUndoHistory();
+  renderMapWaypointList();
+  renderScene();
+  if (mapEditorMessage) mapEditorMessage.textContent = "已取消全部未保存修改";
+}
+
 async function loadActiveMapAssets() {
   semanticBitmap = null;
   semanticEditCanvas = null;
   mapPoints = [];
+  savedMapPoints = [];
+  clearMapEditorUndoHistory();
   semanticLegend = [];
   if (!activeFloor || isMappingFloor(activeFloor)) {
     renderMapWaypointList();
     return;
   }
   const assets = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets`, { cache: "no-store" });
-  mapPoints = Array.isArray(assets.points) ? assets.points : [];
+  mapPoints = cloneMapPointRows(Array.isArray(assets.points) ? assets.points : []);
+  savedMapPoints = cloneMapPointRows(mapPoints);
   const labels = assets.semantic_legend && Array.isArray(assets.semantic_legend.labels)
     ? assets.semantic_legend.labels : [];
   semanticLegend = labels;
   semanticBitmap = await buildSemanticBitmapFromDataUrl(assets.semantic_png || "");
-  semanticEditCanvas = semanticBitmap || createBlankSemanticCanvas();
+  semanticEditCanvas = semanticBitmap ? cloneCanvasElement(semanticBitmap) : createBlankSemanticCanvas();
+  clearMapEditorUndoHistory();
   renderSemanticLabelOptions();
   renderMapWaypointList();
 }
 
+function normalizeSemanticColor(value) {
+  const color = String(value || "").trim();
+  return color.length === 7 && /^#[0-9a-fA-F]{6}/.test(color) ? color.toLowerCase() : "#ffffff";
+}
+
+function semanticTextColor(color) {
+  const normalized = normalizeSemanticColor(color).slice(1);
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? "#0f172a" : "#f8fafc";
+}
+
+function updateSemanticLabelPreview() {
+  if (!mapEditorSemanticLabel) return;
+  const option = mapEditorSemanticLabel.selectedOptions && mapEditorSemanticLabel.selectedOptions[0];
+  const color = normalizeSemanticColor(mapEditorSemanticLabel.value);
+  const name = option && option.dataset.semanticName ? option.dataset.semanticName : "未命名语义";
+  if (mapEditorSemanticSwatch) mapEditorSemanticSwatch.style.backgroundColor = color;
+  if (mapEditorSemanticName) mapEditorSemanticName.textContent = name + " · " + color;
+  mapEditorSemanticLabel.style.borderColor = color;
+}
+
 function renderSemanticLabelOptions() {
   if (!mapEditorSemanticLabel) return;
+  const fallback = [
+    { id: "background", name: "背景/未标注", color: "#ffffff" },
+    { id: "obstacle", name: "障碍/墙体", color: "#000000" },
+    { id: "elevator", name: "电梯区域", color: "#6c5ce7" },
+    { id: "corridor", name: "走廊", color: "#f39c12" },
+  ];
+  const labels = semanticLegend.length ? semanticLegend : fallback;
   mapEditorSemanticLabel.innerHTML = "";
-  semanticLegend.forEach((label) => {
+  labels.forEach((label, index) => {
     const option = document.createElement("option");
-    option.value = String(label.color || "#ffffff");
-    option.textContent = `${label.name || label.id} · ${label.color || ""}`;
+    const color = normalizeSemanticColor(label.color);
+    const name = String(label.name || label.id || ("语义标签 " + (index + 1)));
+    option.value = color;
+    option.textContent = name + " · " + color;
+    option.dataset.semanticName = name;
+    option.style.backgroundColor = color;
+    option.style.color = semanticTextColor(color);
     mapEditorSemanticLabel.appendChild(option);
   });
-  if (!mapEditorSemanticLabel.options.length) {
-    mapEditorSemanticLabel.innerHTML = '<option value="#ffffff">背景</option><option value="#6c5ce7">电梯区域</option><option value="#f39c12">走廊</option>';
-  }
+  updateSemanticLabelPreview();
 }
 
 function pointTypeLabel(type) {
@@ -719,18 +875,67 @@ function pointTypeLabel(type) {
 
 function visibleMapPoints() {
   const editingPoints = mapEditorActive && mapEditorLayer && mapEditorLayer.value === "points";
-  return mapPoints.filter((point) => point.type === "elevator" || point.type === "standby" || editingPoints || (customPointsToggle && customPointsToggle.checked));
+  const showAllPoints = customPointsToggle && customPointsToggle.checked;
+  return editingPoints || showAllPoints ? mapPoints : [];
+}
+
+function syncMapEditorUi() {
+  const dialogOpen = Boolean(mapEditorDialog && !mapEditorDialog.hidden);
+  if (mapEditorBackdrop) mapEditorBackdrop.hidden = !dialogOpen;
+  if (btnMapEditorOpen) {
+    btnMapEditorOpen.textContent = mapEditorDirty ? "地图编辑 · 未保存" : "地图编辑";
+    btnMapEditorOpen.classList.toggle("has-unsaved", mapEditorDirty);
+    btnMapEditorOpen.setAttribute("aria-expanded", String(dialogOpen));
+  }
+  if (mapEditorFloor) mapEditorFloor.textContent = activeFloor && !isMappingFloor(activeFloor) ? activeFloor : "未选择已保存地图";
+  if (mapWrapper) mapWrapper.classList.toggle("map-edit-mode", mapEditorActive);
+  if (btnMapEditorToggle) btnMapEditorToggle.textContent = mapEditorActive ? "暂停编辑" : "继续编辑";
+  if (btnMapEditorUndo) btnMapEditorUndo.disabled = mapEditorUndoStack.length === 0;
+  if (btnMapEditorCancel) btnMapEditorCancel.disabled = !mapEditorDirty;
+  if (btnMapEditorSave) btnMapEditorSave.disabled = !mapEditorDirty;
+}
+
+function setMapEditorActive(active) {
+  mapEditorActive = Boolean(active && activePgm && !isMappingFloor(activeFloor));
+  mapEditorPainting = false;
+  mapEditorMovedPointId = "";
+  syncMapEditorUi();
+  renderScene();
+}
+
+function setMapEditorDialogOpen(open) {
+  if (!mapEditorDialog) return false;
+  if (open && (!activePgm || isMappingFloor(activeFloor))) {
+    if (mapStatus) mapStatus.textContent = "地图编辑仅支持已保存地图，请先选择地图";
+    return false;
+  }
+  mapEditorDialog.hidden = !open;
+  if (!open && relocPickAction === "waypoint") {
+    mapEditorResumeAfterPick = false;
+    relocPickAction = "relocalize";
+    resetRelocPickState("");
+    if (relocPickToggle) {
+      relocPickToggle.checked = false;
+      syncRelocPickCursorClass();
+    }
+  }
+  setMapEditorActive(open);
+  syncMapEditorUi();
+  if (open && mapEditorLayer) mapEditorLayer.focus();
+  return true;
 }
 
 function markMapEditorDirty(layer) {
   if (layer) mapEditorDirtyLayers.add(layer);
   mapEditorDirty = mapEditorDirtyLayers.size > 0;
+  syncMapEditorUi();
 }
 
 function clearMapEditorDirty(layer) {
   if (layer) mapEditorDirtyLayers.delete(layer);
   else mapEditorDirtyLayers.clear();
   mapEditorDirty = mapEditorDirtyLayers.size > 0;
+  syncMapEditorUi();
 }
 
 function drawMapPointsOverlay() {
@@ -744,8 +949,22 @@ function drawMapPointsOverlay() {
     ctx.strokeStyle = "#0f172a";
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(sx, sy, point.type === "custom" ? 5 : 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#f8fafc"; ctx.font = '11px "Fira Code", monospace';
-    ctx.fillText(point.name || point.id, sx + 9, sy - 7);
+    const label = String(point.name || point.id);
+    const labelX = sx + 9;
+    const labelBaseline = sy - 7;
+    ctx.font = '11px "Fira Code", monospace';
+    const labelWidth = Math.ceil(ctx.measureText(label).width) + 10;
+    const labelTop = labelBaseline - 12;
+    ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === "function") ctx.roundRect(labelX - 5, labelTop, labelWidth, 17, 5);
+    else ctx.rect(labelX - 5, labelTop, labelWidth, 17);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(label, labelX, labelBaseline);
     ctx.restore();
   });
 }
@@ -761,7 +980,8 @@ async function saveMapPoints() {
   const out = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/points`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: mapPoints }),
   });
-  mapPoints = Array.isArray(out.points) ? out.points : mapPoints;
+  mapPoints = cloneMapPointRows(Array.isArray(out.points) ? out.points : mapPoints);
+  savedMapPoints = cloneMapPointRows(mapPoints);
   clearMapEditorDirty("points");
   renderMapWaypointList(); renderScene();
   return out;
@@ -854,11 +1074,14 @@ function drawGridScreen() {
   const mw = activePgm.width;
   const mh = activePgm.height;
   const { w, h } = getCanvasCssSize();
+  const resolution = Number(activeMeta && activeMeta.resolution);
+  if (!Number.isFinite(resolution) || resolution <= 0) {
+    return;
+  }
 
   ctx.save();
-  ctx.strokeStyle = "rgba(34, 197, 94, 0.22)";
   ctx.lineWidth = 1;
-  const gridMapPx = Math.max(8, Math.floor(mw / 80));
+  const gridMapPx = 0.5 / resolution;
 
   const x0 = Math.max(0, viewPanX);
   const y0 = Math.max(0, viewPanY);
@@ -873,6 +1096,7 @@ function drawGridScreen() {
     if (sx < x0 - 1 || sx > x1 + 1) {
       continue;
     }
+    ctx.strokeStyle = Math.round(mx / gridMapPx) % 2 === 0 ? "rgba(34, 197, 94, 0.38)" : "rgba(34, 197, 94, 0.22)";
     ctx.beginPath();
     ctx.moveTo(sx, y0);
     ctx.lineTo(sx, y1);
@@ -883,6 +1107,7 @@ function drawGridScreen() {
     if (sy < y0 - 1 || sy > y1 + 1) {
       continue;
     }
+    ctx.strokeStyle = Math.round(my / gridMapPx) % 2 === 0 ? "rgba(34, 197, 94, 0.38)" : "rgba(34, 197, 94, 0.22)";
     ctx.beginPath();
     ctx.moveTo(x0, sy);
     ctx.lineTo(x1, sy);
@@ -1480,6 +1705,10 @@ function exitRelocPickModeAfterDone(message) {
   relocPickHoverSx = null;
   relocPickHoverSy = null;
   relocPickAction = "relocalize";
+  if (mapEditorResumeAfterPick) {
+    mapEditorResumeAfterPick = false;
+    setMapEditorActive(true);
+  }
   if (relocMessage && message) {
     relocMessage.textContent = message;
   }
@@ -1531,6 +1760,9 @@ function finishRelocMapPick(yaw) {
   const anchor = relocPickAnchorWorld;
   if (action === "waypoint" && anchor) {
     if (relocYaw) relocYaw.value = String(Number(yaw.toFixed(4)));
+    if (waypointX) waypointX.value = String(Number(anchor.x.toFixed(3)));
+    if (waypointY) waypointY.value = String(Number(anchor.y.toFixed(3)));
+    if (waypointYaw) waypointYaw.value = String(Number(yaw.toFixed(4)));
     exitRelocPickModeAfterDone("点位位置已填入，填写名称后保存");
     if (waypointMessage) waypointMessage.textContent = "点位位置已填入，填写名称后保存";
     return;
@@ -1577,6 +1809,10 @@ function handleRelocMapClick(ev) {
     }
     if (relocY) {
       relocY.value = String(Number(world.y.toFixed(3)));
+    }
+    if (relocPickAction === "waypoint") {
+      if (waypointX) waypointX.value = String(Number(world.x.toFixed(3)));
+      if (waypointY) waypointY.value = String(Number(world.y.toFixed(3)));
     }
     if (relocMessage) {
       relocMessage.textContent =
@@ -1796,6 +2032,7 @@ function mergePresenceRows() {
         return {
           id,
           name: String((it && it.name) || id),
+          model: String((it && it.robot_model) || "").trim(),
           floor: String((it && it.floor) || ""),
           online: !!(it && it.online),
           persistedCurrentMap: String((it && it.persisted_current_map) || "").trim(),
@@ -1829,6 +2066,7 @@ function mergePresenceRows() {
       online = liveR.heartbeat_online !== false;
     }
     const name = (liveR && (liveR.name || liveR.id)) || (cache && cache.robot_name) || id;
+    const model = String((liveR && liveR.robot_model) || (cache && cache.robot_model) || "").trim();
     const floor =
       (liveR && snapshotRobotFloor(liveR)) ||
       (cache && String(cache.current_map || "").trim()) ||
@@ -1844,6 +2082,7 @@ function mergePresenceRows() {
     rows.push({
       id,
       name,
+      model,
       floor,
       online,
       persistedCurrentMap,
@@ -2277,16 +2516,16 @@ function syncOnlineRobotSelect() {
   const previous = relocRobotId.value;
   const online = mergePresenceRows().filter((row) => row.online);
   const fallback = latestSnapshot && Array.isArray(latestSnapshot.robots)
-    ? latestSnapshot.robots.filter((row) => row && row.heartbeat_online !== false).map((row) => ({ id: row.id, name: row.name || row.id })) : [];
+    ? latestSnapshot.robots.filter((row) => row && row.heartbeat_online !== false).map((row) => ({ id: row.id, name: row.name || row.id, model: row.robot_model || "" })) : [];
   const rows = online.length ? online : fallback;
   const clean = [], seen = new Set();
-  rows.forEach((row) => { const id = String(row.id || "").trim(); if (id && !seen.has(id)) { seen.add(id); clean.push({ id, name: row.name || id }); } });
+  rows.forEach((row) => { const id = String(row.id || "").trim(); if (id && !seen.has(id)) { seen.add(id); clean.push({ id, model:String(row.model||"").trim() }); } });
   const signature = JSON.stringify(clean);
   if (signature === relocRobotOptionsSignature) return;
   relocRobotOptionsSignature = signature;
   relocRobotId.innerHTML = "";
   clean.forEach((row) => {
-    const option = document.createElement("option"); option.value = row.id; option.textContent = `${row.name} (${row.id})`; relocRobotId.appendChild(option);
+    const option = document.createElement("option"); option.value = row.id; option.textContent = row.model?`${row.id}(${row.model})`:row.id; relocRobotId.appendChild(option);
   });
   if (!clean.length) { relocRobotId.innerHTML = '<option value="">暂无在线机器人</option>'; relocRobotId.disabled = true; }
   else { relocRobotId.disabled = false; relocRobotId.value = seen.has(previous) ? previous : clean[0].id; }
@@ -2402,6 +2641,12 @@ async function loadFloorMap(floor) {
   activeMappingRobotId = null;
   updateMappingToolbar();
   if (isMappingFloor(floor)) {
+    if (mapEditorDialog) mapEditorDialog.hidden = true;
+    mapEditorActive = false;
+    mapEditorPainting = false;
+    mapEditorResumeAfterPick = false;
+    clearMapEditorDirty();
+    syncMapEditorUi();
     const rid = robotIdFromMappingFloor(floor);
     if (!rid) {
       mapStatus.textContent = "无效的建图楼层名";
@@ -2412,6 +2657,7 @@ async function loadFloorMap(floor) {
     mapBitmap = null;
     activeFloor = floor;
     activeMappingRobotId = rid;
+    syncMapEditorUi();
     if (relocRobotId && !relocRobotId.dataset.userEdited) {
       relocRobotId.value = rid;
     }
@@ -2431,10 +2677,12 @@ async function loadFloorMap(floor) {
       throw new Error("后端返回的地图数据格式不正确");
     }
     activeFloor = floor;
-    mapEditorActive = false; clearMapEditorDirty(); mapEditorPainting = false;
-    if (mapWrapper) mapWrapper.classList.remove("map-edit-mode");
-    if (btnMapEditorToggle) btnMapEditorToggle.textContent = "开始编辑";
-    if (btnMapEditorSave) btnMapEditorSave.disabled = true;
+    if (mapEditorDialog) mapEditorDialog.hidden = true;
+    mapEditorActive = false;
+    mapEditorPainting = false;
+    mapEditorResumeAfterPick = false;
+    clearMapEditorDirty();
+    syncMapEditorUi();
     activePgm = pgm;
     activeMeta = parseYaml(yamlText);
     mapBitmap = buildMapBitmap(pgm);
@@ -2516,7 +2764,7 @@ function nearestMapPoint(mapX, mapY, radiusPx = 14) {
   return best;
 }
 
-function paintMapEditorAt(ev) {
+function paintMapEditorAt(ev, recordUndo = false) {
   if (!mapEditorActive || !activePgm || ev.shiftKey) return false;
   const { mapX, mapY } = canvasEventMapPixel(ev);
   if (mapX < 0 || mapY < 0 || mapX >= activePgm.width || mapY >= activePgm.height) return true;
@@ -2530,7 +2778,8 @@ function paintMapEditorAt(ev) {
         if (mapEditorMessage) mapEditorMessage.textContent = "请先在设置点位中填写名称和语义类型，再点击地图";
         return true;
       }
-      mapPoints.push({ id: nextMapPointId(name), name, type: waypointType.value, x: world.x, y: world.y, yaw: Number(relocYaw.value || 0) || 0 });
+      if (recordUndo) pushMapEditorUndoSnapshot("points");
+      mapPoints.push({ id: nextMapPointId(name), name, type: waypointType.value, x: world.x, y: world.y, yaw: Number(waypointYaw && waypointYaw.value || 0) || 0 });
       waypointName.value = "";
       markMapEditorDirty("points"); renderMapWaypointList(); renderScene();
       if (mapEditorMessage) mapEditorMessage.textContent = "点位已添加，点击保存地图修改后落盘";
@@ -2538,9 +2787,13 @@ function paintMapEditorAt(ev) {
     }
     const point = nearestMapPoint(mapX, mapY);
     if (tool === "delete" && point) {
+      if (recordUndo) pushMapEditorUndoSnapshot("points");
       mapPoints = mapPoints.filter((row) => row.id !== point.id); markMapEditorDirty("points"); renderMapWaypointList(); renderScene();
     } else if (tool === "move") {
-      if (!mapEditorMovedPointId && point) mapEditorMovedPointId = point.id;
+      if (!mapEditorMovedPointId && point) {
+        if (recordUndo) pushMapEditorUndoSnapshot("points");
+        mapEditorMovedPointId = point.id;
+      }
       const moving = mapPoints.find((row) => row.id === mapEditorMovedPointId);
       const world = mapPixelsToWorld(mapX, mapY);
       if (moving && world) { moving.x = world.x; moving.y = world.y; markMapEditorDirty("points"); renderScene(); }
@@ -2549,6 +2802,7 @@ function paintMapEditorAt(ev) {
   }
   const c = layer === "semantic" ? (semanticEditCanvas || (semanticEditCanvas = createBlankSemanticCanvas())) : mapBitmap;
   if (!c) return true;
+  if (recordUndo) pushMapEditorUndoSnapshot(layer);
   const cctx = c.getContext("2d");
   const radius = Math.max(1, Number(mapEditorBrush.value || 4));
   cctx.save(); cctx.beginPath(); cctx.arc(mapX, mapY, radius, 0, Math.PI * 2);
@@ -2585,18 +2839,20 @@ async function saveActiveMapEditor() {
     } else if (layer === "semantic") {
       const out = semanticEditCanvas || createBlankSemanticCanvas();
       await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets/semantic`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ png_data: out.toDataURL("image/png") }) });
-      semanticBitmap = out;
+      semanticBitmap = cloneCanvasElement(out);
       clearMapEditorDirty("semantic");
     }
   }
   mapEditorDirty = mapEditorDirtyLayers.size > 0;
+  if (!mapEditorDirty) clearMapEditorUndoHistory();
+  syncMapEditorUi();
 }
 
 function onMouseDown(ev) {
   if (ev.button !== 0) {
     return;
   }
-  if (mapEditorActive && !ev.shiftKey && paintMapEditorAt(ev)) { mapEditorPainting = true; return; }
+  if (mapEditorActive && !ev.shiftKey && paintMapEditorAt(ev, true)) { mapEditorPainting = true; return; }
   const pickOn = relocPickToggle && relocPickToggle.checked;
   if (pickOn && activePgm && !ev.shiftKey && handleRelocMapClick(ev)) {
     return;
@@ -2641,7 +2897,10 @@ function onMouseMove(ev) {
 }
 
 function onMouseUp() {
-  mapEditorPainting = false; mapEditorMovedPointId = "";
+  const movedPoint = mapEditorMovedPointId;
+  mapEditorPainting = false;
+  mapEditorMovedPointId = "";
+  if (movedPoint) renderMapWaypointList();
   isDragging = false;
   canvas.style.cursor = "";
 }
@@ -3283,6 +3542,7 @@ async function initMonitor() {
   loadAndApplyMonitorCheckboxPrefs();
   syncMapEditorControls();
   if (mapEditorLayer) mapEditorLayer.addEventListener("change", syncMapEditorControls);
+  if (mapEditorSemanticLabel) mapEditorSemanticLabel.addEventListener("change", updateSemanticLabelPreview);
 
   bindMapInteractions();
 
@@ -3295,36 +3555,82 @@ async function initMonitor() {
     });
   }
 
+  if (btnMapEditorOpen) {
+    btnMapEditorOpen.addEventListener("click", () => {
+      if (!window.StandaloneMapEditor) {
+        if (mapStatus) mapStatus.textContent = "地图编辑器加载失败，请刷新页面后重试";
+        return;
+      }
+      window.StandaloneMapEditor.open(activeFloor);
+    });
+  }
+  if (btnMapEditorClose) {
+    btnMapEditorClose.addEventListener("click", () => {
+      setMapEditorDialogOpen(false);
+      if (mapEditorDirty && mapEditorMessage) mapEditorMessage.textContent = "修改仍保留，重新打开后可继续或保存";
+    });
+  }
+  if (btnMapEditorUndo) btnMapEditorUndo.addEventListener("click", undoMapEditorChange);
+  if (btnMapEditorCancel) btnMapEditorCancel.addEventListener("click", discardMapEditorChanges);
+  document.addEventListener("keydown", (ev) => {
+    const target = ev.target;
+    const isTyping = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+    if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && String(ev.key).toLowerCase() === "z" && mapEditorDialog && !mapEditorDialog.hidden && !isTyping) {
+      ev.preventDefault();
+      undoMapEditorChange();
+      return;
+    }
+    if (ev.key === "Escape" && mapEditorDialog && !mapEditorDialog.hidden) setMapEditorDialogOpen(false);
+  });
+
   if (btnWaypointPick) {
     btnWaypointPick.addEventListener("click", () => {
       if (!activePgm || isMappingFloor(activeFloor)) { waypointMessage.textContent = "请先选择已保存地图"; return; }
-      relocPickAction = "waypoint"; resetRelocPickState("单击地图设置点位位置，再单击设置朝向"); relocPickToggle.checked = true; syncRelocPickCursorClass();
+      mapEditorResumeAfterPick = mapEditorActive;
+      if (mapEditorActive) setMapEditorActive(false);
+      relocPickAction = "waypoint";
+      resetRelocPickState("单击地图设置点位位置，再单击设置朝向");
+      relocPickToggle.checked = true;
+      syncRelocPickCursorClass();
+      waypointMessage.textContent = "请在地图上依次设置位置和朝向";
     });
   }
-  async function recordCurrentMapPoint() {
+  function recordCurrentMapPoint() {
     const name = String(waypointName.value || "").trim();
-    const x = Number(relocX.value), y = Number(relocY.value), yaw = Number(relocYaw.value || 0);
-    if (!name || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error("请填写名称并在地图选点或填写 X/Y");
+    const xText = String(waypointX.value || "").trim();
+    const yText = String(waypointY.value || "").trim();
+    const x = Number(xText), y = Number(yText), yaw = Number(waypointYaw.value || 0);
+    if (!name || !xText || !yText || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error("请填写名称并在地图选点或填写 X/Y");
+    pushMapEditorUndoSnapshot("points");
     mapPoints.push({ id: nextMapPointId(name), name, type: waypointType.value, x, y, yaw: Number.isFinite(yaw) ? yaw : 0 });
-    await saveMapPoints(); waypointName.value = ""; waypointMessage.textContent = "点位已保存";
+    markMapEditorDirty("points");
+    renderMapWaypointList();
+    renderScene();
+    waypointName.value = "";
+    waypointMessage.textContent = "点位已加入，点击保存地图修改后落盘";
   }
-  if (btnWaypointSave) btnWaypointSave.addEventListener("click", () => recordCurrentMapPoint().catch((err) => { waypointMessage.textContent = err.message || err; }));
+  if (btnWaypointSave) btnWaypointSave.addEventListener("click", () => {
+    try { recordCurrentMapPoint(); } catch (err) { waypointMessage.textContent = err.message || err; }
+  });
   if (mapWaypointList) mapWaypointList.addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-delete-map-point]"); if (!btn) return;
+    pushMapEditorUndoSnapshot("points");
     mapPoints = mapPoints.filter((point) => point.id !== btn.dataset.deleteMapPoint);
-    saveMapPoints().catch((err) => { waypointMessage.textContent = err.message || err; });
+    markMapEditorDirty("points");
+    renderMapWaypointList();
+    renderScene();
+    waypointMessage.textContent = "点位已移除，点击保存地图修改后落盘";
   });
   if (btnMapEditorToggle) btnMapEditorToggle.addEventListener("click", () => {
     if (!activePgm || isMappingFloor(activeFloor)) { mapEditorMessage.textContent = "请先选择已保存地图"; return; }
-    mapEditorActive = !mapEditorActive; mapEditorPainting = false;
-    mapWrapper.classList.toggle("map-edit-mode", mapEditorActive); btnMapEditorToggle.textContent = mapEditorActive ? "结束编辑" : "开始编辑"; btnMapEditorSave.disabled = !mapEditorActive;
-    mapEditorMessage.textContent = mapEditorActive ? "编辑已开启；Shift+拖拽仍可平移。" : (mapEditorDirty ? "有未保存修改" : "编辑已结束"); renderScene();
+    setMapEditorActive(!mapEditorActive);
+    mapEditorMessage.textContent = mapEditorActive ? "编辑已开启；Shift+拖拽仍可平移。" : (mapEditorDirty ? "编辑已暂停，有未保存修改" : "编辑已暂停");
   });
   if (btnMapEditorSave) btnMapEditorSave.addEventListener("click", async () => {
     btnMapEditorSave.disabled = true; mapEditorMessage.textContent = "保存中…";
     try { await saveActiveMapEditor(); mapEditorMessage.textContent = "地图修改已保存"; }
-    catch (err) { mapEditorMessage.textContent = `保存失败：${err.message || err}`; }
-    finally { btnMapEditorSave.disabled = !mapEditorActive; }
+    catch (err) { mapEditorMessage.textContent = "保存失败：" + (err.message || err); }
+    finally { syncMapEditorUi(); }
   });
 
   if (btnRelocFillPose) {
@@ -3343,6 +3649,10 @@ async function initMonitor() {
       } else {
         relocPickAction = "relocalize";
         resetRelocPickState("");
+        if (mapEditorResumeAfterPick) {
+          mapEditorResumeAfterPick = false;
+          setMapEditorActive(true);
+        }
       }
       saveMonitorCheckboxPrefs();
     });
@@ -4522,6 +4832,8 @@ function initGazeboPage() {
 
 async function bootstrap() {
   await resolveApiBaseUrl();
+  // Standalone tools consume only this connection setting, never monitor-page map state.
+  window.OPEN_DELIVERY_API_BASE_URL = API_BASE_URL;
   try {
     await fetchWebBootstrap();
   } catch (err) {
