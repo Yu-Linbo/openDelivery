@@ -80,6 +80,11 @@ const std::unordered_set<std::string> & task_status_set() {
   return k;
 }
 
+const std::unordered_set<std::string> & control_status_set() {
+  static const std::unordered_set<std::string> k{"auto", "joy", "manual"};
+  return k;
+}
+
 }  // namespace
 
 namespace heartbeat {
@@ -123,6 +128,7 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("current_position", "unknown;");
   declare_parameter<std::string>("robot_status", "initializing");
   declare_parameter<std::string>("task_status", "idle");
+  declare_parameter<std::string>("control_status", "AUTO");
   declare_parameter<bool>("mapping_mode", false);
   declare_parameter<bool>("auto_mapping_status", true);
   declare_parameter<std::string>("sim_mode", "sim");
@@ -197,6 +203,18 @@ std::string HeartbeatNode::normalize_task_status(const std::string & v) {
   return "idle";
 }
 
+std::string HeartbeatNode::normalize_control_status(const std::string & v) {
+  const std::string s = to_lower(strip_spaces(v));
+  if (!control_status_set().count(s)) {
+    return "AUTO";
+  }
+  std::string result = s;
+  std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  return result;
+}
+
 std::string HeartbeatNode::resolved_robot_status_value() {
   return normalize_robot_status(get_parameter("robot_status").as_string());
 }
@@ -247,6 +265,7 @@ void HeartbeatNode::tick() {
   msg.current_position = get_parameter("current_position").as_string();
   msg.robot_status = resolved_robot_status_value();
   msg.task_status = resolved_task_status_value();
+  msg.control_status = normalize_control_status(get_parameter("control_status").as_string());
   if (msg.task_status == "mapping") {
     msg.current_map = msg.robot_name + "_mapping";
   } else {
@@ -284,6 +303,10 @@ void HeartbeatNode::on_set_params(
     }
     if (!strip_spaces(request->task_status).empty()) {
       new_params.emplace_back("task_status", normalize_task_status(request->task_status));
+    }
+    if (!strip_spaces(request->control_status).empty()) {
+      new_params.emplace_back(
+        "control_status", normalize_control_status(request->control_status));
     }
     bool publish_rate_changed = false;
     if (request->rate_hz > 0.0) {

@@ -34,6 +34,11 @@ def generate_launch_description():
                 default_value="idle",
                 description="RobotStatus.task_status string: idle|mapping|delivery|cleaning|patrolling.",
             ),
+            DeclareLaunchArgument(
+                "control_status",
+                default_value="AUTO",
+                description="RobotStatus.control_status: AUTO|JOY|MANUAL.",
+            ),
             DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument(
                 "mapping_mode",
@@ -56,6 +61,7 @@ def generate_launch_description():
                                 "current_map": LaunchConfiguration("current_map"),
                                 "robot_status": LaunchConfiguration("robot_status"),
                                 "task_status": LaunchConfiguration("task_status"),
+                                "control_status": LaunchConfiguration("control_status"),
                                 "sim_mode": LaunchConfiguration("sim_mode"),
                                 "mapping_mode": LaunchConfiguration("mapping_mode"),
                                 "publish_rate": LaunchConfiguration("publish_rate"),

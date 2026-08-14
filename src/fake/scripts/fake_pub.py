@@ -334,6 +334,7 @@ class FakeRobotNode(Node):
         st.current_position = "unknown;"
         st.robot_status = RobotStatus.ROBOT_STATUS_READY
         st.task_status = RobotStatus.TASK_STATUS_IDLE
+        st.control_status = RobotStatus.CONTROL_STATUS_AUTO
         st.is_simulation = True
         self.robot_status_pub.publish(st)
 

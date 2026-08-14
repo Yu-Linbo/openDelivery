@@ -506,6 +506,7 @@ class OpenDeliveryTfBridgeNode(Node):
                 current_position = str(getattr(msg, "current_position", "") or "unknown;").strip()
                 robot_status = _robot_status_label(getattr(msg, "robot_status", 0))
                 task_status = _task_status_label(getattr(msg, "task_status", 0))
+                control_status = str(getattr(msg, "control_status", "AUTO") or "AUTO").upper()
                 is_simulation = bool(getattr(msg, "is_simulation", False))
                 raw_progress = float(getattr(msg, "task_progress", -1.0))
                 task_progress = raw_progress if 0.0 <= raw_progress <= 1.0 else -1.0
@@ -516,6 +517,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "current_position": current_position,
                     "robot_status": robot_status,
                     "task_status": task_status,
+                    "control_status": control_status,
                     "is_simulation": is_simulation,
                     "task_progress": task_progress,
                 }
@@ -528,6 +530,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     current_position=current_position,
                     robot_status=robot_status,
                     task_status=task_status,
+                    control_status=control_status,
                     is_simulation=is_simulation,
                     task_progress=task_progress,
                     topic=topic_name,
@@ -688,6 +691,7 @@ class OpenDeliveryTfBridgeNode(Node):
             if task_status is not None
             else _task_status_to_msg(payload.get("task_status"), "idle")
         )
+        st.control_status = str(payload.get("control_status") or "AUTO").upper()
         st.is_simulation = bool(payload.get("is_simulation", False))
         st.task_progress = float(payload.get("task_progress", -1.0))
         self._robot_status_cmd_pubs[rid].publish(st)

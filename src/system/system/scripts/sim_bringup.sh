@@ -192,6 +192,7 @@ ros2 launch system startup.launch.py \
   "robot_model:=${ROBOT_MODEL}" \
   "current_map:=${HB_CURRENT_MAP}" \
   "robot_status:=initializing" \
+  "control_status:=AUTO" \
   "sim_mode:=${SIM_MODE}" \
   "mapping_mode:=false" \
   "publish_rate:=2.0" \

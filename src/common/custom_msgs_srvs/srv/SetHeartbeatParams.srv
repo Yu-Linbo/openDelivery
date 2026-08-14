@@ -1,16 +1,18 @@
-# robot_name / robot_model / current_map / current_position / robot_status / task_status:
+# robot_name / robot_model / current_map / current_position / robot_status / task_status / control_status:
 # empty string = leave unchanged.
 # rate_hz <= 0 means leave publish_rate unchanged.
 # task_progress: -1.0 = leave unchanged; 0.0-1.0 sets the progress value.
 #
 # robot_status: initializing | localizing | localization_lost | ready | shutdown
 # task_status: idle | mapping | delivery | cleaning | patrolling
+# control_status: AUTO | JOY | MANUAL
 string robot_name
 string robot_model
 string current_map
 string current_position
 string robot_status
 string task_status
+string control_status
 float64 rate_hz
 float64 task_progress
 ---

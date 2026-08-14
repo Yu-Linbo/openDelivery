@@ -23,6 +23,13 @@ string TASK_STATUS_CLEANING=cleaning
 string TASK_STATUS_PATROLLING=patrolling
 string task_status
 
+# --- control_status: 底盘控制权（底盘状态机消费）---
+# AUTO: 导航速度；JOY: 遥控速度；MANUAL: 底盘解锁、人工推动（仿真中输出零速度）
+string CONTROL_STATUS_AUTO=AUTO
+string CONTROL_STATUS_JOY=JOY
+string CONTROL_STATUS_MANUAL=MANUAL
+string control_status
+
 # true: 来自仿真栈；false: 真机或未知（旧节点未填时桥接侧按 false 处理）
 bool is_simulation
 

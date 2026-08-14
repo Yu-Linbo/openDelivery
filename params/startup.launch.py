@@ -20,6 +20,7 @@ def generate_launch_description():
             DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument("mapping_mode", default_value="false"),
             DeclareLaunchArgument("publish_rate", default_value="2.0"),
+            DeclareLaunchArgument("control_status", default_value="AUTO"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
             DeclareLaunchArgument("max_bag_bytes", default_value="5242880"),
             DeclareLaunchArgument("enable_fake_pub", default_value="true"),
@@ -52,7 +53,16 @@ def generate_launch_description():
                     ("sim_mode", LaunchConfiguration("sim_mode")),
                     ("mapping_mode", LaunchConfiguration("mapping_mode")),
                     ("publish_rate", LaunchConfiguration("publish_rate")),
+                    ("control_status", LaunchConfiguration("control_status")),
                 ],
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [FindPackageShare("chassis_state_machine"), "launch", "chassis_state_machine.launch.py"]
+                    )
+                ),
+                launch_arguments=[("robot_name", LaunchConfiguration("robot_name"))],
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(

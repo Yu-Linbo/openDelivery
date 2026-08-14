@@ -37,7 +37,7 @@ def generate_launch_description():
     remappings = [
         ("/tf", "/tf"),
         ("/tf_static", "/tf_static"),
-        ("cmd_vel", ["/", robot_name, "/cmd_vel"]),
+        ("cmd_vel", ["/", robot_name, "/navagtion/cmd_vel"]),
         ("navigate_to_pose", ["/", robot_name, "/navigate_to_pose"]),
         ("navigate_through_poses", ["/", robot_name, "/navigate_through_poses"]),
         ("follow_waypoints", ["/", robot_name, "/follow_waypoints"]),
