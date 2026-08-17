@@ -126,12 +126,12 @@
   function pixel(event){const rect=canvas.getBoundingClientRect();return{x:(event.clientX-rect.left-s.panX)/s.scale,y:(event.clientY-rect.top-s.panY)/s.scale};}
   function toWorld(p){return{x:s.meta.origin[0]+p.x*s.meta.resolution,y:s.meta.origin[1]+(s.pgm.height-p.y)*s.meta.resolution};}
   function toPixel(point){return{x:(Number(point.x)-s.meta.origin[0])/s.meta.resolution,y:s.pgm.height-(Number(point.y)-s.meta.origin[1])/s.meta.resolution};}
-  function pointTypeLabel(type){return type==="elevator"?"电梯点":type==="standby"?"待机点":"自定义点位";}
+  function pointTypeLabel(type){return type==="elevator"?"电梯点":type==="standby"?"待机点":type==="relocalization"?"重定位点":"自定义点位";}
   function selectPoint(point){s.selectedPointId=point?.id||"";pointList();render();}
   function drawPoint(point) {
     const p=toPixel(point),unit=1/s.scale;
-    const pointColor=point.type==="elevator"?"#a78bfa":point.type==="standby"?"#22c55e":"#fb923c";
-    const radius=(point.type==="custom"?5:7)*unit,selected=point.id===s.selectedPointId;
+    const pointColor=point.type==="elevator"?"#a78bfa":point.type==="standby"?"#22c55e":point.type==="relocalization"?"#38bdf8":"#fb923c";
+    const radius=(point.type==="custom"||point.type==="relocalization"?5:7)*unit,selected=point.id===s.selectedPointId;
     ctx.save();ctx.translate(p.x,p.y);
     if(selected){ctx.strokeStyle="#facc15";ctx.lineWidth=3*unit;ctx.beginPath();ctx.arc(0,0,radius+4*unit,0,Math.PI*2);ctx.stroke();}
     ctx.fillStyle=pointColor;ctx.strokeStyle="#0f172a";ctx.lineWidth=2*unit;ctx.beginPath();ctx.arc(0,0,radius,0,Math.PI*2);ctx.fill();ctx.stroke();

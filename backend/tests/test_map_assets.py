@@ -75,6 +75,17 @@ class MapAssetsTest(unittest.TestCase):
                 [{"id": "bad", "name": "bad", "type": "custom", "x": float("nan"), "y": 0}],
             )
 
+    def test_add_relocalization_point_is_persisted_and_unique(self):
+        point = map_assets.add_relocalization_point(
+            self.map_dir, self.floor, "relocalization_1", "重定位点 1", 1.2, -0.4, 0.5
+        )
+        self.assertEqual(point["type"], "relocalization")
+        self.assertEqual(map_assets.load_points(self.map_dir, self.floor), [point])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            map_assets.add_relocalization_point(
+                self.map_dir, self.floor, "relocalization_1", "重复", 0, 0, 0
+            )
+
     def test_semantic_round_trip(self):
         result = map_assets.save_semantic(self.map_dir, self.floor, self._png_url())
         self.assertEqual((result["width"], result["height"]), (2, 2))

@@ -20,6 +20,7 @@
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_amcl</exec_depend>
   <exec_depend>slam_gmapping</exec_depend>
+  <exec_depend>relocalization</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

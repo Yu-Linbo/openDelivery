@@ -220,6 +220,7 @@
                   <button id="btn-reloc-fill-pose" type="button" class="btn-secondary">填入位姿</button>
                 </div>
                 <div class="reloc-actions reloc-actions-stack">
+                  <button id="btn-reloc-record" type="button" class="btn-secondary">记录重定位点</button>
                   <button id="btn-reloc-map-only" type="button">仅切图</button>
                   <button id="btn-reloc-pose-only" type="button">仅重定位</button>
                   <button id="btn-reloc-both" type="button">切图并重定位</button>
@@ -315,7 +316,7 @@
                     <span class="map-editor-section__title">点位设置</span>
                     <div class="map-editor-control-grid">
                       <label class="reloc-field">名称<input data-map-editor="point-name" type="text" maxlength="80" placeholder="如 A座电梯" /></label>
-                      <label class="reloc-field">类型<select data-map-editor="point-type"><option value="elevator">电梯点</option><option value="standby">待机点</option><option value="custom">自定义点位</option></select></label>
+                      <label class="reloc-field">类型<select data-map-editor="point-type"><option value="elevator">电梯点</option><option value="standby">待机点</option><option value="custom">自定义点位</option><option value="relocalization">重定位点</option></select></label>
                     </div>
                     <button type="button" data-map-editor="pick-point">点击取点</button>
                     <span class="map-editor-point-hint">取点时先点击位置，再点击方向；按住已有点位可直接拖动。</span>
@@ -550,6 +551,6 @@
     </div>
 
     <script src="./map_editor.js?v=20260816-point-id-fix"></script>
-    <script src="./app.js?v=20260814-robot-id-model"></script>
+    <script src="./app.js?v=20260817-relocalization-point"></script>
   </body>
 </html>

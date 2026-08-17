@@ -30,6 +30,7 @@
 |------|------|----------|
 | **slam_gmapping** | `slam/slam_gmapping/slam_gmapping/` | GMapping ROS 2 节点；建图时发布 OccupancyGrid 和 `map→odom`。 |
 | **openslam_gmapping** | `slam/slam_gmapping/openslam_gmapping/` | OpenSLAM GMapping 算法库。 |
+| **relocalization** | `slam/relocalization/` | 按当前地图保存准确位姿与单帧雷达，通过地图匹配和历史 scan 相关匹配生成 AMCL 重定位初始位姿。 |
 
 SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_params.yaml`。
 

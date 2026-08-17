@@ -206,6 +206,18 @@ def generate_launch_description():
                         name="task_manager",
                         output="screen",
                     ),
+                    Node(
+                        package="relocalization",
+                        executable="relocalization_node",
+                        name="relocalization",
+                        output="screen",
+                        parameters=[
+                            {
+                                "map_root": LaunchConfiguration("semantic_map_root"),
+                                "map_frame": "map",
+                            }
+                        ],
+                    ),
                     OpaqueFunction(function=_launch_setup),
                 ]
             ),

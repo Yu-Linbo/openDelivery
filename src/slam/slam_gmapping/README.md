@@ -25,3 +25,9 @@
 | 输出 | Topic | /robot2/slam/particle_cloud、/robot2/slam/particlecloud | geometry_msgs/msg/PoseArray | 粒子滤波可视化 |
 | 输出 | TF | /tf | map -> robot2/odom | 定位校正 |
 | 控制 | Service | lifecycle、参数 service | - | configure、activate 等由 /robot2/slam/lifecycle_manager 统一管理 |
+
+## 辅助重定位
+
+`slam/relocalization` 提供 `/robot2/record_relocalization` 和 `/robot2/relocalize` 服务，
+并将匹配成功的修正位姿发布到 `/robot2/initial`。记录按 `RobotStatus.current_map`
+隔离保存；模式 1 优先修正传入点位，评分不足时自动回退到遍历历史 scan 的模式 0。

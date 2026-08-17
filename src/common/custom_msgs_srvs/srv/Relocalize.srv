@@ -1,0 +1,14 @@
+uint8 MODE_HISTORY=0
+uint8 MODE_POSE_FIRST=1
+
+# MODE_HISTORY ignores pose and searches all saved scan records on the current map.
+# MODE_POSE_FIRST searches around pose first, then falls back to MODE_HISTORY.
+uint8 mode
+geometry_msgs/PoseWithCovarianceStamped pose
+---
+bool success
+string message
+float64 score
+bool used_fallback
+string matched_record_id
+geometry_msgs/PoseWithCovarianceStamped corrected_pose

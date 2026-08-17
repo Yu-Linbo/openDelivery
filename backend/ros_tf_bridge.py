@@ -76,6 +76,11 @@ except Exception:  # noqa: BLE001
     LocalizeNavCommand = None
     RobotStatus = None
 
+try:
+    from custom_msgs_srvs.srv import RecordRelocalization
+except Exception:  # noqa: BLE001
+    RecordRelocalization = None
+
 _ROBOT_STATUS_LABELS = (
     "initializing",
     "localizing",
@@ -223,6 +228,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._initial_pubs: Dict[str, Any] = {}
         self._robot_status_cmd_pubs: Dict[str, Any] = {}
         self._localize_nav_pubs: Dict[str, Any] = {}
+        self._record_relocalization_clients: Dict[str, Any] = {}
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
         # When enabled, web-side identity is derived from discovered robot_status topics.
@@ -652,10 +658,60 @@ class OpenDeliveryTfBridgeNode(Node):
 
     def _process_commands(self) -> None:
         for cmd in ros_command_queue.drain_commands():
+            response_id = str(cmd.get("_response_id") or "")
             try:
-                self._handle_web_command(cmd)
+                asynchronous = self._handle_web_command(cmd)
+                if response_id and not asynchronous:
+                    ros_command_queue.complete_command(response_id, result={"ok": True})
             except Exception as ex:  # noqa: BLE001
                 self.get_logger().error(f"web command failed: {ex}")
+                if response_id:
+                    ros_command_queue.complete_command(response_id, error=str(ex))
+
+    def _record_relocalization(self, cmd: Dict[str, Any]) -> bool:
+        if RecordRelocalization is None:
+            raise RuntimeError("RecordRelocalization type unavailable; rebuild custom_msgs_srvs")
+        rid = str(cmd.get("robot_id") or "").strip()
+        record_id = str(cmd.get("record_id") or "").strip()
+        response_id = str(cmd.get("_response_id") or "")
+        if not rid or not record_id or not response_id:
+            raise ValueError("robot_id, record_id and response id are required")
+        client = self._record_relocalization_clients.get(rid)
+        if client is None:
+            client = self.create_client(
+                RecordRelocalization, f"/{rid}/record_relocalization")
+            self._record_relocalization_clients[rid] = client
+        if not client.wait_for_service(timeout_sec=0.2):
+            raise RuntimeError(f"relocalization record service unavailable for {rid}")
+        request = RecordRelocalization.Request()
+        request.record_id = record_id
+        future = client.call_async(request)
+
+        def done(completed):
+            try:
+                response = completed.result()
+                if response is None or not response.success:
+                    detail = response.message if response is not None else "empty service response"
+                    ros_command_queue.complete_command(response_id, error=detail)
+                    return
+                pose = response.pose
+                ros_command_queue.complete_command(response_id, result={
+                    "ok": True,
+                    "map_name": str(response.map_name),
+                    "storage_path": str(response.storage_path),
+                    "pose": {
+                        "x": float(pose.position.x),
+                        "y": float(pose.position.y),
+                        "yaw": _yaw_from_quat(
+                            float(pose.orientation.x), float(pose.orientation.y),
+                            float(pose.orientation.z), float(pose.orientation.w)),
+                    },
+                })
+            except Exception as ex:  # noqa: BLE001
+                ros_command_queue.complete_command(response_id, error=str(ex))
+
+        future.add_done_callback(done)
+        return True
 
     def _publish_robot_status_current_map(
         self,
@@ -759,11 +815,13 @@ class OpenDeliveryTfBridgeNode(Node):
             f"publish localize_nav_command {rid} map={map_name!r} set_initial_pose={set_pose}"
         )
 
-    def _handle_web_command(self, cmd: Dict[str, Any]) -> None:
+    def _handle_web_command(self, cmd: Dict[str, Any]) -> bool:
         ctype = str(cmd.get("type") or "").strip()
+        if ctype == "record_relocalization":
+            return self._record_relocalization(cmd)
         if ctype == "localize_nav_command":
             self._handle_localize_nav_command(cmd)
-            return
+            return False
 
         mode = str(cmd.get("mode") or "").strip()
         if mode not in ("map_only", "pose_only", "both"):
@@ -788,6 +846,7 @@ class OpenDeliveryTfBridgeNode(Node):
                 float(cmd.get("yaw") or 0.0),
                 float(cmd.get("z") or 0.0),
             )
+        return False
 
     def _make_mapping_grid_cb(self, robot_id: str):
         def _cb(msg: OccupancyGrid) -> None:

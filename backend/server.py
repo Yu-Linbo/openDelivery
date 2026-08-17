@@ -12,6 +12,7 @@ import threading
 import time
 import signal
 import zipfile
+import uuid
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1750,6 +1751,63 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/robot/relocalization/record":
+            data = self._read_json_body()
+            if data is None:
+                return
+            robot_id = str(data.get("robot_id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", robot_id):
+                self._send_json({"error": "invalid robot_id"}, 400)
+                return
+            record_id = str(data.get("record_id") or "").strip()
+            if not record_id:
+                record_id = f"relocalization_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", record_id):
+                self._send_json({"error": "invalid record_id"}, 400)
+                return
+            name = str(data.get("name") or "").strip()
+            if not name:
+                name = time.strftime("重定位点 %Y-%m-%d %H:%M:%S")
+            if len(name) > 80:
+                self._send_json({"error": "name must be at most 80 chars"}, 400)
+                return
+            try:
+                import ros_command_queue as rcq
+                result = rcq.enqueue_command_and_wait(
+                    {
+                        "type": "record_relocalization",
+                        "robot_id": robot_id,
+                        "record_id": record_id,
+                    },
+                    timeout=10.0,
+                )
+                map_name = str(result.get("map_name") or "").strip()
+                pose = result.get("pose") or {}
+                point = map_assets.add_relocalization_point(
+                    MAP_DIR, map_name, record_id, name,
+                    float(pose["x"]), float(pose["y"]), float(pose.get("yaw", 0.0)),
+                )
+            except (ValueError, KeyError, TypeError) as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except (RuntimeError, TimeoutError, queue.Full) as err:
+                self._send_json({"error": str(err)}, 503)
+                return
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json({
+                "ok": True,
+                "robot_id": robot_id,
+                "map_name": map_name,
+                "record_id": record_id,
+                "storage_path": result.get("storage_path"),
+                "point": point,
+            })
+            return
         m_assets = re.match(r"^/api/maps/([^/]+)/assets/(points|raster|semantic)$", path)
         if m_assets:
             floor = unquote(m_assets.group(1)).strip()

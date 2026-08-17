@@ -134,6 +134,7 @@ const relocMessage = document.getElementById("reloc-message");
 const btnRelocMapOnly = document.getElementById("btn-reloc-map-only");
 const btnRelocPoseOnly = document.getElementById("btn-reloc-pose-only");
 const btnRelocBoth = document.getElementById("btn-reloc-both");
+const btnRelocRecord = document.getElementById("btn-reloc-record");
 const btnRelocFillPose = document.getElementById("btn-reloc-fill-pose");
 const relocPickToggle = document.getElementById("reloc-pick-toggle");
 const btnRelocPickGoal = document.getElementById("btn-reloc-pick-goal");
@@ -870,7 +871,7 @@ function renderSemanticLabelOptions() {
 }
 
 function pointTypeLabel(type) {
-  return type === "elevator" ? "电梯点" : type === "standby" ? "待机点" : "自定义点位";
+  return type === "elevator" ? "电梯点" : type === "standby" ? "待机点" : type === "relocalization" ? "重定位点" : "自定义点位";
 }
 
 function visibleMapPoints() {
@@ -943,12 +944,12 @@ function drawMapPointsOverlay() {
     const pix = worldToMapPixels(point);
     if (!pix) return;
     const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
-    const color = point.type === "elevator" ? "#a78bfa" : point.type === "standby" ? "#22c55e" : "#fb923c";
+    const color = point.type === "elevator" ? "#a78bfa" : point.type === "standby" ? "#22c55e" : point.type === "relocalization" ? "#38bdf8" : "#fb923c";
     ctx.save();
     ctx.fillStyle = color;
     ctx.strokeStyle = "#0f172a";
     ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(sx, sy, point.type === "custom" ? 5 : 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(sx, sy, point.type === "custom" || point.type === "relocalization" ? 5 : 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     const label = String(point.name || point.id);
     const labelX = sx + 9;
     const labelBaseline = sy - 7;
@@ -3757,6 +3758,41 @@ async function initMonitor() {
     } catch (err) {
       relocMessage.textContent = err.message || String(err);
     }
+  }
+
+  async function recordRelocalizationPoint() {
+    if (!relocMessage) return;
+    const rid = relocRobotId && relocRobotId.value ? relocRobotId.value.trim() : "";
+    if (!rid) {
+      relocMessage.textContent = "请先选择在线机器人";
+      return;
+    }
+    btnRelocRecord.disabled = true;
+    relocMessage.textContent = "正在记录当前位姿和激光帧…";
+    try {
+      const out = await fetchJson(`${API_BASE_URL}/api/robot/relocalization/record`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ robot_id: rid }),
+      });
+      const point = out && out.point;
+      if (point && out.map_name === activeFloor) {
+        mapPoints = mapPoints.filter((row) => row.id !== point.id).concat([point]);
+        savedMapPoints = savedMapPoints.filter((row) => row.id !== point.id).concat([point]);
+        renderMapWaypointList();
+        renderScene();
+      }
+      relocMessage.textContent = `已记录重定位点 ${point && (point.name || point.id) ? point.name || point.id : ""}`.trim();
+      appendLog(`记录重定位点 → ${rid} / ${out.map_name || "当前地图"}`);
+    } catch (err) {
+      relocMessage.textContent = `记录失败：${err.message || String(err)}`;
+    } finally {
+      btnRelocRecord.disabled = false;
+    }
+  }
+
+  if (btnRelocRecord) {
+    btnRelocRecord.addEventListener("click", recordRelocalizationPoint);
   }
 
   if (btnRelocMapOnly) {

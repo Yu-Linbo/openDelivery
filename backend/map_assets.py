@@ -6,6 +6,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -15,7 +16,8 @@ from PIL import Image
 
 _MAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _POINT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_POINT_TYPES = {"elevator", "standby", "custom"}
+_POINT_TYPES = {"elevator", "standby", "custom", "relocalization"}
+_POINTS_LOCK = threading.RLock()
 
 
 def _floor_dir(map_dir: Path, floor: str) -> Path:
@@ -75,7 +77,7 @@ def _normalize_point(raw: Dict[str, Any], used: set) -> Dict[str, Any]:
         raise ValueError("point id must be unique and use [A-Za-z0-9_-]")
     point_type = str(raw.get("type") or "custom").strip().lower()
     if point_type not in _POINT_TYPES:
-        raise ValueError("point type must be elevator, standby, or custom")
+        raise ValueError("point type must be elevator, standby, custom, or relocalization")
     name = str(raw.get("name") or point_id).strip()
     if not name or len(name) > 80:
         raise ValueError("point name must be 1-80 chars")
@@ -92,30 +94,48 @@ def _normalize_point(raw: Dict[str, Any], used: set) -> Dict[str, Any]:
 
 
 def load_points(map_dir: Path, floor: str) -> List[Dict[str, Any]]:
-    folder = _floor_dir(map_dir, floor)
-    path = _points_path(folder, floor)
-    if not path.is_file():
-        return []
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    rows = raw.get("points", []) if isinstance(raw, dict) else raw
-    if not isinstance(rows, list):
-        raise ValueError("points file must contain a points array")
-    used = set()
-    return [_normalize_point(item, used) for item in rows]
+    with _POINTS_LOCK:
+        folder = _floor_dir(map_dir, floor)
+        path = _points_path(folder, floor)
+        if not path.is_file():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        rows = raw.get("points", []) if isinstance(raw, dict) else raw
+        if not isinstance(rows, list):
+            raise ValueError("points file must contain a points array")
+        used = set()
+        return [_normalize_point(item, used) for item in rows]
 
 
 def save_points(map_dir: Path, floor: str, points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    folder = _floor_dir(map_dir, floor)
-    if not isinstance(points, list) or len(points) > 1000:
-        raise ValueError("points must be an array with at most 1000 items")
-    used = set()
-    clean = [_normalize_point(item, used) for item in points]
-    payload = {"version": 1, "map": floor, "points": clean}
-    _atomic_write(
-        _points_path(folder, floor),
-        (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-    )
-    return clean
+    with _POINTS_LOCK:
+        folder = _floor_dir(map_dir, floor)
+        if not isinstance(points, list) or len(points) > 1000:
+            raise ValueError("points must be an array with at most 1000 items")
+        used = set()
+        clean = [_normalize_point(item, used) for item in points]
+        payload = {"version": 1, "map": floor, "points": clean}
+        _atomic_write(
+            _points_path(folder, floor),
+            (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        )
+        return clean
+
+
+def add_relocalization_point(
+    map_dir: Path, floor: str, point_id: str, name: str, x: float, y: float, yaw: float
+) -> Dict[str, Any]:
+    """Atomically append the point paired with a successful .rloc record."""
+    with _POINTS_LOCK:
+        rows = load_points(map_dir, floor)
+        if any(row["id"] == point_id for row in rows):
+            raise ValueError(f"point id must be unique: {point_id}")
+        point = _normalize_point(
+            {"id": point_id, "name": name, "type": "relocalization", "x": x, "y": y, "yaw": yaw},
+            {row["id"] for row in rows},
+        )
+        save_points(map_dir, floor, rows + [point])
+        return point
 
 
 def load_assets(map_dir: Path, floor: str) -> Dict[str, Any]:

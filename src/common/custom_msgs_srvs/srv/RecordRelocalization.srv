@@ -1,0 +1,8 @@
+# Human-selected stable identifier for this accurate pose/scan pair.
+string record_id
+---
+bool success
+string message
+string map_name
+geometry_msgs/Pose pose
+string storage_path
