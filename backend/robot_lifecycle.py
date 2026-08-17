@@ -17,6 +17,7 @@ Per-robot stack orchestration for the web console.
 import json
 import os
 import re
+import signal
 import shlex
 import subprocess
 import tempfile
@@ -175,7 +176,9 @@ class RobotLifecycleOrchestrator:
                 "simulation_world", world_cmd,
                     stop_cmd=(
                         "pkill -f 'ros2 launch simulate simulate.launch.py.*"
-                        "robot_name:=simulation_world' || true"
+                        "robot_name:=simulation_world' || true; "
+                        "pkill -f 'gzserver .*openDelivery/install/simulate/share/simulate/worlds/"
+                        "drawn_model.world' || true"
                     ),
                     match="robot_name:=simulation_world",
                 note="shared Gazebo world; independent from every robot stack",
@@ -183,6 +186,75 @@ class RobotLifecycleOrchestrator:
                 force=not world_running,
             )
             self._wait_for_gazebo()
+
+    def _restart_simulation_world(self) -> None:
+        """Recover a Gazebo server whose advertised services no longer answer."""
+        with self._infrastructure_lock:
+            try:
+                self._ros_node_manager.control("simulation_world", "pause")
+            except Exception:
+                pass
+            self._terminate_stale_world_processes()
+            time.sleep(1.0)
+            world_cmd = (
+                "ros2 launch simulate simulate.launch.py "
+                "robot_name:=simulation_world namespace:=simulation_world "
+                "start_gazebo:=true spawn_robot:=false use_sim_time:=true"
+            )
+            self._start_if_needed(
+                "simulation_world",
+                world_cmd,
+                stop_cmd=(
+                    "pkill -f 'ros2 launch simulate simulate.launch.py.*"
+                    "robot_name:=simulation_world' || true; "
+                    "pkill -f 'gzserver .*openDelivery/install/simulate/share/simulate/worlds/"
+                    "drawn_model.world' || true"
+                ),
+                match="robot_name:=simulation_world",
+                note="shared Gazebo world; automatic recovery after transport failure",
+                autostart=True,
+                force=True,
+            )
+            self._wait_for_gazebo()
+
+    def _terminate_stale_world_processes(self) -> None:
+        """Terminate only this project's orphaned shared-world launch/gzserver processes."""
+        world_path = str(
+            self._root_dir
+            / "install"
+            / "simulate"
+            / "share"
+            / "simulate"
+            / "worlds"
+            / "drawn_model.world"
+        )
+        targets = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                args = entry.joinpath("cmdline").read_bytes().split(b"\0")
+                argv = [part.decode(errors="replace") for part in args if part]
+            except (OSError, ProcessLookupError):
+                continue
+            if not argv:
+                continue
+            is_world_server = Path(argv[0]).name == "gzserver" and world_path in argv
+            joined = " ".join(argv)
+            is_world_launch = (
+                "ros2 launch simulate simulate.launch.py" in joined
+                and "robot_name:=simulation_world" in joined
+            )
+            if is_world_server or is_world_launch:
+                targets.append(int(entry.name))
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in targets:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    continue
+            if sig == signal.SIGTERM:
+                time.sleep(1.0)
 
     def _simulation_entity_present(self, robot_id: str) -> Optional[bool]:
         """Return entity presence from the fresh Web bridge cache, or None if unknown."""
@@ -193,7 +265,7 @@ class RobotLifecycleOrchestrator:
             snapshot = get_gazebo_models() or {}
             cached_at = float(snapshot.get("_cached_at") or snapshot.get("stamp") or 0.0)
             if not snapshot.get("available") or time.time() - cached_at > 3.0:
-                return None
+                return self._native_simulation_entity_present(rid)
             names = {
                 str(item.get("name") or "").strip()
                 for item in snapshot.get("models") or []
@@ -201,20 +273,74 @@ class RobotLifecycleOrchestrator:
             }
             return rid in names
         except Exception:
+            return self._native_simulation_entity_present(rid)
+
+    def _native_simulation_entity_present(self, robot_id: str) -> Optional[bool]:
+        """Query Gazebo transport directly when the Web model cache is unavailable."""
+        rid = self._ensure_robot(robot_id)
+        try:
+            proc = subprocess.run(
+                ["gz", "model", "-m", rid, "-i"],
+                cwd=str(self._root_dir),
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                env=os.environ.copy(),
+            )
+        except (OSError, subprocess.SubprocessError):
             return None
+        text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+        if proc.returncode == 0:
+            return True
+        if "does not exist" in text or "unable to find" in text or "not found" in text:
+            return False
+        return None
 
     def _delete_simulation_entity(self, robot_id: str) -> bool:
         rid = self._ensure_robot(robot_id)
         request = shlex.quote(f"{{name: {rid}}}")
+        service_deleted = False
         try:
             proc = self._run_shell(
                 f"ros2 service call /delete_entity gazebo_msgs/srv/DeleteEntity {request}",
                 timeout=15.0,
             )
+            text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            service_deleted = proc.returncode == 0 and (
+                "success: True" in text or "success=true" in text
+            )
         except Exception:
-            return False
-        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        return proc.returncode == 0 and ("success: True" in text or "success=true" in text)
+            pass
+        # A successful ROS response can still race with Gazebo's actual removal.
+        # Verify through native transport and use native deletion as fallback.
+        for _ in range(10 if service_deleted else 1):
+            present = self._native_simulation_entity_present(rid)
+            if present is False:
+                return True
+            if present is None:
+                break
+            time.sleep(0.1)
+        try:
+            native = subprocess.run(
+                ["gz", "model", "-m", rid, "-d"],
+                cwd=str(self._root_dir),
+                capture_output=True,
+                text=True,
+                timeout=8.0,
+                env=os.environ.copy(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return service_deleted
+        if native.returncode != 0:
+            return service_deleted
+        for _ in range(20):
+            present = self._native_simulation_entity_present(rid)
+            if present is False:
+                return True
+            if present is None:
+                return True
+            time.sleep(0.1)
+        return False
 
     def _stack_lifecycle_transition(self, robot_id: str, node_name: str, transition: str):
         rid = str(robot_id or "").strip()
@@ -585,14 +711,14 @@ class RobotLifecycleOrchestrator:
                     existing = self._simulation_entity_present(rid)
                     deleted = self._delete_simulation_entity(rid)
                     if existing is True and not deleted:
-                        raise RuntimeError(f"failed to delete stale Gazebo entity: {rid}")
+                        self._restart_simulation_world()
                 time.sleep(0.8)
             elif not sim_running:
                 # Remove a stale entity left by an interrupted backend/robot stack.
                 existing = self._simulation_entity_present(rid)
                 deleted = self._delete_simulation_entity(rid)
                 if existing is True and not deleted:
-                    raise RuntimeError(f"failed to delete stale Gazebo entity: {rid}")
+                    self._restart_simulation_world()
             spec = self._robot_process_spec(rid, sim_mode, spawn_pose, slot)
             self._start_if_needed(
                 rid, spec["cmd"], stop_cmd=spec["stop_cmd"],

@@ -120,9 +120,51 @@ class FakeElevator(Node):
         with self._lock:
             current_map = copy.deepcopy(self._map_pose)
             current_world = copy.deepcopy(self._world_pose)
-        if current_map is None or current_world is None:
+        if current_map is None:
+            self._pose_conversion_error = "AMCL map pose unavailable"
             return None
+        if current_world is None:
+            current_world = self._native_world_pose()
+        if current_world is None:
+            self._pose_conversion_error = "Gazebo world pose unavailable"
+            return None
+        self._pose_conversion_error = ""
         return self._map_pose_to_world(target, current_map, current_world)
+
+    def _native_world_pose(self):
+        """Read the model pose through Gazebo transport if model_states is undiscovered."""
+        try:
+            result = subprocess.run(
+                ["gz", "model", "-m", self._robot, "-p"],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            values = [float(value) for value in result.stdout.strip().split()[-6:]]
+        except (TypeError, ValueError):
+            return None
+        if len(values) != 6:
+            return None
+        x, y, z, roll, pitch, yaw = values
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.position.z = z
+        # The robot is planar, but retain a valid quaternion if Gazebo reports tilt.
+        cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+        cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+        cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+        pose.orientation.x = sr * cp * cy - cr * sp * sy
+        pose.orientation.y = cr * sp * cy + sr * cp * sy
+        pose.orientation.z = cr * cp * sy - sr * sp * cy
+        pose.orientation.w = cr * cp * cy + sr * sp * sy
+        return pose
 
     def _on_info(self, msg):
         operation = str(msg.operation).strip().lower()
@@ -230,7 +272,7 @@ class FakeElevator(Node):
             self._finish(
                 generation,
                 ElevatorStatus.STATUS_FAILED,
-                "map/Gazebo pose unavailable for map-to-world conversion",
+                f"map-to-world conversion failed: {self._pose_conversion_error}",
             )
             return
         required_services = (
@@ -343,7 +385,12 @@ class FakeElevator(Node):
         except Exception as exc:  # noqa: BLE001
             self._rollback_floor(generation, f"load_map exception: {exc}")
             return
-        self._begin_relocalize(generation, 1)
+        # LoadMap response can arrive before RobotStatus/current_map and the new
+        # OccupancyGrid callbacks reach the relocalization node.  Defer the first
+        # request so it cannot accidentally match against the previous floor.
+        self._schedule_relocalize_retry(
+            generation, 1, "waiting for target map propagation"
+        )
 
     def _map_status_updated(self, future, generation, yaml_path):
         if not self._active(generation):

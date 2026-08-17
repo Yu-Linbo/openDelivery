@@ -160,6 +160,32 @@ def test_map_target_is_transformed_into_gazebo_world_coordinates():
     assert FakeElevator._yaw(result) == pytest.approx(MODULE.math.pi / 2.0)
 
 
+def test_native_gazebo_pose_is_used_when_model_states_is_undiscovered(monkeypatch):
+    node = bare_elevator()
+    node._robot = "robot4"
+    node._map_pose = MODULE.Pose()
+    node._map_pose.position.x = 2.0
+    node._map_pose.position.y = 3.0
+    node._map_pose.orientation.w = 1.0
+    node._world_pose = None
+    target = MODULE.Pose()
+    target.position.x = 3.0
+    target.position.y = 5.0
+    target.orientation.w = 1.0
+    monkeypatch.setattr(
+        MODULE.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="-10 8 0.05 0 0 1.5707963267948966", stderr=""
+        ),
+    )
+
+    result = node._target_world_pose(target)
+
+    assert result.position.x == pytest.approx(-12.0)
+    assert result.position.y == pytest.approx(9.0)
+
+
 def test_successful_model_move_continues_with_map_switch():
     node = bare_elevator()
     calls = []
@@ -258,3 +284,16 @@ def test_load_map_failure_rolls_heartbeat_floor_back():
     node._map_loaded(future, generation=7)
 
     assert calls == [(7, "load_map failed: 1")]
+
+
+def test_successful_load_map_defers_relocalization_for_map_propagation():
+    node = bare_elevator()
+    calls = []
+    node._schedule_relocalize_retry = lambda generation, attempt, detail: calls.append(
+        (generation, attempt, detail)
+    )
+    response = SimpleNamespace(result=MODULE.LoadMap.Response.RESULT_SUCCESS)
+
+    node._map_loaded(SimpleNamespace(result=lambda: response), generation=7)
+
+    assert calls == [(7, 1, "waiting for target map propagation")]

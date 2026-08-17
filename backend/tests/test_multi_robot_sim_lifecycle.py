@@ -79,6 +79,37 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "robot_id invalid"):
             orchestrator._ensure_robot("robot2; shutdown -h now")
 
+    def test_entity_delete_falls_back_to_gazebo_native_transport(self):
+        orchestrator = self._orchestrator()
+        responses = [
+            subprocess.CompletedProcess(["gz"], 0, stdout="model info", stderr=""),
+            subprocess.CompletedProcess(["gz"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(
+                ["gz"], 1, stdout="", stderr="Unable to find model robot2"
+            ),
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_run_shell", side_effect=RuntimeError("dds"))
+            )
+            run = stack.enter_context(
+                mock.patch.object(robot_lifecycle.subprocess, "run", side_effect=responses)
+            )
+            stack.enter_context(mock.patch.object(robot_lifecycle.time, "sleep"))
+
+            self.assertTrue(orchestrator._delete_simulation_entity("robot2"))
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(["gz", "model", "-m", "robot2", "-d"], commands)
+
+    def test_native_entity_query_reports_absent_model(self):
+        orchestrator = self._orchestrator()
+        completed = subprocess.CompletedProcess(
+            ["gz"], 1, stdout="", stderr="Unable to find model robot2"
+        )
+        with mock.patch.object(robot_lifecycle.subprocess, "run", return_value=completed):
+            self.assertFalse(orchestrator._native_simulation_entity_present("robot2"))
+
     def test_shared_world_is_started_once_for_concurrent_requests(self):
         orchestrator = self._orchestrator()
         state_lock = threading.Lock()
@@ -151,6 +182,25 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         self.assertIn(("robot2", "pause"), manager.controls)
         self.assertNotIn(("simulation_world", "pause"), manager.controls)
         self.assertTrue(start_robot.call_args.kwargs["force"])
+
+    def test_startup_recovers_unresponsive_world_when_stale_entity_cannot_delete(self):
+        orchestrator = self._orchestrator()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_simulation_entity_present", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_sim_managed_running", return_value=False))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_robot_specs"))
+            stack.enter_context(mock.patch.object(orchestrator, "_delete_simulation_entity", return_value=False))
+            recover = stack.enter_context(mock.patch.object(orchestrator, "_restart_simulation_world"))
+            start_robot = stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed"))
+            stack.enter_context(mock.patch.object(orchestrator, "status", return_value={"robots": []}))
+            stack.enter_context(mock.patch.object(robot_lifecycle.time, "sleep"))
+
+            orchestrator.startup_selected_robot("robot2", is_online=lambda _rid: False)
+
+        recover.assert_called_once_with()
+        start_robot.assert_called_once()
 
     def test_shutdown_never_stops_shared_world(self):
         manager = FakeRosNodeManager()

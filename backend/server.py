@@ -258,7 +258,9 @@ class RosNodeManager:
                 ),
                 "stop_cmd": (
                     "pkill -f 'ros2 launch simulate simulate.launch.py.*"
-                    "robot_name:=simulation_world' || true"
+                    "robot_name:=simulation_world' || true; "
+                    "pkill -f 'gzserver .*openDelivery/install/simulate/share/simulate/worlds/"
+                    "drawn_model.world' || true"
                 ),
                 "match": "robot_name:=simulation_world",
                 "match_regex": False,
