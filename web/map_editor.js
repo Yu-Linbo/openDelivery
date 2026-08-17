@@ -166,7 +166,12 @@
     ui.metadata.innerHTML=[["尺寸",`${s.pgm.width} × ${s.pgm.height} px`],["分辨率",`${s.meta.resolution} m/px`],["原点",s.meta.origin.join(", ")],["点位",s.points.length]].map(([key,value])=>`<div><dt>${key}</dt><dd>${esc(value)}</dd></div>`).join("");
   }
   function nearest(p){let found=null,distance=16/s.scale;s.points.forEach((point)=>{const at=toPixel(point),d=Math.hypot(at.x-p.x,at.y-p.y);if(d<=distance){found=point;distance=d;}});return found;}
-  function pointId(name){return`${name.replace(/[^\w-]+/g,"_")}_${Date.now().toString(36)}`;}
+  function pointId(name){
+    const base=String(name||"point").trim().toLowerCase().replace(/[^a-z0-9_-]+/g,"_").replace(/^_+|_+$/g,"").slice(0,48)||"point";
+    const stamp=Date.now().toString(36);let id=`${base}_${stamp}`,suffix=2;
+    while(s.points.some((point)=>point.id===id)){id=`${base}_${stamp}_${suffix}`;suffix+=1;}
+    return id.slice(0,64);
+  }
   function edit(event,first) {
     const p=pixel(event);if(!s.pgm||p.x<0||p.y<0||p.x>=s.pgm.width||p.y>=s.pgm.height)return;
     const pointMode=s.activePanel==="points";
