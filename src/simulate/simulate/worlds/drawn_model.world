@@ -269,23 +269,23 @@
     </model>
 
     <include>
-      <uri>model://drawn_model</uri>
-      <name>drawn_model_1</name>
+      <uri>model://test_101</uri>
+      <name>test_101</name>
       <pose>-10 10 0 0 0 0</pose>
     </include>
     <include>
-      <uri>model://drawn_model</uri>
-      <name>drawn_model_2</name>
+      <uri>model://test_102</uri>
+      <name>test_102</name>
       <pose>10 10 0 0 0 0</pose>
     </include>
     <include>
-      <uri>model://drawn_model</uri>
-      <name>drawn_model_3</name>
+      <uri>model://test_103</uri>
+      <name>test_103</name>
       <pose>-10 -10 0 0 0 0</pose>
     </include>
     <include>
-      <uri>model://drawn_model</uri>
-      <name>drawn_model_4</name>
+      <uri>model://test_104</uri>
+      <name>test_104</name>
       <pose>10 -10 0 0 0 0</pose>
     </include>
 

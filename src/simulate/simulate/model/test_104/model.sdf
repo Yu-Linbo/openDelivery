@@ -1,0 +1,16 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="test_104">
+    <link name="link">
+      <collision name="collision">
+        <pose>-6.0 4.95 0 0 0 0</pose>
+        <geometry><mesh><uri>model://test_104/map.stl</uri></mesh></geometry>
+      </collision>
+      <visual name="visual">
+        <pose>-6.0 4.95 0 0 0 0</pose>
+        <geometry><mesh><uri>model://test_104/map.stl</uri></mesh></geometry>
+      </visual>
+    </link>
+    <static>true</static>
+  </model>
+</sdf>
