@@ -2,12 +2,17 @@
 """Temporary elevator/map-switch executor for simulation task orchestration."""
 
 import os
+import math
+import copy
 from pathlib import Path
+import subprocess
 import threading
 
 from custom_msgs_srvs.msg import ElevatorCommand, ElevatorInfo, ElevatorStatus
 from custom_msgs_srvs.srv import Relocalize, SetHeartbeatParams
+from gazebo_msgs.msg import ModelStates
 from gazebo_msgs.srv import SetModelState
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
 from nav2_msgs.srv import LoadMap
 import rclpy
 from rclpy.node import Node
@@ -52,6 +57,8 @@ class FakeElevator(Node):
         self._status_pub = self.create_publisher(ElevatorStatus, "fake_elevator/status", status_qos)
         self.create_subscription(ElevatorInfo, "fake_elevator/info", self._on_info, 10)
         self.create_subscription(ElevatorCommand, "fake_elevator/command", self._on_command, 10)
+        self.create_subscription(PoseWithCovarianceStamped, "amcl_pose", self._on_amcl_pose, 10)
+        self.create_subscription(ModelStates, "/gazebo/model_states", self._on_model_states, 10)
         self._load_map = self.create_client(LoadMap, f"/{self._robot}/map_server/load_map")
         self._set_model_state = self.create_client(SetModelState, "/gazebo/set_model_state")
         self._heartbeat = self.create_client(
@@ -64,7 +71,58 @@ class FakeElevator(Node):
         self._message = "waiting for elevator task"
         self._generation = 0
         self._timer = None
+        self._map_pose = None
+        self._world_pose = None
         self._publish()
+
+    def _on_amcl_pose(self, msg):
+        with self._lock:
+            self._map_pose = copy.deepcopy(msg.pose.pose)
+
+    def _on_model_states(self, msg):
+        try:
+            index = list(msg.name).index(self._robot)
+        except ValueError:
+            return
+        if index >= len(msg.pose):
+            return
+        with self._lock:
+            self._world_pose = copy.deepcopy(msg.pose[index])
+
+    @staticmethod
+    def _yaw(pose):
+        q = pose.orientation
+        return math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+
+    @classmethod
+    def _map_pose_to_world(cls, target, current_map, current_world):
+        """Apply T_world_base * inverse(T_map_base) to a map-frame target."""
+        map_yaw = cls._yaw(current_map)
+        world_yaw = cls._yaw(current_world)
+        offset_yaw = world_yaw - map_yaw
+        dx = target.position.x - current_map.position.x
+        dy = target.position.y - current_map.position.y
+        co = math.cos(offset_yaw)
+        so = math.sin(offset_yaw)
+        result = Pose()
+        result.position.x = current_world.position.x + co * dx - so * dy
+        result.position.y = current_world.position.y + so * dx + co * dy
+        result.position.z = current_world.position.z
+        yaw = cls._yaw(target) + offset_yaw
+        result.orientation.z = math.sin(yaw / 2.0)
+        result.orientation.w = math.cos(yaw / 2.0)
+        return result
+
+    def _target_world_pose(self, target):
+        with self._lock:
+            current_map = copy.deepcopy(self._map_pose)
+            current_world = copy.deepcopy(self._world_pose)
+        if current_map is None or current_world is None:
+            return None
+        return self._map_pose_to_world(target, current_map, current_world)
 
     def _on_info(self, msg):
         operation = str(msg.operation).strip().lower()
@@ -167,9 +225,15 @@ class FakeElevator(Node):
             self._status = ElevatorStatus.STATUS_MOVING_MODEL
             self._message = f"moving Gazebo model to {self._info.target_floor} elevator interior"
             self._publish()
-            target_pose = self._info.target_inside_pose
+            target_pose = self._target_world_pose(self._info.target_inside_pose)
+        if target_pose is None:
+            self._finish(
+                generation,
+                ElevatorStatus.STATUS_FAILED,
+                "map/Gazebo pose unavailable for map-to-world conversion",
+            )
+            return
         required_services = (
-            (self._set_model_state, "gazebo set_model_state"),
             (self._heartbeat, "heartbeat"),
             (self._load_map, "map_server load_map"),
             (self._relocalize, "relocalize"),
@@ -185,6 +249,12 @@ class FakeElevator(Node):
                 f"{unavailable} service unavailable",
             )
             return
+        if not self._set_model_state.wait_for_service(timeout_sec=self._service_wait):
+            self.get_logger().warning(
+                "/gazebo/set_model_state unavailable; using Gazebo native transport"
+            )
+            self._move_model_native(target_pose, generation)
+            return
         request = SetModelState.Request()
         request.model_state.model_name = self._robot
         request.model_state.pose = target_pose
@@ -193,6 +263,29 @@ class FakeElevator(Node):
         self._set_model_state.call_async(request).add_done_callback(
             lambda future: self._model_moved(future, generation)
         )
+
+    def _move_model_native(self, pose, generation):
+        """Move through Gazebo transport when this ROS process cannot discover the service."""
+        yaw = self._yaw(pose)
+        command = [
+            "gz", "model", "-m", self._robot,
+            "-x", str(float(pose.position.x)),
+            "-y", str(float(pose.position.y)),
+            "-z", str(float(self._model_z)),
+            "-R", "0.0", "-P", "0.0", "-Y", str(float(yaw)),
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=8.0, check=False
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._finish(generation, ElevatorStatus.STATUS_FAILED, f"gz model exception: {exc}")
+            return
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "gz model failed").strip()
+            self._finish(generation, ElevatorStatus.STATUS_FAILED, f"gz model failed: {detail}")
+            return
+        self._switch_map(generation)
 
     def _model_moved(self, future, generation):
         if not self._active(generation):

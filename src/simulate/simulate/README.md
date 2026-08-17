@@ -29,3 +29,9 @@ task_manager 或监控端也能读取最新阶段。
 
 `fake_elevator` 不控制真实轿厢，也没有呼梯、门控、进出梯检测和安全联锁。它目前只验证
 “任务拆分 → 换图 → 重定位 → 继续导航”的编排链路；接入真实电梯时应保持上述消息接口。
+
+换层移动不会直接把地图点位当成 Gazebo world 坐标。节点同时读取当前 AMCL map 位姿和
+`/gazebo/model_states` world 位姿，按
+`T_world_map = T_world_base * inverse(T_map_base)` 将目标楼层的电梯内点转换到 world。
+模型移动优先使用 `/gazebo/set_model_state`；若该进程无法发现 ROS service，则降级使用
+Gazebo 原生传输。

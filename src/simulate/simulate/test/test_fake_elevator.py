@@ -5,6 +5,8 @@ from pathlib import Path
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "fake_elevator.py"
 SPEC = importlib.util.spec_from_file_location("fake_elevator", SCRIPT)
@@ -27,6 +29,12 @@ class RecordingClient:
         return SimpleNamespace(add_done_callback=lambda _callback: None)
 
 
+class UnavailableClient(RecordingClient):
+    def wait_for_service(self, timeout_sec):
+        self.wait_timeout = timeout_sec
+        return False
+
+
 def bare_elevator():
     node = object.__new__(FakeElevator)
     node._lock = threading.RLock()
@@ -34,6 +42,8 @@ def bare_elevator():
     node._info = SimpleNamespace(from_floor="floor1", operation="call")
     node._timer = None
     node._service_wait = 10.0
+    node._map_pose = None
+    node._world_pose = None
     return node
 
 
@@ -114,6 +124,7 @@ def test_ride_moves_model_to_target_inside_pose_before_map_switch(monkeypatch):
     node._relocalize = RecordingClient()
     node._cancel_timer = lambda: None
     node._publish = lambda: None
+    node._target_world_pose = lambda pose: pose
 
     monkeypatch.setattr(Path, "is_file", lambda _path: True)
     node._after_delay(generation=7)
@@ -127,6 +138,28 @@ def test_ride_moves_model_to_target_inside_pose_before_map_switch(monkeypatch):
     assert request.model_state.pose.position.z == 0.05
 
 
+def test_map_target_is_transformed_into_gazebo_world_coordinates():
+    current_map = MODULE.Pose()
+    current_map.position.x = 2.0
+    current_map.position.y = 3.0
+    current_map.orientation.w = 1.0
+    current_world = MODULE.Pose()
+    current_world.position.x = -10.0
+    current_world.position.y = 8.0
+    current_world.orientation.z = 2 ** -0.5
+    current_world.orientation.w = 2 ** -0.5
+    target = MODULE.Pose()
+    target.position.x = 3.0
+    target.position.y = 5.0
+    target.orientation.w = 1.0
+
+    result = FakeElevator._map_pose_to_world(target, current_map, current_world)
+
+    assert result.position.x == pytest.approx(-12.0)
+    assert result.position.y == pytest.approx(9.0)
+    assert FakeElevator._yaw(result) == pytest.approx(MODULE.math.pi / 2.0)
+
+
 def test_successful_model_move_continues_with_map_switch():
     node = bare_elevator()
     calls = []
@@ -138,6 +171,44 @@ def test_successful_model_move_continues_with_map_switch():
     node._model_moved(future, generation=7)
 
     assert calls == [7]
+
+
+def test_service_discovery_failure_uses_gazebo_native_transport(monkeypatch):
+    node = bare_elevator()
+    info = MODULE.ElevatorInfo()
+    info.operation = MODULE.ElevatorInfo.OPERATION_RIDE
+    info.target_floor = "floor2"
+    info.target_inside_pose.position.x = 7.8
+    info.target_inside_pose.position.y = 7.5
+    info.target_inside_pose.orientation.w = 1.0
+    node._info = info
+    node._robot = "robot4"
+    node._map_root = Path("/tmp")
+    node._model_z = 0.05
+    node._set_model_state = UnavailableClient()
+    node._heartbeat = RecordingClient()
+    node._load_map = RecordingClient()
+    node._relocalize = RecordingClient()
+    node._cancel_timer = lambda: None
+    node._publish = lambda: None
+    node._target_world_pose = lambda pose: pose
+    node.get_logger = lambda: SimpleNamespace(warning=lambda *_args: None)
+    switched = []
+    node._switch_map = switched.append
+    commands = []
+    monkeypatch.setattr(Path, "is_file", lambda _path: True)
+    monkeypatch.setattr(
+        MODULE.subprocess,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    node._after_delay(generation=7)
+
+    assert commands[0][:4] == ["gz", "model", "-m", "robot4"]
+    assert switched == [7]
 
 
 def test_ride_relocalization_uses_mode_one_and_previous_floor_pose():
