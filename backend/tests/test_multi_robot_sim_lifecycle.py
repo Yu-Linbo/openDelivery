@@ -110,6 +110,14 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         with mock.patch.object(robot_lifecycle.subprocess, "run", return_value=completed):
             self.assertFalse(orchestrator._native_simulation_entity_present("robot2"))
 
+    def test_gazebo_transport_rejects_success_without_pose(self):
+        orchestrator = self._orchestrator()
+        completed = subprocess.CompletedProcess(
+            ["gz"], 0, stdout="Invalid arguments\n", stderr=""
+        )
+        with mock.patch.object(robot_lifecycle.subprocess, "run", return_value=completed):
+            self.assertFalse(orchestrator._gazebo_transport_ready())
+
     def test_shared_world_is_started_once_for_concurrent_requests(self):
         orchestrator = self._orchestrator()
         state_lock = threading.Lock()
@@ -129,6 +137,8 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", side_effect=ready))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", side_effect=ready))
+            stack.enter_context(mock.patch.object(orchestrator, "_terminate_stale_world_processes"))
             stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed", side_effect=start_if_needed))
             stack.enter_context(mock.patch.object(orchestrator, "_wait_for_gazebo"))
             threads = [
@@ -144,10 +154,28 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         self.assertEqual(sum(bool(call["force"]) for call in calls), 1)
         self.assertEqual(len(calls), 2)
 
+    def test_shared_world_restarts_when_ros_services_exist_but_transport_hangs(self):
+        orchestrator = self._orchestrator()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", return_value=False))
+            terminate = stack.enter_context(
+                mock.patch.object(orchestrator, "_terminate_stale_world_processes")
+            )
+            start = stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed"))
+            stack.enter_context(mock.patch.object(orchestrator, "_wait_for_gazebo"))
+
+            orchestrator._ensure_simulation_world()
+
+        terminate.assert_called_once_with()
+        self.assertTrue(start.call_args.kwargs["autostart"])
+        self.assertTrue(start.call_args.kwargs["force"])
+
     def test_healthy_online_robot_is_idempotent(self):
         orchestrator = self._orchestrator()
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", return_value=True))
             stack.enter_context(mock.patch.object(orchestrator, "_simulation_entity_present", return_value=True))
             ensure_world = stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
             stack.enter_context(mock.patch.object(orchestrator, "status", return_value={"robots": []}))
@@ -164,6 +192,7 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         pose = orchestrator._SPAWN_POSES[0]
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", return_value=True))
             stack.enter_context(mock.patch.object(orchestrator, "_simulation_entity_present", return_value=False))
             stack.enter_context(mock.patch.object(orchestrator, "_sim_managed_running", return_value=True))
             stack.enter_context(mock.patch.object(orchestrator, "_spawn_pose_for_robot", return_value=(0, pose)))

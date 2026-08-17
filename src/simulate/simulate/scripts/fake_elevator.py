@@ -38,6 +38,7 @@ class FakeElevator(Node):
         self.declare_parameter("model_z", 0.05)
         self.declare_parameter("relocalize_retry_count", 10)
         self.declare_parameter("relocalize_retry_delay_sec", 0.3)
+        self.declare_parameter("map_status_propagation_delay_sec", 0.5)
         self.declare_parameter("service_wait_sec", 10.0)
         self.declare_parameter("map_frame", "map")
         self._robot = str(self.get_parameter("robot_name").value).strip().strip("/") or "robot2"
@@ -48,6 +49,9 @@ class FakeElevator(Node):
         self._retry_count = max(1, int(self.get_parameter("relocalize_retry_count").value))
         self._retry_delay = max(
             0.05, float(self.get_parameter("relocalize_retry_delay_sec").value)
+        )
+        self._map_status_delay = max(
+            0.05, float(self.get_parameter("map_status_propagation_delay_sec").value)
         )
         self._service_wait = max(0.1, float(self.get_parameter("service_wait_sec").value))
         self._map_frame = str(self.get_parameter("map_frame").value).strip() or "map"
@@ -404,6 +408,25 @@ class FakeElevator(Node):
         except Exception as exc:  # noqa: BLE001
             self._finish(generation, ElevatorStatus.STATUS_FAILED, f"heartbeat exception: {exc}")
             return
+        # The heartbeat service response precedes delivery of RobotStatus to
+        # other nodes.  Loading immediately can publish the new OccupancyGrid
+        # while relocalization still labels it with the previous floor.
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._message = "waiting for floor status propagation before loading map"
+            self._publish()
+            self._cancel_timer()
+            self._timer = self.create_timer(
+                self._map_status_delay,
+                lambda: self._load_target_map(generation, yaml_path),
+            )
+
+    def _load_target_map(self, generation, yaml_path):
+        with self._lock:
+            self._cancel_timer()
+            if generation != self._generation:
+                return
         if not self._load_map.wait_for_service(timeout_sec=self._service_wait):
             self._rollback_floor(
                 generation, "map_server load_map unavailable after heartbeat floor update"

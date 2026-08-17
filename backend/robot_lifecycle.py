@@ -149,6 +149,30 @@ class RobotLifecycleOrchestrator:
         services = set((proc.stdout or "").split()) if proc.returncode == 0 else set()
         return {"/spawn_entity", "/delete_entity"}.issubset(services)
 
+    def _gazebo_transport_ready(self) -> bool:
+        """Return whether Gazebo's native transport answers, not merely advertises ROS services."""
+        try:
+            proc = subprocess.run(
+                # drawn_model is part of the shared world and always exists.  A
+                # pose query exercises the request/reply path; unsupported `-l`
+                # exits successfully even when gzserver is wedged.
+                ["gz", "model", "-m", "drawn_model", "-p"],
+                cwd=str(self._root_dir),
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                env=os.environ.copy(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode != 0:
+            return False
+        try:
+            values = [float(value) for value in (proc.stdout or "").strip().split()[-6:]]
+        except ValueError:
+            return False
+        return len(values) == 6
+
     def _wait_for_gazebo(self, timeout_sec: float = 60.0) -> None:
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
@@ -171,7 +195,9 @@ class RobotLifecycleOrchestrator:
                     "robot_name:=simulation_world namespace:=simulation_world "
                     "start_gazebo:=true spawn_robot:=false use_sim_time:=true"
                 )
-            world_running = self._gazebo_services_ready()
+            world_running = self._gazebo_services_ready() and self._gazebo_transport_ready()
+            if not world_running:
+                self._terminate_stale_world_processes()
             self._start_if_needed(
                 "simulation_world", world_cmd,
                     stop_cmd=(
@@ -246,6 +272,41 @@ class RobotLifecycleOrchestrator:
                 and "robot_name:=simulation_world" in joined
             )
             if is_world_server or is_world_launch:
+                targets.append(int(entry.name))
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in targets:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    continue
+            if sig == signal.SIGTERM:
+                time.sleep(1.0)
+
+    def _terminate_stale_robot_processes(self, robot_id: str) -> None:
+        """Remove orphaned descendants left after a backend/process-manager restart."""
+        rid = self._ensure_robot(robot_id)
+        namespace_token = f"__ns:=/{rid}"
+        robot_arg = f"robot_name:={rid}"
+        bringup_pattern = re.compile(rf"sim_bringup\.sh\s+{re.escape(rid)}(?:\s|$)")
+        targets = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                args = entry.joinpath("cmdline").read_bytes().split(b"\0")
+                argv = [part.decode(errors="replace") for part in args if part]
+            except (OSError, ProcessLookupError):
+                continue
+            joined = " ".join(argv)
+            namespaced = any(
+                arg == namespace_token or arg.startswith(namespace_token + "/")
+                for arg in argv
+            )
+            if (
+                namespaced
+                or robot_arg in argv
+                or bringup_pattern.search(joined)
+            ):
                 targets.append(int(entry.name))
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid in targets:
@@ -672,7 +733,7 @@ class RobotLifecycleOrchestrator:
         rid = self._ensure_robot(robot_id)
         sim_mode = (sim_mode or "sim").strip() or "sim"
         online = bool(is_online(rid)) if callable(is_online) else False
-        world_ready = self._gazebo_services_ready()
+        world_ready = self._gazebo_services_ready() and self._gazebo_transport_ready()
         entity_present = self._simulation_entity_present(rid) if world_ready else False
         recovery_needed = online and (not world_ready or entity_present is False)
         if online and not recovery_needed:
@@ -719,6 +780,8 @@ class RobotLifecycleOrchestrator:
                 deleted = self._delete_simulation_entity(rid)
                 if existing is True and not deleted:
                     self._restart_simulation_world()
+            if force_restart or not sim_running:
+                self._terminate_stale_robot_processes(rid)
             spec = self._robot_process_spec(rid, sim_mode, spawn_pose, slot)
             self._start_if_needed(
                 rid, spec["cmd"], stop_cmd=spec["stop_cmd"],

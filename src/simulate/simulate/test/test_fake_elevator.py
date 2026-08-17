@@ -297,3 +297,23 @@ def test_successful_load_map_defers_relocalization_for_map_propagation():
     node._map_loaded(SimpleNamespace(result=lambda: response), generation=7)
 
     assert calls == [(7, 1, "waiting for target map propagation")]
+
+
+def test_floor_status_propagates_before_load_map_request():
+    node = bare_elevator()
+    node._map_status_delay = 0.5
+    node._load_map = RecordingClient()
+    node._publish = lambda: None
+    node._cancel_timer = lambda: None
+    scheduled = []
+    node.create_timer = lambda delay, callback: scheduled.append((delay, callback)) or object()
+    response = SimpleNamespace(success=True, message="updated")
+
+    node._map_status_updated(
+        SimpleNamespace(result=lambda: response), generation=7, yaml_path="/maps/floor2.yaml"
+    )
+
+    assert node._load_map.request is None
+    assert scheduled[0][0] == pytest.approx(0.5)
+    scheduled[0][1]()
+    assert node._load_map.request.map_url == "/maps/floor2.yaml"
