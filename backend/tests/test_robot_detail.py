@@ -39,10 +39,29 @@ class RobotDetailPayloadTest(unittest.TestCase):
         with mock.patch.object(server, "_build_presence_rows", return_value=presence), \
                 mock.patch.object(server.ROS_DEBUG_NODES_TABLE, "snapshot", return_value=table), \
                 mock.patch.object(server, "_robot_process_metrics", return_value=[]), \
-                mock.patch.object(server, "_list_log_bag_matches", return_value={"robots": []}):
+                mock.patch.object(server, "_list_log_bag_matches", return_value={"robots": []}), \
+                mock.patch.object(server.ros_task_store, "get_status", return_value={
+                    "task_id": "web_nav_1", "task_status": "Navigating"
+                }):
             payload = server._robot_detail_payload("robot2")
         self.assertEqual([n["name"] for n in payload["nodes"]], ["/robot2/bt_navigator"])
         self.assertTrue(payload["status"]["online"])
+        self.assertEqual(payload["task"]["task_id"], "web_nav_1")
+
+    def test_web_goal_is_converted_to_root_navigation_task(self):
+        command = server._navigation_task_command({
+            "robot_id": "robot2", "x": 1.2, "y": -3.4, "yaw": 0.5, "floor_id": "floor1"
+        })
+        self.assertEqual(command["type"], "navigation_task")
+        self.assertEqual(command["robot_id"], "robot2")
+        self.assertEqual(command["floor_id"], "floor1")
+        self.assertTrue(command["task_id"].startswith("web_nav_"))
+
+    def test_web_goal_rejects_non_finite_pose(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            server._navigation_task_command({
+                "robot_id": "robot2", "x": float("nan"), "y": 0, "yaw": 0
+            })
 
 
 class MultiRobotNavigationTest(unittest.TestCase):

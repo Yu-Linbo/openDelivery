@@ -204,6 +204,7 @@ log "started system startup.launch.py (log_bag+heartbeat, pid $!)"
 # --- 1) Gazebo + 机器人 ---
 ros2 launch simulate simulate.launch.py \
   "robot_name:=${RID}" \
+  "map_root:=${ROOT}/map" \
   "namespace:=${RID}" \
   "start_gazebo:=${START_GZ}" \
   "spawn_robot:=true" \

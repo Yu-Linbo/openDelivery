@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.8)
 project(simulate)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_fake_elevator test/test_fake_elevator.py)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(gazebo REQUIRED)
 
@@ -13,6 +18,11 @@ target_compile_options(ray_collision_filter_plugin PRIVATE ${GAZEBO_CXX_FLAGS})
 
 install(TARGETS ray_collision_filter_plugin
   LIBRARY DESTINATION lib
+)
+
+install(PROGRAMS scripts/fake_elevator.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME fake_elevator
 )
 
 install(DIRECTORY launch urdf worlds model

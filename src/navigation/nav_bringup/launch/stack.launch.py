@@ -13,7 +13,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import PushRosNamespace
+from launch_ros.actions import Node, PushRosNamespace
 
 
 def _as_bool(text: str) -> bool:
@@ -127,6 +127,20 @@ def _launch_setup(context, *_args, **_kwargs):
                         "map_subscribe_transient_local": map_subscribe_transient_local,
                         "occupancy_grid_topic": occ_topic,
                     }.items(),
+                ),
+                Node(
+                    package="navigation_tasks",
+                    executable="navigation_task_node",
+                    name="task_executor",
+                    output="screen",
+                    parameters=[
+                        {
+                            "robot_name": robot_name,
+                            "map_frame": "map",
+                            "action_server_wait_sec": 15.0,
+                            "use_sim_time": use_sim,
+                        }
+                    ],
                 ),
             ]
         )

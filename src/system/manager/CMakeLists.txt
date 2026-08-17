@@ -17,6 +17,26 @@ find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
 find_package(jsoncpp REQUIRED)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_task_manager_elevator_plan
+    test/test_task_manager_elevator_plan.cpp
+    src/task_manager_node.cpp
+  )
+  target_compile_definitions(test_task_manager_elevator_plan PRIVATE
+    MANAGER_TASK_MANAGER_NO_MAIN
+  )
+  target_include_directories(test_task_manager_elevator_plan PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  ament_target_dependencies(test_task_manager_elevator_plan
+    rclcpp
+    custom_msgs_srvs
+    geometry_msgs
+  )
+  target_link_libraries(test_task_manager_elevator_plan jsoncpp_lib)
+endif()
+
 add_executable(health_monitor_node
   src/health_monitor_node.cpp
 )
@@ -65,6 +85,7 @@ ament_target_dependencies(task_manager_node
   custom_msgs_srvs
   geometry_msgs
 )
+target_link_libraries(task_manager_node jsoncpp_lib)
 
 add_executable(stack_lifecycle_manager_node
   src/stack_lifecycle_manager_node.cpp

@@ -16,7 +16,9 @@ from PIL import Image
 
 _MAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _POINT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_POINT_TYPES = {"elevator", "standby", "custom", "relocalization"}
+_POINT_TYPES = {
+    "elevator", "elevator_inside", "elevator_waiting", "standby", "custom", "relocalization"
+}
 _POINTS_LOCK = threading.RLock()
 
 
@@ -77,7 +79,10 @@ def _normalize_point(raw: Dict[str, Any], used: set) -> Dict[str, Any]:
         raise ValueError("point id must be unique and use [A-Za-z0-9_-]")
     point_type = str(raw.get("type") or "custom").strip().lower()
     if point_type not in _POINT_TYPES:
-        raise ValueError("point type must be elevator, standby, custom, or relocalization")
+        raise ValueError(
+            "point type must be elevator_inside, elevator_waiting, standby, custom, "
+            "or relocalization (legacy elevator is accepted)"
+        )
     name = str(raw.get("name") or point_id).strip()
     if not name or len(name) > 80:
         raise ValueError("point name must be 1-80 chars")

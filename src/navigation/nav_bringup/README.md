@@ -1,5 +1,8 @@
 # nav_bringup
 
+The stack also launches `navigation_tasks/navigation_task_node` in the navigation namespace; see
+that package for the `task_info`, `task_status`, and `task_command` API.
+
 **仅导航**：规划、控制、恢复、`bt_navigator`、`waypoint_follower`。不包含 `map_server` / `AMCL`；**TF 由 SLAM** 提供。
 
 ## 栅格地图话题（不经过 `/map` 中转）

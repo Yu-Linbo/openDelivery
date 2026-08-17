@@ -30,6 +30,7 @@ from ros_sensor_store import (
 )
 from robot_lifecycle import RobotLifecycleOrchestrator
 import map_assets
+import ros_task_store
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -1509,7 +1510,37 @@ def _robot_detail_payload(robot_id: str) -> dict:
             },
         },
         "nodes": nodes, "processes": _robot_process_metrics(rid),
+        "task": ros_task_store.get_status(rid),
         "logs": logs, "timestamp": time.time(),
+    }
+
+
+def _navigation_task_command(data: dict) -> dict:
+    """Validate a Web map goal and convert it to the root TaskInfo bridge command."""
+    if not isinstance(data, dict):
+        raise ValueError("body must be an object")
+    robot_id = str(data.get("robot_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", robot_id):
+        raise ValueError("invalid robot_id")
+    x = float(data.get("x"))
+    y = float(data.get("y"))
+    yaw = float(data.get("yaw", 0))
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        raise ValueError("x, y and yaw must be finite")
+    task_id = str(data.get("task_id") or "").strip()
+    if not task_id:
+        task_id = f"web_nav_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", task_id):
+        raise ValueError("invalid task_id")
+    return {
+        "type": "navigation_task",
+        "robot_id": robot_id,
+        "task_id": task_id,
+        "task_name": str(data.get("task_name") or "Web navigation goal"),
+        "floor_id": str(data.get("floor_id") or ""),
+        "x": x,
+        "y": y,
+        "yaw": yaw,
     }
 
 
@@ -2427,19 +2458,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             if data is None:
                 return
             try:
-                import robot_motion_api as rma
+                import ros_command_queue as rcq
 
-                out = rma.send_navigate_to_pose(
-                    str(data.get("robot_id") or ""),
-                    float(data.get("x")),
-                    float(data.get("y")),
-                    float(data.get("yaw", 0)),
-                )
-            except ValueError as err:
+                command = _navigation_task_command(data)
+                rcq.enqueue_command(command)
+                out = {
+                    "ok": True,
+                    "accepted": True,
+                    "robot_id": command["robot_id"],
+                    "task_id": command["task_id"],
+                }
+            except (ValueError, TypeError) as err:
                 self._send_json({"error": str(err)}, 400)
                 return
-            except rma.RosCommandTimeoutError as err:
-                self._send_json({"error": str(err)}, 504)
+            except (RuntimeError, queue.Full) as err:
+                self._send_json({"error": str(err)}, 503)
                 return
             except Exception as err:  # noqa: BLE001
                 self._send_json({"error": str(err)}, 500)

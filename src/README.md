@@ -22,7 +22,7 @@
 
 | 包名 | 路径 | 功能简述 |
 |------|------|----------|
-| **simulate** | `simulate/simulate/` | Gazebo 无头 **2D 差速车**仿真：URDF、世界、`robot_state_publisher`、实体生成；插件发布 `/<R>/scan_2d`、`odom`、`cmd_vel`、IMU、前视相机 `/<R>/front_camera/*`、前向下倾相机 `/<R>/front_down_camera/*`；**仅维护 `odom` 树，不发布 `map`**。`simulate/` 为容器目录，包在子目录中。 |
+| **simulate** | `simulate/simulate/` | Gazebo 无头 **2D 差速车**仿真，以及临时 `fake_elevator` 换层执行器；机器人插件仅维护 `odom` 树，假电梯通过 map_server 服务动态加载目标地图并调用重定位。`simulate/` 为容器目录，包在子目录中。 |
 
 ### 1.3 SLAM `slam/`
 
@@ -39,6 +39,7 @@ SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_p
 | 包名 | 路径 | 功能简述 |
 |------|------|----------|
 | **nav_bringup** | `navigation/nav_bringup/` | **Nav2 导航栈** launch：`controller_server`、`planner_server`、`recoveries_server`、`bt_navigator`、`waypoint_follower`、`lifecycle_manager_navigation`；全局代价地图按 `grid_mode` 订 `/<R>/map`（定位）或 `/<R>/mapping`（建图）；**不含 `map_server` / AMCL**，TF 与栅格由 SLAM 提供。详见 `navigation/nav_bringup/README.md`。 |
+| **navigation_tasks** | `navigation/navigation_tasks/` | 消费 `/<R>/navigation/task_info`，以 Nav2 action 执行点到点、巡逻和 following；响应 Pause/Resume/Terminate 并发布任务状态。 |
 
 ### 1.5 系统 `system/`
 
@@ -114,6 +115,7 @@ map
 | **`gzserver`**（经 `gazebo_ros` 启动） | Gazebo 世界与物理仿真 |
 | **`/<R>/simulate/robot_state_publisher`** | 订阅 Gazebo 发布的 `joint_states`，按 URDF 发布 **`/<R>/odom` → `base_footprint` → `base_link`** 等 TF |
 | **`/<R>/simulate/spawn_entity`** | 将模型按 `robot_description` 生成到 Gazebo（通常很快结束） |
+| **`/<R>/fake_elevator`** | 模拟乘梯延时，更新 heartbeat 当前楼层，调用 `map_server/load_map` 和 `relocalize` 完成换层 |
 | **Gazebo 插件（随 URDF）** | 差速底盘（`cmd_vel`）、**`/<R>/scan_2d`**、IMU、相机等 |
 
 ### 5.2 心跳与管理器（`manager.launch.py`）
@@ -122,7 +124,9 @@ map
 |------|------|
 | **`/<R>/heartbeat`**（Lifecycle） | 周期发布 **`/<R>/robot_status`**（`RobotStatus`）；提供 **`/<R>/set_heartbeat_params`** 服务 |
 | **`/<R>/health_monitor`** | 监视必要节点与可选定位话题，推进 **`robot_status`** |
-| **`/<R>/task_manager`** | **`set_robot_task`**、**`localize_nav_command`** 等任务接口 |
+| **`/<R>/task_manager`** | 根任务分发与状态汇总；兼容 **`set_robot_task`**、**`localize_nav_command`** |
+| **`/<R>/task_info` / `task_status` / `task_command`** | 根任务接收、汇总状态，以及 Pause/Resume/Terminate 控制 |
+| **`/<R>/navigation/task_info` / `task_status` / `task_command`** | Nav2 执行层：点到点、巡逻、following |
 | **`/<R>/slam/lifecycle_manager`** | **栈生命周期**：SLAM 模式切换；代理 **`set_stack_lifecycle_transition`** 驱动 heartbeat / Nav2 等 Lifecycle 节点；发布 **`/<R>/stack_lifecycle`** |
 
 ### 5.3 SLAM（由 `stack_lifecycle_manager` 管理）
@@ -141,28 +145,53 @@ ros2 service call /robot2/slam/set_stack_lifecycle_transition \
 
 ### 5.4 导航 `nav_bringup`（`stack.launch.py` → `navigation_namespaced.launch.py`）
 
-均在 **`/<R>/`** 下；全局代价地图通过 remap 订阅 **`/<R>/map`** 或 **`/<R>/mapping`**（由 `grid_mode` 决定）。
+均在 **`/<R>/navigation/`** 下；全局代价地图通过 remap 订阅 **`/<R>/map`** 或 **`/<R>/mapping`**（由 `grid_mode` 决定）。
 
 | 节点 | 作用 |
 |------|------|
-| **`/<R>/controller_server`** | 局部规划 / DWB，输出 `cmd_vel` |
-| **`/<R>/planner_server`** | 全局路径（NavFn 等） |
-| **`/<R>/recoveries_server`** | 脱困（旋转、后退、等待等） |
-| **`/<R>/bt_navigator`** | 行为树导航（NavigateToPose 等） |
-| **`/<R>/waypoint_follower`** | 多点巡逻 / 航点跟随 |
-| **`/<R>/lifecycle_manager_navigation`** | 统一管理上述 Nav2 节点的 lifecycle |
+| **`/<R>/navigation/controller_server`** | 局部规划 / DWB，输出导航速度 |
+| **`/<R>/navigation/planner_server`** | 全局路径（NavFn 等） |
+| **`/<R>/navigation/recoveries_server`** | 脱困（旋转、后退、等待等） |
+| **`/<R>/navigation/bt_navigator`** | 行为树导航；action remap 为 **`/<R>/navigate_to_pose`** |
+| **`/<R>/navigation/waypoint_follower`** | 多点航点跟随 |
+| **`/<R>/navigation/task_executor`** | TaskInfo → NavigateToPose / FollowPath；处理 Pause/Resume/Terminate |
+| **`/<R>/navigation/lifecycle_manager`** | 统一管理上述 Nav2 节点的 lifecycle |
 
-### 5.5 演示 `fake_pub`（`params/launch/fake/fake_pub.launch.py`）
+任务命令通过可靠、非持久话题传递，避免节点重启后重放旧目标；根/导航层 `TaskStatus`
+使用 transient-local，供 Web 等晚加入订阅者读取最新状态。当前支持 `navigation`、`patrol`、
+`following`。带 `floor_ids` 的任务会按连续楼层拆分：同层段交给导航执行器，楼层变化插入
+候梯导航、呼梯、进梯导航、乘梯换层、出梯导航；当前楼层未知或电梯点配置不完整时拒绝任务。
+
+### 5.5 假电梯与跨楼层任务
+
+| 接口 | 类型 | 作用 |
+|------|------|------|
+| `/<R>/fake_elevator/info` | `ElevatorInfo` | `operation=call|ride`；乘梯还携带目标层梯内点和上一层重定位参考位姿 |
+| `/<R>/fake_elevator/status` | `ElevatorStatus` | transient-local 状态：Calling、Riding、MovingModel、SwitchingMap、Relocalizing 及最终/控制状态 |
+| `/<R>/fake_elevator/command` | `ElevatorCommand` | Pause、Resume、Terminate |
+
+完整工作队列为：本层 `elevator_waiting` → 呼梯 3 秒 → 本层 `elevator_inside` → 乘梯 →
+目标层反向 `elevator_waiting` → 业务目标。乘梯内部顺序为 `/gazebo/set_model_state` 移动模型到
+目标层梯内点 → heartbeat 写目标 `current_map`/`localization_lost` → 加载目标 yaml → 使用上一层
+梯内点以模式 1 调用 `/<R>/relocalize`。所有阶段经 `task_manager` 汇总到根状态。
+
+每层 points JSON 必须恰好有一个 `elevator_inside` 和一个 `elevator_waiting`；旧 `elevator`
+仍按梯内点读取。目标层候梯点用于出梯导航时 yaw 自动增加 180°。
+
+该节点只用于仿真，不实现呼梯、门状态、进出梯检测或安全联锁；以后真实电梯/切图管理器应复用
+三类 Elevator 消息，以保持上层任务编排不变。
+
+### 5.6 演示 `fake_pub`（`params/launch/fake/fake_pub.launch.py`）
 
 | 节点 | 作用 |
 |------|------|
 | **`/<R>/fake`** | 轻量假数据（位姿/话题），便于无 Gazebo 时与 Web 联调 |
 
-### 5.6 Web 后端桥（非 `src` 内 ROS 包）
+### 5.7 Web 后端桥（非 `src` 内 ROS 包）
 
 | 组件 | 作用 |
 |------|------|
-| **`backend/ros_tf_bridge.py`（ROS 2 节点）** | 聚合多机 TF、`/*/robot_status` 发现、激光/路径/topdown 相机等供 **HTTP** 使用；与上表节点通过话题/服务协同 |
+| **`backend/ros_tf_bridge.py`（ROS 2 节点）** | 聚合多机 TF、状态、激光/路径/topdown 相机；将 Web 目标转为根 TaskInfo，并缓存根 TaskStatus 供详情页使用 |
 
 ---
 

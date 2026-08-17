@@ -476,7 +476,7 @@ async function postRobotCommand(payload) {
   return data;
 }
 
-async function postRobotGoto(robotId, x, y, yaw) {
+async function postRobotGoto(robotId, x, y, yaw, floorId = "") {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 30000);
   let res;
@@ -485,7 +485,7 @@ async function postRobotGoto(robotId, x, y, yaw) {
     res = await fetch(`${API_BASE_URL}/api/robot/motion/goto`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ robot_id: robotId, x, y, yaw }),
+      body: JSON.stringify({ robot_id: robotId, x, y, yaw, floor_id: floorId }),
       signal: ctrl.signal,
     });
     try {
@@ -871,7 +871,7 @@ function renderSemanticLabelOptions() {
 }
 
 function pointTypeLabel(type) {
-  return type === "elevator" ? "电梯点" : type === "standby" ? "待机点" : type === "relocalization" ? "重定位点" : "自定义点位";
+  return type === "elevator" || type === "elevator_inside" ? "电梯内点" : type === "elevator_waiting" ? "电梯等待点" : type === "standby" ? "待机点" : type === "relocalization" ? "重定位点" : "自定义点位";
 }
 
 function visibleMapPoints() {
@@ -944,7 +944,7 @@ function drawMapPointsOverlay() {
     const pix = worldToMapPixels(point);
     if (!pix) return;
     const { sx, sy } = mapPixelToScreen(pix.mapX, pix.mapY);
-    const color = point.type === "elevator" ? "#a78bfa" : point.type === "standby" ? "#22c55e" : point.type === "relocalization" ? "#38bdf8" : "#fb923c";
+    const color = point.type === "elevator" || point.type === "elevator_inside" ? "#a78bfa" : point.type === "elevator_waiting" ? "#f472b6" : point.type === "standby" ? "#22c55e" : point.type === "relocalization" ? "#38bdf8" : "#fb923c";
     ctx.save();
     ctx.fillStyle = color;
     ctx.strokeStyle = "#0f172a";
@@ -1744,9 +1744,9 @@ async function publishPickedNavigationGoal(goal) {
     relocMessage.textContent = `正在向 ${rid} 下发导航目标…`;
   }
   try {
-    await postRobotGoto(rid, goal.x, goal.y, goal.yaw);
+    const result = await postRobotGoto(rid, goal.x, goal.y, goal.yaw, activeFloor || "");
     if (relocMessage) {
-      relocMessage.textContent = `已向 ${rid} 下发导航目标`;
+      relocMessage.textContent = `任务 ${result.task_id || ""} 已提交给 ${rid}`.trim();
     }
     appendLog(`下发导航目标 → ${rid} (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)}, ${goal.yaw.toFixed(2)})`);
   } catch (err) {
@@ -5004,17 +5004,30 @@ function renderRobotDetailOverview(payload) {
 }
 
 function renderRobotDetailTasks(payload) {
-  const status = payload.status || {};
-  const task = detailStatusValue(status, "live_task_status", "persisted_task_status");
-  const progress = Number(status.task_progress);
-  const active = task && task !== "—" && task !== "idle";
+  const task = payload.task && typeof payload.task === "object" ? payload.task : null;
+  if (!task || !task.task_id) {
+    return `<div class="robot-detail-grid">
+      <section class="robot-detail-card"><h3>当前任务</h3><p class="robot-detail-empty">当前没有任务状态。</p></section>
+      <section class="robot-detail-card"><h3>任务工作队列</h3><p class="robot-detail-empty">暂无待执行任务。</p></section>
+    </div>`;
+  }
+  const progress = Number(task.progress);
+  const workQueue = Array.isArray(task.work_queue) ? task.work_queue : [];
+  const modelStatus = Array.isArray(task.model_status) ? task.model_status : [];
+  const rows = workQueue.map((work, index) => `<tr>
+    <td>${index + 1}</td><td><code>${escapeHtml(work)}</code></td>
+    <td><code>${escapeHtml(modelStatus[index] || "Waiting")}</code></td>
+  </tr>`).join("");
   return `<div class="robot-detail-grid">
     <section class="robot-detail-card"><h3>当前任务</h3>
-      <p>${active ? `<code>${escapeHtml(task)}</code>` : "当前为空闲状态"}</p>
+      <p>任务 ID：<code>${escapeHtml(task.task_id)}</code></p>
+      <p>汇总状态：<code>${escapeHtml(task.task_status || "Waiting")}</code></p>
+      <p>${escapeHtml(task.message || "—")}</p>
       <p>进度：<code>${progress >= 0 ? `${Math.round(progress * 100)}%` : "未上报"}</code></p>
+      <p>当前项：<code>${Number(task.total_count || 0) > 0 ? `${Number(task.current_index || 0) + 1} / ${Number(task.total_count)}` : "—"}</code></p>
     </section>
-    <section class="robot-detail-card"><h3>待执行队列</h3>
-      <p class="robot-detail-empty">暂无待执行任务。当前后端尚未接入持久任务队列。</p>
+    <section class="robot-detail-card"><h3>任务工作队列</h3>
+      ${rows ? `<table class="robot-detail-table"><thead><tr><th>#</th><th>执行模块</th><th>模块状态</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="robot-detail-empty">暂无工作项。</p>'}
     </section>
   </div>`;
 }

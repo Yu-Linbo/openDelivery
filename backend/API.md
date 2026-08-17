@@ -59,10 +59,11 @@ These endpoints are used by `web/app.js`.
 - `GET /api/maps/{floor}/assets`
   - Purpose: load semantic PNG/legend and map-scoped semantic points.
   - Point file: `map/{floor}/{floor}_points.json`.
-  - Display rule: `elevator` and `standby` points are always visible; `custom` points follow the Web overlay toggle. The semantic PNG is a separate translucent overlay.
+  - Point types include `elevator_inside`, `elevator_waiting`, `standby`, `custom`, and
+    `relocalization`; legacy `elevator` remains readable as an elevator-inside point.
 
 - `POST /api/maps/{floor}/assets/points`
-  - Body: `{ "points": [{ "id": "lift_a", "name": "A座电梯", "type": "elevator|standby|custom", "x": 1, "y": 2, "yaw": 0 }] }`.
+  - Body: `{ "points": [{ "id": "lift_a", "name": "A座电梯内", "type": "elevator_inside|elevator_waiting|standby|custom|relocalization", "x": 1, "y": 2, "yaw": 0 }] }`.
   - Purpose: atomically replace map-scoped points. IDs must be unique; coordinates must be finite numbers.
 
 - `POST /api/maps/{floor}/assets/raster` / `semantic`
@@ -128,8 +129,13 @@ These are safe for both Web and future AI workflows when called through backend.
   - Navigate to waypoint.
 
 - `POST /api/robot/motion/goto`
-  - Body: `{ "robot_id": "robot2", "x": 0, "y": 0, "yaw": 0 }`
-  - Send Nav2 goal.
+  - Body: `{ "robot_id": "robot2", "x": 0, "y": 0, "yaw": 0, "floor_id": "floor1" }`
+  - Creates a navigation `TaskInfo` on `/<robot>/task_info`; `task_manager` forwards it to the
+    navigation executor instead of the Web backend sending a Nav2 action directly.
+
+- `GET /api/robot/{robot_id}/detail`
+  - Includes the latest root `TaskStatus` as `task`, including `work_queue`, `model_status`,
+    aggregate status, pose index/count, and progress for the robot detail task tab.
 
 - `POST /api/robot/motion/velocity`
   - Body: `{ "robot_id": "robot2", "linear": 0.1, "angular": 0.0, "seconds": 1, "confirmed": true }`

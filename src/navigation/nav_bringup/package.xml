@@ -22,6 +22,7 @@
   <exec_depend>nav2_bt_navigator</exec_depend>
   <exec_depend>nav2_waypoint_follower</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>navigation_tasks</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 
   <export>

@@ -105,6 +105,7 @@ def launch_setup(context, *_args, **_kwargs):
     start_xvfb = _as_bool(LaunchConfiguration("start_xvfb").perform(context))
     spawn_robot = _as_bool(LaunchConfiguration("spawn_robot").perform(context))
     collision_bit = int(LaunchConfiguration("collision_bit").perform(context))
+    map_root = LaunchConfiguration("map_root").perform(context).strip()
     xvfb_display = LaunchConfiguration("xvfb_display").perform(context).strip() or ":99"
     world = LaunchConfiguration("world").perform(context)
     share = get_package_share_directory("simulate")
@@ -270,6 +271,22 @@ def launch_setup(context, *_args, **_kwargs):
         group_children = [PushRosNamespace(sim_ns), robot_state_publisher, spawn_robot_node]
         actions.append(GroupAction(actions=group_children))
         actions.append(
+            Node(
+                package="simulate",
+                executable="fake_elevator",
+                name="fake_elevator",
+                namespace=ns,
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": use_sim,
+                        "robot_name": ns or robot_name,
+                        "map_root": map_root,
+                    }
+                ],
+            )
+        )
+        actions.append(
             LogInfo(
                 msg=(
                     f"[simulate] spawn robot entity={entity_name} namespace={ns or '/'} "
@@ -309,6 +326,11 @@ def generate_launch_description():
                 "collision_bit",
                 default_value="4",
                 description="Unique power-of-two collision category used to hide only this robot shell from its own lidar.",
+            ),
+            DeclareLaunchArgument(
+                "map_root",
+                default_value=os.environ.get("OPEN_DELIVERY_MAP_ROOT", ""),
+                description="Root containing <floor>/<floor>.yaml for fake elevator map switching.",
             ),
             DeclareLaunchArgument(
                 "spawn_robot",

@@ -62,7 +62,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
 from gazebo_msgs.msg import ModelStates
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, Image
@@ -75,6 +75,12 @@ try:
 except Exception:  # noqa: BLE001
     LocalizeNavCommand = None
     RobotStatus = None
+
+try:
+    from custom_msgs_srvs.msg import TaskInfo, TaskStatus
+except Exception:  # noqa: BLE001
+    TaskInfo = None
+    TaskStatus = None
 
 try:
     from custom_msgs_srvs.srv import RecordRelocalization
@@ -165,6 +171,7 @@ import ros_command_queue
 import ros_map_store
 import ros_robot_status_store
 import ros_sensor_store
+import ros_task_store
 
 
 def _yaw_from_quat(x: float, y: float, z: float, w: float) -> float:
@@ -228,6 +235,8 @@ class OpenDeliveryTfBridgeNode(Node):
         self._initial_pubs: Dict[str, Any] = {}
         self._robot_status_cmd_pubs: Dict[str, Any] = {}
         self._localize_nav_pubs: Dict[str, Any] = {}
+        self._task_info_pubs: Dict[str, Any] = {}
+        self._task_status_subs: Dict[str, Any] = {}
         self._record_relocalization_clients: Dict[str, Any] = {}
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
@@ -635,6 +644,7 @@ class OpenDeliveryTfBridgeNode(Node):
         return "map"
 
     def _ensure_cmd_pubs(self, rid: str) -> None:
+        self._ensure_task_interfaces(rid)
         if rid in self._initial_pubs:
             return
         tpl_init = os.environ.get("ROS_INITIAL_POSE_TOPIC_TEMPLATE", "/{id}/initial")
@@ -646,6 +656,79 @@ class OpenDeliveryTfBridgeNode(Node):
             self.get_logger().info(f"cmd publishers: {topic_i} + RobotStatus {mt}")
         else:
             self.get_logger().info(f"cmd publishers: {topic_i} (RobotStatus unavailable; map switch disabled)")
+
+    def _ensure_task_interfaces(self, rid: str) -> None:
+        if TaskInfo is None or TaskStatus is None:
+            return
+        qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        if rid not in self._task_info_pubs:
+            topic = f"/{rid}/task_info"
+            self._task_info_pubs[rid] = self.create_publisher(TaskInfo, topic, 10)
+            self.get_logger().info(f"task publisher: {topic}")
+        if rid not in self._task_status_subs:
+            topic = f"/{rid}/task_status"
+            self._task_status_subs[rid] = self.create_subscription(
+                TaskStatus, topic, self._make_task_status_cb(rid), qos)
+            self.get_logger().info(f"task status subscriber: {topic}")
+
+    def _make_task_status_cb(self, rid: str):
+        def _cb(msg) -> None:
+            total = int(getattr(msg, "total_count", 0))
+            current = int(getattr(msg, "current_index", 0))
+            status = str(getattr(msg, "task_status", "") or "")
+            progress = 1.0 if status == "Finished" else (
+                min(1.0, max(0.0, float(current) / float(total))) if total > 0 else -1.0
+            )
+            ros_task_store.set_status(rid, {
+                "task_id": str(getattr(msg, "task_id", "") or ""),
+                "task_status": status,
+                "message": str(getattr(msg, "message", "") or ""),
+                "work_queue": [str(value) for value in getattr(msg, "work_queue", [])],
+                "model_status": [str(value) for value in getattr(msg, "model_status", [])],
+                "current_index": current,
+                "total_count": total,
+                "progress": progress,
+                "stamp_sec": int(getattr(msg.header.stamp, "sec", 0)),
+                "stamp_nanosec": int(getattr(msg.header.stamp, "nanosec", 0)),
+            })
+
+        return _cb
+
+    def _publish_navigation_task(self, cmd: Dict[str, Any]) -> None:
+        if TaskInfo is None:
+            raise RuntimeError("TaskInfo type unavailable; rebuild custom_msgs_srvs")
+        rid = str(cmd.get("robot_id") or "").strip()
+        task_id = str(cmd.get("task_id") or "").strip()
+        if not rid or not task_id:
+            raise ValueError("robot_id and task_id are required")
+        self._ensure_task_interfaces(rid)
+        publisher = self._task_info_pubs.get(rid)
+        if publisher is None:
+            raise RuntimeError(f"task publisher unavailable for {rid}")
+        msg = TaskInfo()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._map_frame_for_robot(rid)
+        msg.task_id = task_id
+        msg.task_type = TaskInfo.TASK_TYPE_NAVIGATION
+        msg.task_name = str(cmd.get("task_name") or "Web navigation goal")
+        msg.end_action = TaskInfo.END_ACTION_WAITING
+        floor_id = str(cmd.get("floor_id") or "").strip()
+        if floor_id:
+            msg.floor_ids = [floor_id]
+        pose = Pose()
+        pose.position.x = float(cmd["x"])
+        pose.position.y = float(cmd["y"])
+        yaw = float(cmd.get("yaw") or 0.0)
+        pose.orientation.z = math.sin(yaw / 2.0)
+        pose.orientation.w = math.cos(yaw / 2.0)
+        msg.poses = [pose]
+        publisher.publish(msg)
+        self.get_logger().info(f"publish TaskInfo {task_id} -> /{rid}/task_info")
 
     def _ensure_localize_nav_pub(self, rid: str) -> None:
         if LocalizeNavCommand is None:
@@ -821,6 +904,9 @@ class OpenDeliveryTfBridgeNode(Node):
             return self._record_relocalization(cmd)
         if ctype == "localize_nav_command":
             self._handle_localize_nav_command(cmd)
+            return False
+        if ctype == "navigation_task":
+            self._publish_navigation_task(cmd)
             return False
 
         mode = str(cmd.get("mode") or "").strip()

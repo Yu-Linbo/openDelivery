@@ -205,6 +205,9 @@ def generate_launch_description():
                         executable="task_manager_node",
                         name="task_manager",
                         output="screen",
+                        parameters=[
+                            {"map_root": LaunchConfiguration("semantic_map_root")}
+                        ],
                     ),
                     Node(
                         package="relocalization",

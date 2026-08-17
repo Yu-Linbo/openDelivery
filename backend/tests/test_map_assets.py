@@ -42,7 +42,8 @@ class MapAssetsTest(unittest.TestCase):
             self.map_dir,
             self.floor,
             [
-                {"id": "lift_a", "name": "A 电梯", "type": "elevator", "x": 1, "y": 2},
+                {"id": "lift_a", "name": "电梯内", "type": "elevator_inside", "x": 1, "y": 2},
+                {"id": "lift_wait", "name": "电梯等待", "type": "elevator_waiting", "x": 2, "y": 3},
                 {"id": "wait", "name": "待机", "type": "standby", "x": 3, "y": 4, "yaw": 1.2},
             ],
         )
@@ -50,6 +51,14 @@ class MapAssetsTest(unittest.TestCase):
         self.assertEqual(map_assets.load_points(self.map_dir, self.floor), rows)
         saved = json.loads((self.map_dir / self.floor / "floor1_points.json").read_text())
         self.assertEqual(saved["map"], self.floor)
+
+    def test_legacy_elevator_type_remains_readable(self):
+        rows = map_assets.save_points(
+            self.map_dir,
+            self.floor,
+            [{"id": "legacy", "name": "旧电梯点", "type": "elevator", "x": 1, "y": 2}],
+        )
+        self.assertEqual(rows[0]["type"], "elevator")
 
     def test_rejects_duplicate_or_invalid_points(self):
         with self.assertRaises(ValueError):

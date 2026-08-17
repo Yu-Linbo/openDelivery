@@ -5,6 +5,7 @@
 | 包名 | 说明 |
 |------|------|
 | `nav_bringup` | **仅导航**：Nav2 控制器、规划器、恢复、`bt_navigator`、`waypoint_follower`。栅格通过 `grid_mode` 直连 `/<robot>/map` 或 `/<robot>/mapping`；TF 由 **SLAM** 提供；无 `map_server` / `AMCL`。见 `nav_bringup/README.md`。 |
+| `navigation_tasks` | `TaskInfo/TaskCommand` 到 Nav2 action 的适配层；发布 `TaskStatus`，支持点到点、巡逻和 following。见 `navigation_tasks/README.md`。 |
 
 ## 上游 Nav2 源码（可选）
 
@@ -21,3 +22,6 @@ cd /path/to/openDelivery
 source install/setup.bash
 ros2 launch nav_bringup stack.launch.py robot_name:=robot2 use_sim_time:=true grid_mode:=mapping
 ```
+
+`nav_bringup` 会同时在 `/<robot>/navigation` 下启动 `navigation/task_executor`。业务侧应向
+`/<robot>/task_info` 提交任务，由根 `task_manager` 转发；不要绕过任务状态机直接调用 action。
