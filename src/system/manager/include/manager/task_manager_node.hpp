@@ -76,6 +76,7 @@ private:
   std::string last_robot_status_{"initializing"};
   std::string last_task_status_{"idle"};
   std::string last_current_map_;
+  std::string last_current_position_;
   std::string initial_pose_topic_;
   std::string map_root_;
   custom_msgs_srvs::msg::TaskInfo active_task_;

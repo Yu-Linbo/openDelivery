@@ -59,6 +59,15 @@ bool valid_robot_status(const std::string & s) {
   return k.count(s) > 0;
 }
 
+bool is_elevator_position(const std::string & summary) {
+  const std::string::size_type separator = summary.find(';');
+  const std::string current = to_lower(strip(summary.substr(0, separator)));
+  return current == "elevator" || current == "elevator_inside" ||
+         current == "lift" || current == "电梯" ||
+         current == "电梯内" || current == "电梯区域" ||
+         current == "电梯轿厢";
+}
+
 bool valid_task_status(const std::string & s) {
   static const std::unordered_set<std::string> k{
     "idle", "mapping", "delivery", "cleaning", "patrolling"};
@@ -348,6 +357,7 @@ void TaskManagerNode::on_task_info(
           work_items_.push_back(item);
         };
       size_t begin = 0;
+      bool starts_inside_elevator = is_elevator_position(last_current_position_);
       while (begin < msg->poses.size()) {
         const std::string target_floor = strip(msg->floor_ids[begin]);
         size_t end_index = begin + 1;
@@ -368,17 +378,20 @@ void TaskManagerNode::on_task_info(
           {
             break;
           }
-          append_navigation_pose(
-            source_points.waiting, current_floor,
-            "navigation:elevator_waiting:" + current_floor);
-          append_elevator("call", current_floor, current_floor, source_points, source_points);
-          append_navigation_pose(
-            source_points.inside, current_floor,
-            "navigation:elevator_inside:" + current_floor);
+          if (!starts_inside_elevator) {
+            append_navigation_pose(
+              source_points.waiting, current_floor,
+              "navigation:elevator_waiting:" + current_floor);
+            append_elevator("call", current_floor, current_floor, source_points, source_points);
+            append_navigation_pose(
+              source_points.inside, current_floor,
+              "navigation:elevator_inside:" + current_floor);
+          }
           append_elevator("ride", current_floor, target_floor, source_points, target_points);
           append_navigation_pose(
             reverse_pose(target_points.waiting), target_floor,
             "navigation:elevator_exit:" + target_floor);
+          starts_inside_elevator = false;
         }
         WorkItem navigation;
         navigation.kind = "navigation";
@@ -568,6 +581,7 @@ void TaskManagerNode::on_robot_status_for_gate(const RobotStatusMsg::SharedPtr m
   last_robot_status_ = to_lower(strip(msg->robot_status));
   last_task_status_ = to_lower(strip(msg->task_status));
   last_current_map_ = strip(msg->current_map);
+  last_current_position_ = strip(msg->current_position);
 }
 
 bool TaskManagerNode::send_heartbeat(

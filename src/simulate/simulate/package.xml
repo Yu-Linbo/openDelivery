@@ -17,8 +17,8 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>custom_msgs_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
-  <exec_depend>gazebo_msgs</exec_depend>
 
   <test_depend>ament_cmake_pytest</test_depend>
 

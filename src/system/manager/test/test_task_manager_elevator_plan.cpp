@@ -17,9 +17,13 @@ public:
   static void set_map_root(TaskManagerNode & node, const std::string & root) {
     node.map_root_ = root;
   }
-  static void set_current_floor(TaskManagerNode & node, const std::string & floor) {
+  static void set_robot_location(
+    TaskManagerNode & node, const std::string & floor,
+    const std::string & position = "")
+  {
     auto status = std::make_shared<custom_msgs_srvs::msg::RobotStatus>();
     status->current_map = floor;
+    status->current_position = position;
     node.on_robot_status_for_gate(status);
   }
   static void submit(TaskManagerNode & node, custom_msgs_srvs::msg::TaskInfo::SharedPtr task) {
@@ -100,7 +104,7 @@ protected:
 TEST_F(ElevatorPlanTest, ExpandsCrossFloorGoalIntoCompleteElevatorSequence) {
   auto node = make_node();
   manager::TaskManagerElevatorPlanTestPeer::set_map_root(*node, root_);
-  manager::TaskManagerElevatorPlanTestPeer::set_current_floor(*node, "floor1");
+  manager::TaskManagerElevatorPlanTestPeer::set_robot_location(*node, "floor1");
 
   auto task = std::make_shared<custom_msgs_srvs::msg::TaskInfo>();
   task->task_id = "cross_floor";
@@ -141,10 +145,40 @@ TEST_F(ElevatorPlanTest, ExpandsCrossFloorGoalIntoCompleteElevatorSequence) {
     3.14159265358979323846, 1e-9);
 }
 
+TEST_F(ElevatorPlanTest, StartsRideDirectlyWhenRobotIsAlreadyInsideElevator) {
+  auto node = make_node();
+  manager::TaskManagerElevatorPlanTestPeer::set_map_root(*node, root_);
+  manager::TaskManagerElevatorPlanTestPeer::set_robot_location(
+    *node, "floor1", "电梯区域;大厅:1.25;");
+
+  auto task = std::make_shared<custom_msgs_srvs::msg::TaskInfo>();
+  task->task_id = "cross_floor_from_elevator";
+  task->task_type = "navigation";
+  task->end_action = "waiting";
+  task->floor_ids = {"floor2"};
+  geometry_msgs::msg::Pose goal;
+  goal.position.x = 20.0;
+  goal.position.y = 21.0;
+  goal.orientation.w = 1.0;
+  task->poses = {goal};
+  manager::TaskManagerElevatorPlanTestPeer::submit(*node, task);
+
+  ASSERT_EQ(manager::TaskManagerElevatorPlanTestPeer::size(*node), 3u);
+  EXPECT_EQ(
+    manager::TaskManagerElevatorPlanTestPeer::label(*node, 0),
+    "fake_elevator:ride:floor2");
+  EXPECT_EQ(
+    manager::TaskManagerElevatorPlanTestPeer::label(*node, 1),
+    "navigation:elevator_exit:floor2");
+  EXPECT_EQ(
+    manager::TaskManagerElevatorPlanTestPeer::label(*node, 2),
+    "navigation:goal:floor2");
+}
+
 TEST_F(ElevatorPlanTest, MissingElevatorPointsFailsBeforeDispatch) {
   auto node = make_node();
   manager::TaskManagerElevatorPlanTestPeer::set_map_root(*node, root_);
-  manager::TaskManagerElevatorPlanTestPeer::set_current_floor(*node, "floor1");
+  manager::TaskManagerElevatorPlanTestPeer::set_robot_location(*node, "floor1");
   std::ofstream(root_ + "/floor2/floor2_points.json") << "{\"points\":[]}";
 
   auto task = std::make_shared<custom_msgs_srvs::msg::TaskInfo>();

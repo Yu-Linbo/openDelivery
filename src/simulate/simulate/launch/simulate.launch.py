@@ -282,6 +282,7 @@ def launch_setup(context, *_args, **_kwargs):
                         "use_sim_time": use_sim,
                         "robot_name": ns or robot_name,
                         "map_root": map_root,
+                        "world_path": world_path,
                     }
                 ],
             )

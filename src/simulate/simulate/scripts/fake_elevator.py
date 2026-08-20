@@ -3,16 +3,17 @@
 
 import os
 import math
-import copy
+import json
 from pathlib import Path
-import subprocess
 import threading
+import time
+import xml.etree.ElementTree as ET
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
-from custom_msgs_srvs.msg import ElevatorCommand, ElevatorInfo, ElevatorStatus
+from custom_msgs_srvs.msg import ElevatorCommand, ElevatorInfo, ElevatorStatus, RobotStatus
 from custom_msgs_srvs.srv import Relocalize, SetHeartbeatParams
-from gazebo_msgs.msg import ModelStates
-from gazebo_msgs.srv import SetModelState
-from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose
 from nav2_msgs.srv import LoadMap
 import rclpy
 from rclpy.node import Node
@@ -36,16 +37,24 @@ class FakeElevator(Node):
         self.declare_parameter("call_delay_sec", 3.0)
         self.declare_parameter("ride_delay_sec", 1.0)
         self.declare_parameter("model_z", 0.05)
+        self.declare_parameter(
+            "world_path", os.environ.get("OPEN_DELIVERY_GAZEBO_WORLD", "")
+        )
         self.declare_parameter("relocalize_retry_count", 10)
         self.declare_parameter("relocalize_retry_delay_sec", 0.3)
         self.declare_parameter("map_status_propagation_delay_sec", 0.5)
         self.declare_parameter("service_wait_sec", 10.0)
+        self.declare_parameter(
+            "web_api_base", os.environ.get("OPEN_DELIVERY_API", "http://127.0.0.1:8001")
+        )
+        self.declare_parameter("web_request_timeout_sec", 30.0)
         self.declare_parameter("map_frame", "map")
         self._robot = str(self.get_parameter("robot_name").value).strip().strip("/") or "robot2"
         self._map_root = Path(str(self.get_parameter("map_root").value).strip())
         self._call_delay = max(0.0, float(self.get_parameter("call_delay_sec").value))
         self._delay = max(0.0, float(self.get_parameter("ride_delay_sec").value))
         self._model_z = float(self.get_parameter("model_z").value)
+        self._world_path = Path(str(self.get_parameter("world_path").value).strip())
         self._retry_count = max(1, int(self.get_parameter("relocalize_retry_count").value))
         self._retry_delay = max(
             0.05, float(self.get_parameter("relocalize_retry_delay_sec").value)
@@ -54,6 +63,12 @@ class FakeElevator(Node):
             0.05, float(self.get_parameter("map_status_propagation_delay_sec").value)
         )
         self._service_wait = max(0.1, float(self.get_parameter("service_wait_sec").value))
+        self._web_api_base = str(
+            self.get_parameter("web_api_base").value
+        ).strip().rstrip("/") or "http://127.0.0.1:8001"
+        self._web_timeout = max(
+            1.0, float(self.get_parameter("web_request_timeout_sec").value)
+        )
         self._map_frame = str(self.get_parameter("map_frame").value).strip() or "map"
         status_qos = QoSProfile(depth=10)
         status_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -61,10 +76,8 @@ class FakeElevator(Node):
         self._status_pub = self.create_publisher(ElevatorStatus, "fake_elevator/status", status_qos)
         self.create_subscription(ElevatorInfo, "fake_elevator/info", self._on_info, 10)
         self.create_subscription(ElevatorCommand, "fake_elevator/command", self._on_command, 10)
-        self.create_subscription(PoseWithCovarianceStamped, "amcl_pose", self._on_amcl_pose, 10)
-        self.create_subscription(ModelStates, "/gazebo/model_states", self._on_model_states, 10)
+        self.create_subscription(RobotStatus, "robot_status", self._on_robot_status, 10)
         self._load_map = self.create_client(LoadMap, f"/{self._robot}/map_server/load_map")
-        self._set_model_state = self.create_client(SetModelState, "/gazebo/set_model_state")
         self._heartbeat = self.create_client(
             SetHeartbeatParams, f"/{self._robot}/set_heartbeat_params"
         )
@@ -75,23 +88,12 @@ class FakeElevator(Node):
         self._message = "waiting for elevator task"
         self._generation = 0
         self._timer = None
-        self._map_pose = None
-        self._world_pose = None
+        self._observed_floor = ""
         self._publish()
 
-    def _on_amcl_pose(self, msg):
+    def _on_robot_status(self, msg):
         with self._lock:
-            self._map_pose = copy.deepcopy(msg.pose.pose)
-
-    def _on_model_states(self, msg):
-        try:
-            index = list(msg.name).index(self._robot)
-        except ValueError:
-            return
-        if index >= len(msg.pose):
-            return
-        with self._lock:
-            self._world_pose = copy.deepcopy(msg.pose[index])
+            self._observed_floor = str(msg.current_map).strip()
 
     @staticmethod
     def _yaw(pose):
@@ -101,74 +103,183 @@ class FakeElevator(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
 
-    @classmethod
-    def _map_pose_to_world(cls, target, current_map, current_world):
-        """Apply T_world_base * inverse(T_map_base) to a map-frame target."""
-        map_yaw = cls._yaw(current_map)
-        world_yaw = cls._yaw(current_world)
-        offset_yaw = world_yaw - map_yaw
-        dx = target.position.x - current_map.position.x
-        dy = target.position.y - current_map.position.y
-        co = math.cos(offset_yaw)
-        so = math.sin(offset_yaw)
+    @staticmethod
+    def _pgm_size(path):
+        """Read a PGM header without adding image-library runtime dependencies."""
+        tokens = []
+        with path.open("rb") as stream:
+            while len(tokens) < 4:
+                line = stream.readline()
+                if not line:
+                    break
+                tokens.extend(line.split(b"#", 1)[0].split())
+        if len(tokens) < 4 or tokens[0] not in (b"P2", b"P5"):
+            raise RuntimeError(f"invalid PGM map: {path}")
+        width, height = int(tokens[1]), int(tokens[2])
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"invalid PGM dimensions: {path}")
+        return width, height
+
+    @staticmethod
+    def _map_metadata(yaml_path):
+        values = {}
+        for raw in yaml_path.read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if ":" in line:
+                key, value = line.split(":", 1)
+                values[key.strip()] = value.strip()
+        try:
+            resolution = float(values["resolution"])
+            origin = [float(v.strip()) for v in values["origin"].strip("[]").split(",")]
+            image = values["image"].strip("'\"")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid map metadata: {yaml_path}") from exc
+        if resolution <= 0.0 or len(origin) < 3:
+            raise RuntimeError(f"invalid map metadata: {yaml_path}")
+        image_path = Path(image)
+        if not image_path.is_absolute():
+            image_path = yaml_path.parent / image_path
+        width, height = FakeElevator._pgm_size(image_path)
+        return resolution, origin[:3], width, height
+
+    def _floor_world_pose(self, floor):
+        if not self._world_path.is_file():
+            raise RuntimeError(f"Gazebo world file missing: {self._world_path}")
+        try:
+            root = ET.parse(str(self._world_path)).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise RuntimeError(f"invalid Gazebo world file {self._world_path}: {exc}") from exc
+        matches = []
+        for include in root.findall(".//include"):
+            name = (include.findtext("name") or "").strip()
+            uri = (include.findtext("uri") or "").strip()
+            if name == floor or uri == f"model://{floor}":
+                raw = (include.findtext("pose") or "0 0 0 0 0 0").split()
+                if len(raw) != 6:
+                    raise RuntimeError(f"invalid Gazebo pose for floor {floor}")
+                try:
+                    matches.append(tuple(float(value) for value in raw))
+                except ValueError as exc:
+                    raise RuntimeError(f"invalid Gazebo pose for floor {floor}") from exc
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Gazebo world requires exactly one {floor} model, found {len(matches)}"
+            )
+        return matches[0]
+
+    def _target_world_pose(self, floor, target):
+        """Convert map pose using the centered-STL floor generation contract."""
+        yaml_path = self._map_root / floor / f"{floor}.yaml"
+        try:
+            resolution, origin, width, height = self._map_metadata(yaml_path)
+            floor_x, floor_y, _z, _roll, _pitch, floor_yaw = self._floor_world_pose(floor)
+        except (OSError, RuntimeError) as exc:
+            self._pose_conversion_error = str(exc)
+            return None
+        map_yaw = origin[2]
+        center_x = origin[0] + math.cos(map_yaw) * width * resolution / 2.0 \
+            - math.sin(map_yaw) * height * resolution / 2.0
+        center_y = origin[1] + math.sin(map_yaw) * width * resolution / 2.0 \
+            + math.cos(map_yaw) * height * resolution / 2.0
+        dx = target.position.x - center_x
+        dy = target.position.y - center_y
+        relative_yaw = floor_yaw - map_yaw
+        co = math.cos(relative_yaw)
+        so = math.sin(relative_yaw)
         result = Pose()
-        result.position.x = current_world.position.x + co * dx - so * dy
-        result.position.y = current_world.position.y + so * dx + co * dy
-        result.position.z = current_world.position.z
-        yaw = cls._yaw(target) + offset_yaw
+        result.position.x = floor_x + co * dx - so * dy
+        result.position.y = floor_y + so * dx + co * dy
+        result.position.z = self._model_z
+        yaw = self._yaw(target) + relative_yaw
         result.orientation.z = math.sin(yaw / 2.0)
         result.orientation.w = math.cos(yaw / 2.0)
+        self._pose_conversion_error = ""
         return result
 
-    def _target_world_pose(self, target):
-        with self._lock:
-            current_map = copy.deepcopy(self._map_pose)
-            current_world = copy.deepcopy(self._world_pose)
-        if current_map is None:
-            self._pose_conversion_error = "AMCL map pose unavailable"
-            return None
-        if current_world is None:
-            current_world = self._native_world_pose()
-        if current_world is None:
-            self._pose_conversion_error = "Gazebo world pose unavailable"
-            return None
-        self._pose_conversion_error = ""
-        return self._map_pose_to_world(target, current_map, current_world)
+    def _web_json(self, path, payload=None):
+        body = None
+        headers = {}
+        method = "GET"
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+            method = "POST"
+        req = urlrequest.Request(
+            self._web_api_base + path, data=body, headers=headers, method=method
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=self._web_timeout) as response:
+                raw = response.read().decode("utf-8")
+                data = json.loads(raw or "{}")
+        except urlerror.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+            except Exception:  # noqa: BLE001
+                detail = ""
+            raise RuntimeError(
+                f"Web API {path} failed ({exc.code}): {detail or exc.reason}"
+            ) from exc
+        except (urlerror.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Web API {path} unavailable: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Web API {path} returned a non-object response")
+        return data
 
-    def _native_world_pose(self):
-        """Read the model pose through Gazebo transport if model_states is undiscovered."""
+    def _target_inside_pose(self, floor):
+        points_path = self._map_root / floor / f"{floor}_points.json"
         try:
-            result = subprocess.run(
-                ["gz", "model", "-m", self._robot, "-p"],
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-                check=False,
+            data = json.loads(points_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"elevator points file missing: {points_path}") from exc
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"invalid elevator points file {points_path}: {exc}") from exc
+        rows = data.get("points") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError(f"elevator points file has no points array: {points_path}")
+        matches = [
+            row for row in rows
+            if isinstance(row, dict) and
+            str(row.get("type") or "").strip().lower() in ("elevator", "elevator_inside")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"{floor} requires exactly one elevator_inside point, found {len(matches)}"
             )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
+        row = matches[0]
         try:
-            values = [float(value) for value in result.stdout.strip().split()[-6:]]
-        except (TypeError, ValueError):
-            return None
-        if len(values) != 6:
-            return None
-        x, y, z, roll, pitch, yaw = values
+            x = float(row["x"])
+            y = float(row["y"])
+            yaw = float(row.get("yaw", 0.0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"{floor} elevator_inside point is invalid") from exc
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            raise RuntimeError(f"{floor} elevator_inside point must be finite")
         pose = Pose()
         pose.position.x = x
         pose.position.y = y
-        pose.position.z = z
-        # The robot is planar, but retain a valid quaternion if Gazebo reports tilt.
-        cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
-        cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
-        cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
-        pose.orientation.x = sr * cp * cy - cr * sp * sy
-        pose.orientation.y = cr * sp * cy + sr * cp * sy
-        pose.orientation.z = cr * cp * sy - sr * sp * cy
-        pose.orientation.w = cr * cp * cy + sr * sp * sy
+        pose.orientation.z = math.sin(yaw / 2.0)
+        pose.orientation.w = math.cos(yaw / 2.0)
         return pose
+
+    def _move_model_through_web(self, pose):
+        yaw = self._yaw(pose)
+        response = self._web_json(
+            "/api/gazebo/set_model_state",
+            {
+                "model_name": self._robot,
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "z": float(self._model_z),
+                "yaw": float(yaw),
+                "reference_frame": "world",
+            },
+        )
+        if not response.get("ok"):
+            raise RuntimeError(
+                "Web set_model_state returned failure: " +
+                str(response.get("error") or response)
+            )
+        return response
 
     def _on_info(self, msg):
         operation = str(msg.operation).strip().lower()
@@ -271,7 +382,12 @@ class FakeElevator(Node):
             self._status = ElevatorStatus.STATUS_MOVING_MODEL
             self._message = f"moving Gazebo model to {self._info.target_floor} elevator interior"
             self._publish()
-            target_pose = self._target_world_pose(self._info.target_inside_pose)
+            try:
+                target_inside_pose = self._target_inside_pose(target)
+            except RuntimeError as exc:
+                self._finish(generation, ElevatorStatus.STATUS_FAILED, str(exc))
+                return
+            target_pose = self._target_world_pose(target, target_inside_pose)
         if target_pose is None:
             self._finish(
                 generation,
@@ -295,62 +411,19 @@ class FakeElevator(Node):
                 f"{unavailable} service unavailable",
             )
             return
-        if not self._set_model_state.wait_for_service(timeout_sec=self._service_wait):
-            self.get_logger().warning(
-                "/gazebo/set_model_state unavailable; using Gazebo native transport"
-            )
-            self._move_model_native(target_pose, generation)
-            return
-        request = SetModelState.Request()
-        request.model_state.model_name = self._robot
-        request.model_state.pose = target_pose
-        request.model_state.pose.position.z = self._model_z
-        request.model_state.reference_frame = "world"
-        self._set_model_state.call_async(request).add_done_callback(
-            lambda future: self._model_moved(future, generation)
-        )
-
-    def _move_model_native(self, pose, generation):
-        """Move through Gazebo transport when this ROS process cannot discover the service."""
-        yaw = self._yaw(pose)
-        command = [
-            "gz", "model", "-m", self._robot,
-            "-x", str(float(pose.position.x)),
-            "-y", str(float(pose.position.y)),
-            "-z", str(float(self._model_z)),
-            "-R", "0.0", "-P", "0.0", "-Y", str(float(yaw)),
-        ]
         try:
-            result = subprocess.run(
-                command, capture_output=True, text=True, timeout=8.0, check=False
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            self._finish(generation, ElevatorStatus.STATUS_FAILED, f"gz model exception: {exc}")
-            return
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "gz model failed").strip()
-            self._finish(generation, ElevatorStatus.STATUS_FAILED, f"gz model failed: {detail}")
-            return
-        self._switch_map(generation)
-
-    def _model_moved(self, future, generation):
-        if not self._active(generation):
-            return
-        try:
-            response = future.result()
-            if response is None or not response.success:
-                detail = response.status_message if response is not None else "empty response"
-                self._finish(
-                    generation, ElevatorStatus.STATUS_FAILED,
-                    f"set_model_state failed: {detail}",
-                )
-                return
-        except Exception as exc:  # noqa: BLE001
+            response = self._move_model_through_web(target_pose)
+        except RuntimeError as exc:
             self._finish(
                 generation, ElevatorStatus.STATUS_FAILED,
-                f"set_model_state exception: {exc}",
+                f"Web Gazebo move failed: {exc}",
             )
             return
+        self.get_logger().info(
+            f"Web Gazebo move succeeded: {self._robot} -> "
+            f"x={float(response.get('x', target_pose.position.x)):.3f} "
+            f"y={float(response.get('y', target_pose.position.y)):.3f}"
+        )
         self._switch_map(generation)
 
     def _switch_map(self, generation):
@@ -408,18 +481,48 @@ class FakeElevator(Node):
         except Exception as exc:  # noqa: BLE001
             self._finish(generation, ElevatorStatus.STATUS_FAILED, f"heartbeat exception: {exc}")
             return
-        # The heartbeat service response precedes delivery of RobotStatus to
-        # other nodes.  Loading immediately can publish the new OccupancyGrid
-        # while relocalization still labels it with the previous floor.
+        # Service success only means the update was accepted.  Wait until this
+        # node observes the target RobotStatus, then allow other subscribers the
+        # normal propagation delay before publishing the new OccupancyGrid.
         with self._lock:
             if generation != self._generation:
                 return
-            self._message = "waiting for floor status propagation before loading map"
+            self._message = "waiting to observe target floor before loading map"
             self._publish()
             self._cancel_timer()
             self._timer = self.create_timer(
-                self._map_status_delay,
-                lambda: self._load_target_map(generation, yaml_path),
+                0.1,
+                lambda: self._wait_for_target_floor(
+                    generation, yaml_path, time.monotonic()
+                ),
+            )
+
+    def _wait_for_target_floor(self, generation, yaml_path, started_at):
+        with self._lock:
+            self._cancel_timer()
+            if generation != self._generation or not self._info:
+                return
+            target = str(self._info.target_floor).strip()
+            observed = self._observed_floor
+            elapsed = time.monotonic() - started_at
+            if observed == target:
+                self._message = "target floor observed; waiting for subscriber propagation"
+                self._publish()
+                self._timer = self.create_timer(
+                    self._map_status_delay,
+                    lambda: self._load_target_map(generation, yaml_path),
+                )
+                return
+            if elapsed >= self._service_wait:
+                self._finish(
+                    generation, ElevatorStatus.STATUS_FAILED,
+                    f"target floor status not observed: expected {target}, "
+                    f"got {observed or 'empty'}",
+                )
+                return
+            self._timer = self.create_timer(
+                0.1,
+                lambda: self._wait_for_target_floor(generation, yaml_path, started_at),
             )
 
     def _load_target_map(self, generation, yaml_path):
