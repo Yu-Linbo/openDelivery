@@ -32,6 +32,14 @@ LIFECYCLE_TRANSITIONS = {"configure", "activate", "deactivate", "cleanup", "shut
 LIFECYCLE_STATE_RE = re.compile(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)")
 
 
+LOCALIZATION_METHODS = {"slam_toolbox", "gazebo_ground_truth", "amcl"}
+
+
+def _persisted_localization_method(last: Optional[Dict[str, Any]]) -> str:
+    method = str((last or {}).get("localization_method") or "").strip().lower()
+    return method if method in LOCALIZATION_METHODS else "slam_toolbox"
+
+
 def _persisted_auto_mapping(last: Optional[Dict[str, Any]]) -> bool:
     if not last:
         return False
@@ -743,13 +751,6 @@ class RobotLifecycleOrchestrator:
 
         sim_running = self._sim_managed_running(rid)
         boot_age = starting_age_sec if starting_age_sec is not None else 0.0
-        if sim_running and not recovery_needed and boot_age < boot_grace_sec:
-            # sim_bringup.sh still running within grace window — idempotent wait.
-            with self._lock:
-                self._last_error = ""
-            return self.status(rid)
-
-        force_restart = sim_running and (recovery_needed or boot_age >= boot_grace_sec)
         last: Dict[str, Any] = {}
         try:
             import ros_robot_status_store
@@ -758,7 +759,26 @@ class RobotLifecycleOrchestrator:
         except Exception:
             last = {}
         last_rs = str(last.get("robot_status") or "").strip().lower()
+        restart_after_shutdown = last_rs == "shutdown"
+        if (
+            sim_running
+            and not recovery_needed
+            and not restart_after_shutdown
+            and boot_age < boot_grace_sec
+        ):
+            # sim_bringup.sh still running within grace window — idempotent wait.
+            # A persisted shutdown is different: the wrapper may still exist,
+            # but its lifecycle nodes were intentionally stopped and must be
+            # relaunched to apply a changed localization backend.
+            with self._lock:
+                self._last_error = ""
+            return self.status(rid)
+
+        force_restart = sim_running and (
+            recovery_needed or restart_after_shutdown or boot_age >= boot_grace_sec
+        )
         auto_mapping = _persisted_auto_mapping(last)
+        localization_method = _persisted_localization_method(last)
         try:
             slot, spawn_pose = self._spawn_pose_for_robot(rid)
             self._ensure_simulation_world()
@@ -804,6 +824,7 @@ class RobotLifecycleOrchestrator:
                     "simulate_started": True,
                     "heartbeat_started": True,
                     "slam_mode": "mapping" if auto_mapping else "localize",
+                    "localization_method": localization_method,
                     "navigation_started": True,
                     "sim_mode": sim_mode,
                     "last_persisted_robot_status": last_rs or None,
@@ -935,7 +956,11 @@ class RobotLifecycleOrchestrator:
                         localizing_state = self._lifecycle_get(f"{slam_ns}/localizing").get("state")
                         if mapping_present:
                             lifecycle_state = "mapping"
-                        elif localizing_state == "active":
+                        elif f"{slam_ns}/localizing" in discovered_names and (
+                            localizing_state == "active" or localizing_state == "missing"
+                        ):
+                            # gazebo_ground_truth is intentionally a plain ROS node;
+                            # slam_toolbox/AMCL expose lifecycle services.
                             lifecycle_state = "localize"
                         elif lifecycle_state not in ("mapping", "localize"):
                             lifecycle_state = "inactive"
@@ -975,6 +1000,7 @@ class RobotLifecycleOrchestrator:
                     "display_name": self._display_name_for_robot(rid, persisted),
                     "sim_mode": online_state.get("sim_mode", "sim"),
                     "persisted_from_store": persisted,
+                    "localization_method": _persisted_localization_method(persisted),
                     "will_auto_start_mapping_on_sim_bringup": will_auto_mapping,
                     "last_persisted_robot_status_at_bringup": online_state.get(
                         "last_persisted_robot_status"

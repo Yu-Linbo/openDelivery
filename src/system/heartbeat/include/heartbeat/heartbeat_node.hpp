@@ -24,6 +24,7 @@ private:
   static std::string normalize_robot_status(const std::string & v);
   static std::string normalize_task_status(const std::string & v);
   static std::string normalize_control_status(const std::string & v);
+  static std::string normalize_localization_method(const std::string & v);
   std::string resolved_robot_status_value();
   std::string resolved_task_status_value();
   void recreate_timer_locked();

@@ -91,6 +91,16 @@ add_executable(stack_lifecycle_manager_node
   src/stack_lifecycle_manager_node.cpp
 )
 
+add_executable(tf_localization_pose_node
+  src/tf_localization_pose_node.cpp
+)
+ament_target_dependencies(tf_localization_pose_node
+  rclcpp
+  geometry_msgs
+  tf2
+  tf2_ros
+)
+
 target_include_directories(stack_lifecycle_manager_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -102,7 +112,7 @@ ament_target_dependencies(stack_lifecycle_manager_node
   ament_index_cpp
 )
 
-install(TARGETS health_monitor_node semantic_location_query_node semantic_location_query_example task_manager_node stack_lifecycle_manager_node
+install(TARGETS health_monitor_node semantic_location_query_node semantic_location_query_example task_manager_node stack_lifecycle_manager_node tf_localization_pose_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config

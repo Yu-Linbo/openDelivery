@@ -97,8 +97,9 @@ log "simulate: shared Gazebo start_gazebo=${START_GZ} spawn_robot=true pose=(${S
 STORE="${OPEN_DELIVERY_STATUS_DB_PATH:-${ROOT}/backend/data/robot_status_last.json}"
 AUTO_MAPPING=0
 PERSISTED_MAP=""
+LOCALIZATION_METHOD="slam_toolbox"
 if [[ -f "${STORE}" ]]; then
-  # Prints: <auto_mapping 0|1> <current_map>
+  # Prints pipe-separated: <auto_mapping 0|1>|<current_map>|<localization_method>
   _persist="$(python3 -c "
 import json, sys
 rid, path = sys.argv[1], sys.argv[2]
@@ -108,17 +109,16 @@ try:
     e = d.get(rid) or {}
     s = str(e.get('task_status') or '').strip().lower()
     cm = str(e.get('current_map') or '').strip()
-    print(('1' if s == 'mapping' else '0') + ' ' + cm)
+    lm = str(e.get('localization_method') or 'slam_toolbox').strip().lower()
+    if lm not in ('slam_toolbox', 'gazebo_ground_truth', 'amcl'):
+        lm = 'slam_toolbox'
+    print(('1' if s == 'mapping' else '0') + '|' + cm + '|' + lm)
 except Exception:
-    print('0 ')
+    print('0||slam_toolbox')
 " "${RID}" "${STORE}")"
-  AUTO_MAPPING="${_persist%% *}"
-  PERSISTED_MAP="${_persist#* }"
-  if [[ "${PERSISTED_MAP}" == "${AUTO_MAPPING}" ]]; then
-    PERSISTED_MAP=""
-  fi
+  IFS='|' read -r AUTO_MAPPING PERSISTED_MAP LOCALIZATION_METHOD <<< "${_persist}"
 fi
-log "AUTO_MAPPING=${AUTO_MAPPING} (from persisted robot_status in ${STORE})"
+log "AUTO_MAPPING=${AUTO_MAPPING} LOCALIZATION_METHOD=${LOCALIZATION_METHOD} (from ${STORE})"
 
 resolve_floor_map_yaml() {
   # Args: preferred floor name. Echo absolute yaml path or empty.
@@ -193,6 +193,7 @@ ros2 launch system startup.launch.py \
   "current_map:=${HB_CURRENT_MAP}" \
   "robot_status:=initializing" \
   "control_status:=AUTO" \
+  "localization_method:=${LOCALIZATION_METHOD}" \
   "sim_mode:=${SIM_MODE}" \
   "mapping_mode:=false" \
   "publish_rate:=2.0" \
@@ -276,6 +277,7 @@ ros2 launch manager manager.launch.py \
   "semantic_location_params_file:=${ROOT}/params/params/${ROBOT_MODEL}/semantic_location.yaml" \
   "semantic_map_root:=${ROOT}/map" \
   "use_sim_time:=true" \
+  "localization_method:=${LOCALIZATION_METHOD}" \
   "initial_slam_mode:=${SLAM_INITIAL_MODE}" \
   "${MANAGER_EXTRA[@]}" &
 log "started manager.launch.py (health_monitor+task_manager+lifecycle_manager, pid $!) namespace=${RID} slam=${SLAM_INITIAL_MODE}"

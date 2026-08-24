@@ -3721,7 +3721,7 @@ async function initMonitor() {
     const payload = {
       type: "localize_nav_command",
       robot_id: rid,
-      map_name: "",
+      map_name: targetMapName(),
       set_initial_pose: mode === "pose_only" || mode === "both",
       x: 0,
       y: 0,

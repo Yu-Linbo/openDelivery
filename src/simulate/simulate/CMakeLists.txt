@@ -24,7 +24,6 @@ install(PROGRAMS scripts/fake_elevator.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME fake_elevator
 )
-
 install(DIRECTORY launch urdf worlds model
   DESTINATION share/${PROJECT_NAME}
 )

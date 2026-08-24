@@ -30,6 +30,12 @@ string CONTROL_STATUS_JOY=JOY
 string CONTROL_STATUS_MANUAL=MANUAL
 string control_status
 
+# --- localization_method: active pose-estimation backend ---
+string LOCALIZATION_METHOD_SLAM_TOOLBOX=slam_toolbox
+string LOCALIZATION_METHOD_GAZEBO_GROUND_TRUTH=gazebo_ground_truth
+string LOCALIZATION_METHOD_AMCL=amcl
+string localization_method
+
 # true: 来自仿真栈；false: 真机或未知（旧节点未填时桥接侧按 false 处理）
 bool is_simulation
 

@@ -41,6 +41,11 @@ def generate_launch_description():
                 default_value="AUTO",
                 description="RobotStatus.control_status: AUTO|JOY|MANUAL.",
             ),
+            DeclareLaunchArgument(
+                "localization_method",
+                default_value="slam_toolbox",
+                description="RobotStatus.localization_method: slam_toolbox|gazebo_ground_truth|amcl.",
+            ),
             DeclareLaunchArgument("sim_mode", default_value="sim"),
             DeclareLaunchArgument(
                 "mapping_mode",
@@ -64,6 +69,7 @@ def generate_launch_description():
                                 "robot_status": LaunchConfiguration("robot_status"),
                                 "task_status": LaunchConfiguration("task_status"),
                                 "control_status": LaunchConfiguration("control_status"),
+                                "localization_method": LaunchConfiguration("localization_method"),
                                 "sim_mode": LaunchConfiguration("sim_mode"),
                                 "mapping_mode": LaunchConfiguration("mapping_mode"),
                                 "publish_rate": LaunchConfiguration("publish_rate"),

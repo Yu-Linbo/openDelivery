@@ -18,7 +18,8 @@ These endpoints are used by `web/app.js`.
 
 - `GET /api/robot/status/cache`
   - Purpose: list known robots from persisted status plus live pose/managed process state. The Web robot selector filters this response to `online: true`.
-  - Returns: `{ items: [...] }`.
+  - Returns: `{ items: [...] }`; each item includes `localization_method`
+    (`slam_toolbox`, `gazebo_ground_truth`, or legacy `amcl`).
 
 - `GET /api/robot/pose`
   - Purpose: current pose snapshot.
@@ -54,7 +55,9 @@ These endpoints are used by `web/app.js`.
 
 - `POST /api/mapping/save`
   - Body: `{ "map_name": "...", "robot_id": "robot2" }`
-  - Purpose: save current mapping result.
+  - Purpose: save the current occupancy grid and slam_toolbox pose graph.
+  - Returns: `yaml`, `pgm`, `pose_graph` and `pose_graph_data` paths; the request
+    fails if either pose-graph file was not produced.
 
 - `GET /api/maps/{floor}/assets`
   - Purpose: load semantic PNG/legend and map-scoped semantic points.

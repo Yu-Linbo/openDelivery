@@ -8,6 +8,13 @@
       <real_time_factor>1</real_time_factor>
     </physics>
 
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so">
+      <ros>
+        <namespace>/gazebo</namespace>
+      </ros>
+      <update_rate>50.0</update_rate>
+    </plugin>
+
     <include>
       <uri>model://ground_plane</uri>
     </include>

@@ -1,15 +1,17 @@
 # OpenDelivery
 
-ROS 2 多机器人配送实验工作区，包含 Gazebo、GMapping + AMCL、Nav2、状态管理和 Web 控制台。源码在 `src/`，构建产物在 `build/`、`install/`（已加入 `.gitignore`）。
+ROS 2 多机器人配送实验工作区，包含 Gazebo、slam_toolbox、可切换定位、Nav2、状态管理和 Web 控制台。源码在 `src/`，构建产物在 `build/`、`install/`（已加入 `.gitignore`）。
 
 ## 技术路线
 
-- **建图与定位**：GMapping + AMCL
+- **建图与真实定位**：`slam_toolbox`（Ceres pose graph + scan matching）
+- **仿真真值定位**：Gazebo `ModelStates` → 精确 `map→odom`
+- **旧地图兼容定位**：`nav2_amcl`
 - **导航**：`nav2`（Navigation2）
 - **地图加载**：`nav2_map_server`（`map_server`）
-- **不再使用**：RTAB-Map
+- **不再默认使用**：GMapping、RTAB-Map
 
-GMapping 以项目内源码维护，AMCL 使用 ROS 2 Foxy 的 `nav2_amcl` 系统包。
+GMapping 源码仍保留作历史兼容；新建图默认使用 ROS 2 Foxy 的 `slam_toolbox`。
 
 ## 单机节点一览（仿真上线）
 
@@ -50,8 +52,8 @@ sim_bringup / launch
 | `task_manager` | 订阅根 `task_info/task_command`，向导航层分发任务并汇总 `task_status`；兼容 `localize_nav_command` / `set_robot_task`，发布 `/robot2/initial` |
 | `slam/lifecycle_manager` | 整机级：切换 SLAM mapping/localize/inactive；跟踪 heartbeat 与导航 lifecycle 状态 |
 | **SLAM（同时只跑一种）** | |
-| `slam/mapping` | GMapping 建图；出 `/robot2/mapping` 与 `map→odom` |
-| `slam/localizing` | AMCL 定位；出 `/robot2/map` 与 `map→odom`；听 `/robot2/initial`（remap 自 `initialpose`） |
+| `slam/mapping` | slam_toolbox 同步建图；出 `/robot2/mapping` 与 `map→odom` |
+| `slam/localizing` | 由 `localization_method` 选择 slam_toolbox、Gazebo 真值或旧地图 AMCL；统一出 `map→odom` 与 `/robot2/amcl_pose` 兼容接口 |
 | **仿真本体** | |
 | `simulate/robot_state_publisher` | 由 URDF 发布 `robot2/*` 连杆 TF |
 | `simulate/spawn_entity` | 一次性把模型刷进 Gazebo（短生命周期） |
@@ -93,8 +95,22 @@ sim_bringup / launch
 
 ## 源码依赖
 
-GMapping 源码位于 `src/slam/slam_gmapping`，基于 ROS 2 `eloquent-devel` 端口并补充多机器人 frame 参数。
+GMapping 源码仍位于 `src/slam/slam_gmapping`，但默认建图已切换为系统包 `slam_toolbox`。
 Nav2 使用系统 ROS 安装提供的包，不需要把 Navigation2 源码复制到本工作区。
+
+## 定位后端配置
+
+`backend/data/robot_status_last.json` 的每个机器人对象可配置
+`localization_method`，仿真上线时由 `sim_bringup.sh` 读取：
+
+- `slam_toolbox`：真实激光/里程计定位；要求同名地图目录同时存在
+  `<map>.yaml`、`<map>.pgm`、`<map>.posegraph`、`<map>.data`。
+- `gazebo_ground_truth`：仅用于仿真；从 `/gazebo/model_states` 读取模型真值，
+  结合 `odom→base_footprint` 发布精确 `map→odom`。
+- `amcl`：旧 `.pgm/.yaml` 地图兼容后端。
+
+Web 保存新地图时会先写 PGM/YAML，再调用 `/<robot>/slam/serialize_map` 写 pose graph；
+缺少任一序列化文件会明确报错。
 
 ## 仿真与 SLAM 联调（简要）
 
@@ -204,4 +220,4 @@ Web 地图选点
 - `backend/API.md`：HTTP API 契约与安全语义。
 - `src/README.md`：ROS 包、TF、构建和运行流程。
 - `src/navigation/nav_bringup/README.md`：Nav2 启动细节。
-- `src/slam/slam_gmapping/README.md`：GMapping / AMCL 输入输出接口。
+- `src/slam/slam_gmapping/README.md`：slam_toolbox、Gazebo 真值与 AMCL 兼容接口。

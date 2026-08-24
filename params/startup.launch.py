@@ -21,6 +21,7 @@ def generate_launch_description():
             DeclareLaunchArgument("mapping_mode", default_value="false"),
             DeclareLaunchArgument("publish_rate", default_value="2.0"),
             DeclareLaunchArgument("control_status", default_value="AUTO"),
+            DeclareLaunchArgument("localization_method", default_value="slam_toolbox"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
             DeclareLaunchArgument("max_bag_bytes", default_value="5242880"),
             DeclareLaunchArgument("enable_fake_pub", default_value="true"),
@@ -54,6 +55,7 @@ def generate_launch_description():
                     ("mapping_mode", LaunchConfiguration("mapping_mode")),
                     ("publish_rate", LaunchConfiguration("publish_rate")),
                     ("control_status", LaunchConfiguration("control_status")),
+                    ("localization_method", LaunchConfiguration("localization_method")),
                 ],
             ),
             IncludeLaunchDescription(

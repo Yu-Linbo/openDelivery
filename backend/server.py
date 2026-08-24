@@ -2243,6 +2243,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             except ValueError as err:
                 self._send_json({"error": str(err)}, 400)
                 return
+            robot_id = str(data.get("robot_id") or "").strip()
+            if robot_id and not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", robot_id):
+                self._send_json({"error": "robot_id must match safe namespace id"}, 400)
+                return
             map_topic = ""
             raw_topic = data.get("map_topic")
             if raw_topic is not None and str(raw_topic).strip():
@@ -2251,13 +2255,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 except ValueError as err:
                     self._send_json({"error": str(err)}, 400)
                     return
-            else:
-                robot_id = str(data.get("robot_id") or "").strip()
-                if robot_id:
-                    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", robot_id):
-                        self._send_json({"error": "robot_id must match safe namespace id"}, 400)
-                        return
-                    map_topic = f"/{robot_id}/mapping"
+            elif robot_id:
+                map_topic = f"/{robot_id}/mapping"
             map_topic_args = f"-t {shlex.quote(map_topic)} " if map_topic else ""
             out_dir = (MAP_DIR / safe_name).resolve()
             prefix = (out_dir / safe_name).resolve()
@@ -2310,6 +2309,63 @@ class ApiHandler(BaseHTTPRequestHandler):
             except OSError as err:
                 self._send_json({"error": f"cannot normalize map yaml: {err}"}, 500)
                 return
+            pose_graph_path = None
+            if robot_id:
+                pose_graph_base = str(prefix)
+                serialize_request = shlex.quote(
+                    "{filename: " + json.dumps(pose_graph_base) + "}"
+                )
+                serialize_cmd = (
+                    f'set -eo pipefail; '
+                    f'source "/opt/ros/{ros_distro}/setup.bash"; '
+                    f'cd {shlex.quote(root)} && {install_src}; '
+                    f'timeout 45s ros2 service call /{robot_id}/slam/serialize_map '
+                    f'slam_toolbox/srv/SerializePoseGraph {serialize_request}'
+                )
+                try:
+                    serialize_proc = subprocess.run(
+                        ["bash", "-lc", serialize_cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=55,
+                        env=os.environ.copy(),
+                    )
+                except subprocess.TimeoutExpired:
+                    self._send_json(
+                        {
+                            "error": "pose graph serialization timed out",
+                            "yaml": str(yaml_path.resolve()),
+                            "pgm": str(pgm_path.resolve()),
+                        },
+                        504,
+                    )
+                    return
+                pose_graph = Path(f"{prefix}.posegraph")
+                pose_data = Path(f"{prefix}.data")
+                if (
+                    serialize_proc.returncode != 0
+                    or not pose_graph.is_file()
+                    or not pose_data.is_file()
+                ):
+                    err = (
+                        serialize_proc.stderr
+                        or serialize_proc.stdout
+                        or "slam_toolbox serialize_map failed"
+                    ).strip()
+                    self._send_json(
+                        {
+                            "error": err,
+                            "code": serialize_proc.returncode,
+                            "yaml": str(yaml_path.resolve()),
+                            "pgm": str(pgm_path.resolve()),
+                        },
+                        500,
+                    )
+                    return
+                pose_graph_path = str(pose_graph.resolve())
+                pose_graph_data = str(pose_data.resolve())
+            else:
+                pose_graph_data = None
             self._send_json(
                 {
                     "ok": True,
@@ -2317,6 +2373,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "map_dir": str(out_dir),
                     "yaml": str(yaml_path.resolve()),
                     "pgm": str(pgm_path.resolve()),
+                    "pose_graph": pose_graph_path,
+                    "pose_graph_data": pose_graph_data,
                     "map_topic": map_topic or "/map",
                 }
             )

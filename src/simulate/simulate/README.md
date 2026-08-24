@@ -2,6 +2,14 @@
 
 本包除 Gazebo 机器人、传感器和世界外，还包含临时换层节点 `fake_elevator`。
 
+## Gazebo 真值定位
+
+真值定位实现已独立放在
+`src/slam/gazebo_ground_truth_localization`。本仿真包只负责在 world 中加载
+`libgazebo_ros_state.so`，为该定位后端提供 `/gazebo/model_states`。
+配置和接口说明见真值定位包 README；真实机器人不得使用此后端。
+
+
 ## fake_elevator
 
 节点由 `simulate.launch.py` 随机器人实体启动，位于 `/<robot>/fake_elevator`。它保持一套可被

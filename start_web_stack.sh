@@ -18,26 +18,63 @@ if ! python3 -c "from PIL import Image" >/dev/null 2>&1; then
   exit 1
 fi
 
-# Ensure custom message package is available for web/ROS bridge.
-if [ -f "${ROOT_DIR}/install/setup.bash" ]; then
-  # shellcheck disable=SC1090
-  # `install/setup.bash` may reference optional env vars that are not set.
-  # Since this script runs with `set -u`, temporarily disable it while sourcing.
-  set +u
-  source "${ROOT_DIR}/install/setup.bash"
-  set -u
-  if ! python3 -c "from custom_msgs_srvs.msg import RobotStatus" >/dev/null 2>&1; then
-    if command -v colcon >/dev/null 2>&1; then
-      echo "[open-delivery] building custom_msgs_srvs ..."
-      (cd "${ROOT_DIR}" && colcon build --packages-select custom_msgs_srvs --event-handlers console_direct+ || true)
-      # shellcheck disable=SC1090
-      set +u
-      source "${ROOT_DIR}/install/setup.bash"
-      set -u
-    else
-      echo "[open-delivery] colcon not found; custom_msgs_srvs may be unavailable."
-    fi
+# Keep generated messages and every compiled consumer on the same ABI. Merely
+# importing the Python message does not prove that downstream C++ nodes were
+# rebuilt after a .msg/.srv change.
+source_setup_safely() {
+  local setup_file="$1"
+  if [ -f "${setup_file}" ]; then
+    # setup files may reference optional variables while this script uses set -u.
+    set +u
+    # shellcheck disable=SC1090
+    source "${setup_file}"
+    set -u
   fi
+}
+
+ROS_DISTRO_NAME="${ROS_DISTRO:-foxy}"
+source_setup_safely "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
+
+CUSTOM_MSG_SOURCE="${ROOT_DIR}/src/common/custom_msgs_srvs"
+CUSTOM_MSG_STAMP="${ROOT_DIR}/build/.open_delivery_custom_msgs_abi.sha256"
+CUSTOM_MSG_HASH="$(
+  find "${CUSTOM_MSG_SOURCE}" -maxdepth 2 -type f \
+    \( -name '*.msg' -o -name '*.srv' -o -name 'CMakeLists.txt' -o -name 'package.xml' \) \
+    -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+)"
+NEEDS_INTERFACE_BUILD=0
+if [ ! -f "${ROOT_DIR}/install/setup.bash" ] \
+  || [ ! -f "${CUSTOM_MSG_STAMP}" ] \
+  || [ "$(tr -d '[:space:]' < "${CUSTOM_MSG_STAMP}" 2>/dev/null || true)" != "${CUSTOM_MSG_HASH}" ]; then
+  NEEDS_INTERFACE_BUILD=1
+else
+  source_setup_safely "${ROOT_DIR}/install/setup.bash"
+  if ! python3 -c "from custom_msgs_srvs.msg import RobotStatus" >/dev/null 2>&1; then
+    NEEDS_INTERFACE_BUILD=1
+  fi
+fi
+
+if [ "${NEEDS_INTERFACE_BUILD}" -eq 1 ]; then
+  if ! command -v colcon >/dev/null 2>&1; then
+    echo "[open-delivery] colcon not found; cannot rebuild custom message consumers."
+    exit 1
+  fi
+  echo "[open-delivery] custom message ABI changed; rebuilding all dependent packages ..."
+  (
+    cd "${ROOT_DIR}"
+    colcon build \
+      --packages-above-and-dependencies custom_msgs_srvs \
+      --symlink-install \
+      --event-handlers console_direct+
+  )
+  mkdir -p "${ROOT_DIR}/build"
+  printf '%s\n' "${CUSTOM_MSG_HASH}" > "${CUSTOM_MSG_STAMP}"
+  source_setup_safely "${ROOT_DIR}/install/setup.bash"
+fi
+
+if ! python3 -c "from custom_msgs_srvs.msg import RobotStatus" >/dev/null 2>&1; then
+  echo "[open-delivery] custom_msgs_srvs is still unavailable after build."
+  exit 1
 fi
 
 # Stop stale copies of this project's web stack before choosing ports. The

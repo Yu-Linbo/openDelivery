@@ -167,6 +167,7 @@ def _task_status_to_msg(v: Any, default: str = "idle") -> str:
     return d if d in _TASK_STATUS_LABELS else "idle"
 
 
+import localization_command
 import ros_command_queue
 import ros_map_store
 import ros_robot_status_store
@@ -522,6 +523,9 @@ class OpenDeliveryTfBridgeNode(Node):
                 robot_status = _robot_status_label(getattr(msg, "robot_status", 0))
                 task_status = _task_status_label(getattr(msg, "task_status", 0))
                 control_status = str(getattr(msg, "control_status", "AUTO") or "AUTO").upper()
+                localization_method = str(
+                    getattr(msg, "localization_method", "slam_toolbox") or "slam_toolbox"
+                ).strip().lower()
                 is_simulation = bool(getattr(msg, "is_simulation", False))
                 raw_progress = float(getattr(msg, "task_progress", -1.0))
                 task_progress = raw_progress if 0.0 <= raw_progress <= 1.0 else -1.0
@@ -533,6 +537,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "robot_status": robot_status,
                     "task_status": task_status,
                     "control_status": control_status,
+                    "localization_method": localization_method,
                     "is_simulation": is_simulation,
                     "task_progress": task_progress,
                 }
@@ -546,6 +551,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     robot_status=robot_status,
                     task_status=task_status,
                     control_status=control_status,
+                    localization_method=localization_method,
                     is_simulation=is_simulation,
                     task_progress=task_progress,
                     topic=topic_name,
@@ -577,7 +583,7 @@ class OpenDeliveryTfBridgeNode(Node):
                 "name": rid,
                 "tf_topic": os.environ.get("ROS_TF_TOPIC", "/tf"),
                 "map_frame": map_frame,
-                "base_frame": f"{rid}/base_link",
+                "base_frame": f"{rid}/base_footprint",
                 "current_map": current_map_default,
             }
             self._specs.append(spec)
@@ -603,6 +609,10 @@ class OpenDeliveryTfBridgeNode(Node):
                     "current_position": str(last.get("current_position") or "unknown;"),
                     "robot_status": str(last.get("robot_status") or ""),
                     "task_status": str(last.get("task_status") or ""),
+                    "control_status": str(last.get("control_status") or "AUTO"),
+                    "localization_method": str(
+                        last.get("localization_method") or "slam_toolbox"
+                    ),
                     "is_simulation": bool(last.get("is_simulation", False)),
                     "task_progress": float(last.get("task_progress", -1.0)),
                 }
@@ -642,6 +652,15 @@ class OpenDeliveryTfBridgeNode(Node):
             if str(s["id"]) == rid:
                 return str(s["map_frame"])
         return "map"
+
+    def _current_map_for_robot(self, rid: str) -> str:
+        return localization_command.resolve_map_name(
+            "",
+            rid,
+            self._robot_status_payload_by_id.get(rid) or {},
+            ros_robot_status_store.get_last_status(rid) or {},
+            self._specs,
+        )
 
     def _ensure_cmd_pubs(self, rid: str) -> None:
         self._ensure_task_interfaces(rid)
@@ -831,6 +850,9 @@ class OpenDeliveryTfBridgeNode(Node):
             else _task_status_to_msg(payload.get("task_status"), "idle")
         )
         st.control_status = str(payload.get("control_status") or "AUTO").upper()
+        st.localization_method = str(
+            payload.get("localization_method") or "slam_toolbox"
+        ).strip().lower()
         st.is_simulation = bool(payload.get("is_simulation", False))
         st.task_progress = float(payload.get("task_progress", -1.0))
         self._robot_status_cmd_pubs[rid].publish(st)
@@ -878,6 +900,12 @@ class OpenDeliveryTfBridgeNode(Node):
             return
         map_name = str(cmd.get("map_name") or "").strip()
         set_pose = bool(cmd.get("set_initial_pose"))
+        if not map_name and set_pose:
+            map_name = self._current_map_for_robot(rid)
+            if map_name:
+                self.get_logger().info(
+                    f"resolved pose-only localization map for {rid}: {map_name!r}"
+                )
         if not map_name and not set_pose:
             self.get_logger().warning("ignore localize_nav_command: need map_name and/or set_initial_pose")
             return

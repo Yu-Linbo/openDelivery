@@ -184,6 +184,65 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
             )
         ensure_world.assert_not_called()
 
+    def test_startup_restarts_running_wrapper_after_persisted_shutdown(self):
+        manager = FakeRosNodeManager()
+        orchestrator = robot_lifecycle.RobotLifecycleOrchestrator(
+            PROJECT_ROOT, manager
+        )
+        pose = orchestrator._SPAWN_POSES[0]
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_gazebo_transport_ready", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_simulation_entity_present", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_sim_managed_running", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch(
+                    "ros_robot_status_store.get_last_status",
+                    return_value={
+                        "robot_status": "shutdown",
+                        "localization_method": "gazebo_ground_truth",
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    orchestrator, "_spawn_pose_for_robot", return_value=(0, pose)
+                )
+            )
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_robot_specs"))
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_delete_simulation_entity", return_value=True)
+            )
+            terminate = stack.enter_context(
+                mock.patch.object(orchestrator, "_terminate_stale_robot_processes")
+            )
+            start_robot = stack.enter_context(
+                mock.patch.object(orchestrator, "_start_if_needed")
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "status", return_value={"robots": []})
+            )
+            stack.enter_context(mock.patch.object(robot_lifecycle.time, "sleep"))
+
+            orchestrator.startup_selected_robot(
+                "robot2",
+                is_online=lambda _rid: False,
+                starting_age_sec=0.0,
+            )
+
+        terminate.assert_called_once_with("robot2")
+        self.assertIn(("robot2", "pause"), manager.controls)
+        self.assertTrue(start_robot.call_args.kwargs["force"])
+
     def test_online_robot_with_missing_entity_recovers_only_its_stack(self):
         manager = FakeRosNodeManager()
         orchestrator = robot_lifecycle.RobotLifecycleOrchestrator(

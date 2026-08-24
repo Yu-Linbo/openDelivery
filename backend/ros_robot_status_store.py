@@ -18,6 +18,13 @@ _DB_DIR = _DB_PATH.parent
 _lock = threading.Lock()
 _cache: Dict[str, Dict[str, Any]] = {}
 _loaded = False
+_LOCALIZATION_METHODS = {"slam_toolbox", "gazebo_ground_truth", "amcl"}
+
+
+def _normalize_localization_method(value: Any) -> str:
+    method = str(value or "").strip().lower()
+    return method if method in _LOCALIZATION_METHODS else "slam_toolbox"
+
 
 
 def _load_once() -> None:
@@ -54,6 +61,9 @@ def _load_once() -> None:
                 "task_status": str(item.get("task_status") or ""),
                 "control_status": str(item.get("control_status") or "AUTO"),
                 "is_simulation": bool(item.get("is_simulation", False)),
+                "localization_method": _normalize_localization_method(
+                    item.get("localization_method")
+                ),
                 "task_progress": float(item.get("task_progress", -1.0)),
                 "topic": str(item.get("topic") or ""),
                 "stamp_ns": int(item.get("stamp_ns") or 0),
@@ -97,6 +107,7 @@ def set_last_status(
     task_status: str = "",
     control_status: str = "AUTO",
     is_simulation: bool = False,
+    localization_method: Optional[str] = None,
     task_progress: float = -1.0,
     topic: str,
     stamp_ns: int,
@@ -106,6 +117,10 @@ def set_last_status(
         return
     _load_once()
     with _lock:
+        previous_method = (_cache.get(rid) or {}).get("localization_method")
+        selected_method = _normalize_localization_method(
+            previous_method if localization_method is None else localization_method
+        )
         _cache[rid] = {
             "robot_id": rid,
             "robot_name": str(robot_name or rid),
@@ -116,6 +131,7 @@ def set_last_status(
             "task_status": str(task_status or ""),
             "control_status": str(control_status or "AUTO"),
             "is_simulation": bool(is_simulation),
+            "localization_method": selected_method,
             "task_progress": float(task_progress) if task_progress is not None else -1.0,
             "topic": str(topic or ""),
             "stamp_ns": int(stamp_ns or 0),

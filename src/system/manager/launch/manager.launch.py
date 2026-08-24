@@ -1,4 +1,4 @@
-"""Robot managers plus /<robot>/slam/{mapping,localizing,lifecycle_manager}."""
+"""Robot managers plus selectable mapping/localization backends."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction
@@ -12,8 +12,17 @@ def _slam_params(context, *args, **kwargs):
     ns = LaunchConfiguration("namespace").perform(context).strip().strip("/") or "robot2"
     mapper = LaunchConfiguration("mapper_params_file").perform(context)
     localize = LaunchConfiguration("localization_params_file").perform(context)
+    toolbox_mapper = LaunchConfiguration("slam_toolbox_mapper_params_file").perform(context)
+    toolbox_localize = LaunchConfiguration(
+        "slam_toolbox_localization_params_file"
+    ).perform(context)
+    localization_method = (
+        LaunchConfiguration("localization_method").perform(context).strip().lower()
+        or "slam_toolbox"
+    )
     initial = LaunchConfiguration("initial_slam_mode").perform(context).strip() or "inactive"
     map_file = LaunchConfiguration("map_file").perform(context).strip()
+    gazebo_world_file = LaunchConfiguration("gazebo_world_file").perform(context).strip()
     use_sim = LaunchConfiguration("use_sim_time").perform(context).strip().lower() in (
         "true",
         "1",
@@ -25,7 +34,11 @@ def _slam_params(context, *args, **kwargs):
             "robot_id": ns,
             "mapper_params_file": mapper,
             "localization_params_file": localize,
+            "slam_toolbox_mapper_params_file": toolbox_mapper,
+            "slam_toolbox_localization_params_file": toolbox_localize,
+            "localization_method": localization_method,
             "map_file": map_file,
+            "gazebo_world_file": gazebo_world_file,
             "map_frame": "map",
             "odom_frame": f"{ns}/odom",
             "base_frame": f"{ns}/base_footprint",
@@ -46,8 +59,9 @@ def _slam_params(context, *args, **kwargs):
 def _launch_setup(context, *args, **kwargs):
     slam_params = _slam_params(context)[0]
     ns = slam_params["robot_id"]
-    return [
-        Node(
+    actions = []
+    if slam_params["localization_method"] == "amcl":
+        actions.append(Node(
             package="nav2_amcl",
             executable="amcl",
             name="localizing",
@@ -65,16 +79,31 @@ def _launch_setup(context, *args, **kwargs):
                 ("initialpose", f"/{ns}/initial"),
                 ("amcl_pose", f"/{ns}/amcl_pose"),
             ],
-        ),
-        Node(
+        ))
+    elif slam_params["localization_method"] == "slam_toolbox":
+        # slam_toolbox owns map->odom but does not publish AMCL's covariance
+        # topic. Keep the existing health-monitor interface with a TF bridge.
+        actions.append(Node(
             package="manager",
-            executable="stack_lifecycle_manager_node",
-            name="lifecycle_manager",
-            namespace="slam",
+            executable="tf_localization_pose_node",
+            name="tf_localization_pose",
             output="screen",
-            parameters=[slam_params],
-        )
-    ]
+            parameters=[{
+                "use_sim_time": slam_params["use_sim_time"],
+                "map_frame": "map",
+                "base_frame": slam_params["base_frame"],
+                "pose_topic": f"/{ns}/amcl_pose",
+            }],
+        ))
+    actions.append(Node(
+        package="manager",
+        executable="stack_lifecycle_manager_node",
+        name="lifecycle_manager",
+        namespace="slam",
+        output="screen",
+        parameters=[slam_params],
+    ))
+    return actions
 
 
 def generate_launch_description():
@@ -135,12 +164,36 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument(
+                "slam_toolbox_mapper_params_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("manager"), "config", "slam_toolbox_mapper.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "slam_toolbox_localization_params_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("manager"), "config", "slam_toolbox_localization.yaml"]
+                ),
+            ),
+            DeclareLaunchArgument(
+                "localization_method",
+                default_value="slam_toolbox",
+                description="slam_toolbox|gazebo_ground_truth|amcl (legacy maps)",
+            ),
+            DeclareLaunchArgument(
                 "map_file",
                 default_value="",
                 description=(
                     "Occupancy grid yaml for map_server → /<ns>/map. "
                     "Required for initial_slam_mode:=localize."
                 ),
+            ),
+            DeclareLaunchArgument(
+                "gazebo_world_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("simulate"), "worlds", "drawn_model.world"]
+                ),
+                description="Gazebo world used to align floor models with occupancy maps.",
             ),
             DeclareLaunchArgument(
                 "initial_slam_mode",

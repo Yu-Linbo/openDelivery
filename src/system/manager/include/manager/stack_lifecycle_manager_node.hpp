@@ -59,7 +59,12 @@ private:
 
   std::string mapper_params_file_;
   std::string localization_params_file_;
+  std::string slam_toolbox_mapper_params_file_;
+  std::string slam_toolbox_localization_params_file_;
+  std::string localization_method_;
+  std::string pose_graph_file_;
   std::string map_file_;
+  std::string gazebo_world_file_;
   std::string map_frame_;
   std::string odom_frame_;
   std::string base_frame_;

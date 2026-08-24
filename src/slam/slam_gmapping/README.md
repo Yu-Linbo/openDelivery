@@ -1,33 +1,46 @@
-# OpenDelivery SLAM 接口
+# OpenDelivery SLAM / 定位接口
 
-建图和定位互斥运行。Topic 用于连续数据流；Service 只用于一次性命令或状态查询。
+建图和定位互斥运行，由 `/<robot>/slam/lifecycle_manager` 统一切换
+`mapping|localize|inactive`。目录中的 GMapping 源码仅作历史兼容，默认建图后端已换为
+slam_toolbox。
 
-## 建图：GMapping
-
-| 方向 | 接口类别 | 接口 | 类型 | 用途 |
-| --- | --- | --- | --- | --- |
-| 输入 | Topic | /robot2/scan_2d | sensor_msgs/msg/LaserScan | 激光扫描 |
-| 输入 | TF | /tf、/tf_static | robot2/odom <- robot2/base_footprint <- laser_frame | 由扫描时间查询机器人和雷达位姿；不直接订阅 odom topic |
-| 输出 | Topic | /robot2/mapping | nav_msgs/msg/OccupancyGrid | 实时建图栅格 |
-| 输出 | Topic | /robot2/slam/map_metadata、/robot2/slam/entropy | MapMetaData、Float64 | 地图元数据、粒子熵 |
-| 输出 | TF | /tf | map -> robot2/odom | SLAM 位姿校正 |
-| 控制 | Service | 无自定义 service | - | 参数服务由 rclcpp 自动提供；建图控制由上层 lifecycle manager 负责 |
-
-## 定位：AMCL
+## 建图：slam_toolbox
 
 | 方向 | 接口类别 | 接口 | 类型 | 用途 |
 | --- | --- | --- | --- | --- |
-| 输入 | Topic | /robot2/scan_2d | sensor_msgs/msg/LaserScan | 用实时激光匹配静态地图 |
-| 输入 | Topic | /robot2/map | nav_msgs/msg/OccupancyGrid | map_server 提供的已保存地图；订阅者应使用 Transient Local QoS |
-| 输入 | Topic | /robot2/initial | geometry_msgs/msg/PoseWithCovarianceStamped | 重定位初始位姿；由 AMCL 的 initialpose 重映射而来 |
-| 输入 | TF | /tf、/tf_static | robot2/odom <- robot2/base_footprint | 里程计位姿与机器人坐标关系 |
-| 输出 | Topic | /robot2/amcl_pose | geometry_msgs/msg/PoseWithCovarianceStamped | 估计位姿与协方差；health_monitor 依据协方差更新 robot_status 为 ready |
-| 输出 | Topic | /robot2/slam/particle_cloud、/robot2/slam/particlecloud | geometry_msgs/msg/PoseArray | 粒子滤波可视化 |
-| 输出 | TF | /tf | map -> robot2/odom | 定位校正 |
-| 控制 | Service | lifecycle、参数 service | - | configure、activate 等由 /robot2/slam/lifecycle_manager 统一管理 |
+| 输入 | Topic | `/robot2/scan_2d` | `sensor_msgs/msg/LaserScan` | 激光扫描 |
+| 输入 | TF | `/tf`、`/tf_static` | `robot2/odom ← robot2/base_footprint ← laser` | 里程计与雷达外参 |
+| 输出 | Topic | `/robot2/mapping` | `nav_msgs/msg/OccupancyGrid` | 实时建图栅格 |
+| 输出 | TF | `/tf` | `map → robot2/odom` | Ceres pose-graph / scan-matching 校正 |
+| 保存 | Service | `/robot2/slam/serialize_map` | `slam_toolbox/srv/SerializePoseGraph` | Web 保存地图时生成 `.posegraph` 与 `.data` |
+
+## 定位方法
+
+具体后端由 `backend/data/robot_status_last.json` 中每台机器人的
+`localization_method` 选择。
+
+### `slam_toolbox`
+
+加载与地图 YAML 同基名的 `.posegraph` 和 `.data`，以滚动激光窗口进行弹性
+pose-graph 定位；接收 `/robot2/initial`，发布 `map→robot2/odom`。辅助 TF 位姿桥
+将结果同步为 `/robot2/amcl_pose`，供现有 `health_monitor` 判定 ready。
+
+### `gazebo_ground_truth`
+
+仅用于仿真，实现在相邻包 `src/slam/gazebo_ground_truth_localization`。节点读取
+`/gazebo/model_states` 的绝对 `world→base`，依据地图 YAML/PGM 与 world 中楼层
+模型位姿换算为地图坐标，再与 `odom→base` 合成严格一致的 `map→odom`；同时发布
+近零协方差的 `/robot2/amcl_pose`。它订阅 `/robot2/initial`，姿态重定位会重设
+`map→world` 对齐而不传送 Gazebo 模型。该模式不使用激光估计，不能部署到真机。
+
+### `amcl`
+
+兼容只有 `.pgm/.yaml`、尚未生成 slam_toolbox pose graph 的旧地图。接口保持原样：
+订阅 `/robot2/scan_2d`、`/robot2/map`、`/robot2/initial`，发布
+`/robot2/amcl_pose` 与 `map→robot2/odom`。
 
 ## 辅助重定位
 
-`slam/relocalization` 提供 `/robot2/record_relocalization` 和 `/robot2/relocalize` 服务，
-并将匹配成功的修正位姿发布到 `/robot2/initial`。记录按 `RobotStatus.current_map`
-隔离保存；模式 1 优先修正传入点位，评分不足时自动回退到遍历历史 scan 的模式 0。
+`slam/relocalization` 提供 `/robot2/record_relocalization` 和
+`/robot2/relocalize` 服务，并将匹配成功的修正位姿发布到 `/robot2/initial`。
+记录按 `RobotStatus.current_map` 隔离保存。
