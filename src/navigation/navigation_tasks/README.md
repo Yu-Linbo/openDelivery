@@ -32,3 +32,8 @@
 启动或切图时 Nav2 lifecycle 激活可能晚于机器人状态更新。执行器通过参数
 `action_server_wait_sec` 等待 action server，默认 15 秒；超时状态会包含实际等待的
 action 名称。
+
+ROS 2 Foxy 的 BT action 偶发在 controller 已接收路径后以 `send_goal failed` 中止外层
+`NavigateToPose`。执行器仅对 `STATUS_ABORTED` 使用有上限的延迟重试，默认重试 2 次、
+间隔 1 秒；Pause、Terminate 或新任务会取消等待中的重试。其他终态仍立即如实上报，避免
+真正不可达的目标被无限重试。

@@ -43,6 +43,7 @@ class FakeElevator(Node):
         self.declare_parameter("relocalize_retry_count", 10)
         self.declare_parameter("relocalize_retry_delay_sec", 0.3)
         self.declare_parameter("map_status_propagation_delay_sec", 0.5)
+        self.declare_parameter("post_relocalize_settle_sec", 1.5)
         self.declare_parameter("service_wait_sec", 10.0)
         self.declare_parameter(
             "web_api_base", os.environ.get("OPEN_DELIVERY_API", "http://127.0.0.1:8001")
@@ -61,6 +62,9 @@ class FakeElevator(Node):
         )
         self._map_status_delay = max(
             0.05, float(self.get_parameter("map_status_propagation_delay_sec").value)
+        )
+        self._post_relocalize_settle = max(
+            0.0, float(self.get_parameter("post_relocalize_settle_sec").value)
         )
         self._service_wait = max(0.1, float(self.get_parameter("service_wait_sec").value))
         self._web_api_base = str(
@@ -578,12 +582,33 @@ class FakeElevator(Node):
                     f"relocalize failed after {attempt} attempt(s): {detail}",
                 )
                 return
-            self._finish(
-                generation, ElevatorStatus.STATUS_FINISHED,
-                f"map switched and relocalized score={response.score:.3f}",
-            )
+            self._schedule_relocalized_finish(generation, response.score)
         except Exception as exc:  # noqa: BLE001
             self._finish(generation, ElevatorStatus.STATUS_FAILED, f"relocalize exception: {exc}")
+
+    def _schedule_relocalized_finish(self, generation, score):
+        with self._lock:
+            if generation != self._generation:
+                return
+            message = f"map switched and relocalized score={score:.3f}"
+            if self._post_relocalize_settle <= 0.0:
+                self._finish(generation, ElevatorStatus.STATUS_FINISHED, message)
+                return
+            self._message = (
+                f"{message}; waiting {self._post_relocalize_settle:.1f}s "
+                "for TF/costmap propagation"
+            )
+            self._publish()
+            self._cancel_timer()
+            self._timer = self.create_timer(
+                self._post_relocalize_settle,
+                lambda: self._finish_relocalized(generation, message),
+            )
+
+    def _finish_relocalized(self, generation, message):
+        with self._lock:
+            self._cancel_timer()
+        self._finish(generation, ElevatorStatus.STATUS_FINISHED, message)
 
     @staticmethod
     def _retryable_relocalize_error(message):

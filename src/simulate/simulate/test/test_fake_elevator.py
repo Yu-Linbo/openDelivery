@@ -251,6 +251,31 @@ def test_only_transient_map_or_scan_readiness_errors_are_retried():
     assert not retryable("scan matching produced no candidate")
 
 
+def test_successful_relocalization_waits_for_tf_and_costmap_propagation():
+    node = bare_elevator()
+    node._post_relocalize_settle = 1.5
+    node._status = MODULE.ElevatorStatus.STATUS_RELOCALIZING
+    node._publish = lambda: None
+    scheduled = []
+    node.create_timer = lambda delay, callback: scheduled.append((delay, callback)) or object()
+    finished = []
+    node._finish = lambda *args: finished.append(args)
+    response = SimpleNamespace(success=True, score=0.875, message="ok")
+
+    node._relocalized(SimpleNamespace(result=lambda: response), generation=7, attempt=1)
+
+    assert finished == []
+    assert node._status == MODULE.ElevatorStatus.STATUS_RELOCALIZING
+    assert "TF/costmap propagation" in node._message
+    assert scheduled[0][0] == pytest.approx(1.5)
+    scheduled[0][1]()
+    assert finished == [(
+        7,
+        MODULE.ElevatorStatus.STATUS_FINISHED,
+        "map switched and relocalized score=0.875",
+    )]
+
+
 def test_stale_map_callback_does_not_continue_switch():
     node = bare_elevator()
     calls = []

@@ -28,10 +28,18 @@ class NavigationTaskNode(Node):
         self.declare_parameter("robot_name", "robot2")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("action_server_wait_sec", 15.0)
+        self.declare_parameter("nav2_goal_retry_count", 2)
+        self.declare_parameter("nav2_goal_retry_delay_sec", 1.0)
         robot = str(self.get_parameter("robot_name").value).strip().strip("/") or "robot2"
         self._map_frame = str(self.get_parameter("map_frame").value).strip() or "map"
         self._action_server_wait_sec = max(
             0.1, float(self.get_parameter("action_server_wait_sec").value)
+        )
+        self._nav2_goal_retry_count = max(
+            0, int(self.get_parameter("nav2_goal_retry_count").value)
+        )
+        self._nav2_goal_retry_delay_sec = max(
+            0.1, float(self.get_parameter("nav2_goal_retry_delay_sec").value)
         )
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.RELIABLE
@@ -51,6 +59,8 @@ class NavigationTaskNode(Node):
         self._message = "waiting for task"
         self._index = 0
         self._goal_handle = None
+        self._retry_attempt = 0
+        self._retry_timer = None
         self._generation = 0
         self._publish_status()
 
@@ -96,6 +106,7 @@ class NavigationTaskNode(Node):
             self._task.task_type = str(msg.task_type).strip().lower()
             self._task.end_action = str(msg.end_action).strip().lower() or TaskInfo.END_ACTION_WAITING
             self._index = 0
+            self._retry_attempt = 0
             self._status = TaskStatus.STATUS_WAITING
             self._message = "task accepted"
             generation = self._generation
@@ -140,10 +151,56 @@ class NavigationTaskNode(Node):
         self._dispatch(generation)
 
     def _cancel_goal(self):
+        self._cancel_retry()
         handle = self._goal_handle
         self._goal_handle = None
         if handle is not None:
             handle.cancel_goal_async()
+
+    def _cancel_retry(self):
+        timer = self._retry_timer
+        self._retry_timer = None
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+    @staticmethod
+    def _retryable_goal_status(status):
+        # Nav2 Foxy may abort NavigateToPose with "send_goal failed" after the
+        # controller has already accepted the path. A bounded retry preempts
+        # that orphaned controller goal and restores a coherent action chain.
+        return status == GoalStatus.STATUS_ABORTED
+
+    def _retry_goal(self, generation, failure_message):
+        with self._lock:
+            if generation != self._generation or not self._task:
+                return
+            if self._retry_attempt >= self._nav2_goal_retry_count:
+                self._finish(generation, TaskStatus.STATUS_FAILED, failure_message)
+                return
+            self._goal_handle = None
+            self._retry_attempt += 1
+            attempt = self._retry_attempt
+            self._status = TaskStatus.STATUS_WAITING
+            self._message = (
+                f"{failure_message}; retrying Nav2 goal "
+                f"{attempt}/{self._nav2_goal_retry_count}"
+            )
+            self._publish_status()
+
+            def retry_once():
+                with self._lock:
+                    if self._retry_timer is not timer:
+                        return
+                    self._retry_timer = None
+                    timer.cancel()
+                    active = generation == self._generation and self._task is not None
+                self.destroy_timer(timer)
+                if active:
+                    self._dispatch(generation)
+
+            timer = self.create_timer(self._nav2_goal_retry_delay_sec, retry_once)
+            self._retry_timer = timer
 
     def _pose_stamped(self, pose):
         stamped = PoseStamped()
@@ -217,10 +274,15 @@ class NavigationTaskNode(Node):
                 return
             self._goal_handle = None
             if status != GoalStatus.STATUS_SUCCEEDED:
-                self._finish(generation, TaskStatus.STATUS_FAILED, f"Nav2 goal status={status}")
+                message = f"Nav2 goal status={status}"
+                if self._retryable_goal_status(status):
+                    self._retry_goal(generation, message)
+                else:
+                    self._finish(generation, TaskStatus.STATUS_FAILED, message)
                 return
             if self._task.task_type != TaskInfo.TASK_TYPE_FOLLOWING and self._index + 1 < len(self._task.poses):
                 self._index += 1
+                self._retry_attempt = 0
                 self._message = "dispatching next pose"
                 self._publish_status()
             else:
@@ -232,6 +294,7 @@ class NavigationTaskNode(Node):
         with self._lock:
             if generation != self._generation:
                 return
+            self._cancel_retry()
             self._goal_handle = None
             self._status = status
             self._message = message
