@@ -2,12 +2,13 @@
 <package format="3">
   <name>gazebo_ground_truth_localization</name>
   <version>0.1.0</version>
-  <description>Exact Gazebo localization with map/world alignment and initial-pose reset support.</description>
+  <description>Gazebo truth localization with gradual correction of initial-pose errors.</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>custom_msgs_srvs</exec_depend>
   <exec_depend>gazebo_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>

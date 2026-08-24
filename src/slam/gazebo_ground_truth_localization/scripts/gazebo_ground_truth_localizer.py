@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Publish exact Gazebo localization while honoring normal initial-pose commands."""
+"""Publish Gazebo truth localization with gradual initial-pose correction."""
+
+from pathlib import Path
+import time
 
 import rclpy
+from custom_msgs_srvs.msg import RobotStatus
 from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
 from rclpy.node import Node
@@ -9,16 +13,23 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 
 from ground_truth_math import (
-    alignment_for_initial,
+    apply_pose_error,
+    bounded_time_step,
     compose,
+    decay_pose_error,
     inverse,
     map_to_world_from_files,
+    map_yaml_for_name,
+    pose_error,
     yaw_from_quaternion,
     yaw_quaternion,
 )
 
 
 class GazeboGroundTruthLocalizer(Node):
+    _MAX_CORRECTION_DT = 0.25
+    _MAP_SWITCH_INITIAL_WINDOW = 5.0
+
     def __init__(self):
         super().__init__("gazebo_ground_truth_localizer")
         self.robot_model = str(self.declare_parameter("robot_model", "").value).strip()
@@ -33,6 +44,18 @@ class GazeboGroundTruthLocalizer(Node):
         self.covariance = max(
             0.0, float(self.declare_parameter("covariance", 1.0e-9).value)
         )
+        self.linear_correction_speed = max(
+            0.0,
+            float(self.declare_parameter("linear_correction_speed", 0.10).value),
+        )
+        self.angular_correction_speed = max(
+            0.0,
+            float(
+                self.declare_parameter(
+                    "angular_correction_speed", 0.0872665
+                ).value
+            ),
+        )
         if not self.robot_model:
             namespace = self.get_namespace().strip("/")
             self.robot_model = namespace.split("/")[0] if namespace else ""
@@ -41,10 +64,16 @@ class GazeboGroundTruthLocalizer(Node):
         if not self.map_file or not self.world_file:
             raise RuntimeError("map_file and world_file parameters are required")
 
+        self._initial_map_file = self.map_file
+        self._active_map_name = Path(self.map_file).stem
         world_to_map = map_to_world_from_files(self.map_file, self.world_file)
-        self._map_to_world = inverse(world_to_map)
+        self._true_map_to_world = inverse(world_to_map)
         self._last_world_to_base = None
         self._pending_initial = None
+        self._last_initial_request = None
+        self._last_initial_wall_time = None
+        self._correction_error = (0.0, 0.0, 0.0)
+        self._last_correction_time_ns = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -56,10 +85,23 @@ class GazeboGroundTruthLocalizer(Node):
         self.create_subscription(
             PoseWithCovarianceStamped, "initialpose", self._on_initial_pose, 10
         )
+        self.create_subscription(
+            RobotStatus,
+            "/%s/robot_status" % self.robot_model,
+            self._on_robot_status,
+            10,
+        )
         self._missing_model_logged = False
         self.get_logger().info(
-            "Gazebo truth localization ready: model=%s map=%s world=%s"
-            % (self.robot_model, self.map_file, self.world_file)
+            "Gazebo truth localization ready: model=%s map=%s world=%s "
+            "correction=%.3f m/s, %.3f rad/s"
+            % (
+                self.robot_model,
+                self.map_file,
+                self.world_file,
+                self.linear_correction_speed,
+                self.angular_correction_speed,
+            )
         )
 
     @staticmethod
@@ -80,6 +122,69 @@ class GazeboGroundTruthLocalizer(Node):
             yaw_from_quaternion(q.x, q.y, q.z, q.w),
         )
 
+    def _set_initial_error(self, true_map_to_base, requested):
+        self._correction_error = pose_error(true_map_to_base, requested)
+        # Keep the first publish at the requested pose. Correction begins with
+        # the following model-state sample.
+        self._last_correction_time_ns = None
+        self.get_logger().info(
+            "applied initial pose x=%.3f y=%.3f yaw=%.3f; "
+            "correcting bias dx=%.3f dy=%.3f dyaw=%.3f"
+            % (requested + self._correction_error)
+        )
+
+    def _on_robot_status(self, message):
+        map_name = str(message.current_map or "").strip()
+        if not map_name or map_name == self._active_map_name:
+            return
+
+        try:
+            map_file = map_yaml_for_name(self._initial_map_file, map_name)
+            world_to_map = map_to_world_from_files(map_file, self.world_file)
+        except RuntimeError as exc:
+            self.get_logger().warning(
+                "ignore truth map switch %r: %s" % (map_name, exc),
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        recent_initial = None
+        if self._pending_initial is not None:
+            recent_initial = self._pending_initial
+        elif (
+            self._last_initial_request is not None
+            and self._last_initial_wall_time is not None
+            and time.monotonic() - self._last_initial_wall_time
+            <= self._MAP_SWITCH_INITIAL_WINDOW
+        ):
+            # task_manager intentionally publishes initialpose before it writes
+            # RobotStatus.current_map. Re-apply that request against the new
+            # map truth instead of carrying a floor-sized error forward.
+            recent_initial = self._last_initial_request
+
+        old_map_name = self._active_map_name
+        self.map_file = str(map_file)
+        self._active_map_name = map_name
+        self._true_map_to_world = inverse(world_to_map)
+        self._correction_error = (0.0, 0.0, 0.0)
+        self._last_correction_time_ns = None
+        self._pending_initial = None
+        if recent_initial is not None:
+            if self._last_world_to_base is None:
+                self._pending_initial = recent_initial
+            else:
+                true_map_to_base = compose(
+                    self._true_map_to_world, self._last_world_to_base
+                )
+                self._set_initial_error(true_map_to_base, recent_initial)
+            self._last_initial_request = None
+            self._last_initial_wall_time = None
+
+        self.get_logger().info(
+            "switched Gazebo truth map %s -> %s yaml=%s"
+            % (old_map_name, map_name, self.map_file)
+        )
+
     def _on_initial_pose(self, message):
         if message.header.frame_id and message.header.frame_id != self.map_frame:
             self.get_logger().warning(
@@ -88,15 +193,17 @@ class GazeboGroundTruthLocalizer(Node):
             )
             return
         requested = self._pose2d(message.pose.pose)
+        self._last_initial_request = requested
+        self._last_initial_wall_time = time.monotonic()
         if self._last_world_to_base is None:
             self._pending_initial = requested
             self.get_logger().info("queued initial pose until first Gazebo model state")
             return
-        self._map_to_world = alignment_for_initial(self._last_world_to_base, requested)
-        self._pending_initial = None
-        self.get_logger().info(
-            "applied exact initial pose x=%.3f y=%.3f yaw=%.3f" % requested
+        true_map_to_base = compose(
+            self._true_map_to_world, self._last_world_to_base
         )
+        self._set_initial_error(true_map_to_base, requested)
+        self._pending_initial = None
 
     def _on_model_states(self, message):
         try:
@@ -111,10 +218,9 @@ class GazeboGroundTruthLocalizer(Node):
         self._missing_model_logged = False
         world_to_base = self._pose2d(message.pose[index])
         self._last_world_to_base = world_to_base
+        true_map_to_base = compose(self._true_map_to_world, world_to_base)
         if self._pending_initial is not None:
-            self._map_to_world = alignment_for_initial(
-                world_to_base, self._pending_initial
-            )
+            self._set_initial_error(true_map_to_base, self._pending_initial)
             self._pending_initial = None
 
         try:
@@ -128,10 +234,22 @@ class GazeboGroundTruthLocalizer(Node):
             )
             return
 
-        map_to_base = compose(self._map_to_world, world_to_base)
+        now = self.get_clock().now()
+        now_ns = now.nanoseconds
+        dt = bounded_time_step(
+            self._last_correction_time_ns, now_ns, self._MAX_CORRECTION_DT
+        )
+        self._last_correction_time_ns = now_ns
+        self._correction_error = decay_pose_error(
+            self._correction_error,
+            self.linear_correction_speed,
+            self.angular_correction_speed,
+            dt,
+        )
+        map_to_base = apply_pose_error(true_map_to_base, self._correction_error)
         odom_to_base = self._transform2d(odom_to_base_msg.transform)
         map_to_odom = compose(map_to_base, inverse(odom_to_base))
-        stamp = self.get_clock().now().to_msg()
+        stamp = now.to_msg()
 
         tf_message = TransformStamped()
         tf_message.header.stamp = stamp
