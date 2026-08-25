@@ -67,6 +67,10 @@ bool load_record(const std::string & path, ScanRecord * record, std::string * er
 std::vector<ScanRecord> load_records(
   const std::string & directory, const std::string & map_name,
   const std::string & points_json = "");
+std::vector<std::string> discover_record_maps(
+  const std::string & map_root, const std::string & current_map);
+bool load_grid_map_from_yaml(
+  const std::string & yaml_path, GridMap * map, std::string * error);
 
 double map_match_score(
   const GridMap & map, const ScanData & scan, const Pose2D & pose,

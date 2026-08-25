@@ -88,6 +88,12 @@ class RobotLifecycleOrchestrator:
         (-11.703, 9.825, 0.05, 0.0),
         (-10.703, 9.825, 0.05, 0.0),
     )
+    _MAP_DEFAULT_SPAWN_POSES = {
+        "test_101": (-14.41, 12.54, 0.05, 0.0),
+        "test_102": (6.81, 12.92, 0.05, 0.0),
+        "test_103": (-6.01, -7.04, 0.05, 0.0),
+        "test_104": (6.45, -7.81, 0.05, 0.0),
+    }
 
     def _read_spawn_slots(self) -> Dict[str, int]:
         try:
@@ -138,6 +144,11 @@ class RobotLifecycleOrchestrator:
                 slots[rid] = slot
                 self._write_spawn_slots(slots)
             return slot, self._SPAWN_POSES[slot]
+
+    @classmethod
+    def _spawn_pose_for_map(cls, map_name: str, fallback):
+        normalized = str(map_name or "").strip()
+        return cls._MAP_DEFAULT_SPAWN_POSES.get(normalized, fallback)
 
     def _run_shell(self, cmd: str, timeout: float = 10.0):
         full_cmd = self._bash_prefix() + cmd
@@ -780,7 +791,9 @@ class RobotLifecycleOrchestrator:
         auto_mapping = _persisted_auto_mapping(last)
         localization_method = _persisted_localization_method(last)
         try:
-            slot, spawn_pose = self._spawn_pose_for_robot(rid)
+            slot, slot_pose = self._spawn_pose_for_robot(rid)
+            spawn_pose = self._spawn_pose_for_map(
+                last.get("current_map"), slot_pose)
             self._ensure_simulation_world()
             self._ensure_robot_specs(rid, sim_mode, spawn_pose)
             if force_restart:

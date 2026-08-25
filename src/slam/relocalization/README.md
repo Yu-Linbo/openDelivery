@@ -11,25 +11,36 @@ robot namespace, for example `/robot2/relocalization`.
 - Provides `record_relocalization` (`RecordRelocalization`): while status is `ready`, captures
   the current `map -> base_footprint` pose, laser extrinsic and one scan frame. The atomic binary
   record is stored at `<map_root>/<current_map>/relocalization/<record_id>.rloc`.
-- Provides `relocalize` (`Relocalize`) and publishes successful results to `initial` for AMCL.
+- Provides `relocalize` (`Relocalize`). Same-map results are published to `initial`; a
+  different-map result is sent through `localize_nav_command` so `task_manager` applies the
+  existing map/status/initial-pose transition.
 
 ## Modes
 
-- Mode 0 (`MODE_HISTORY`): lazily loads all records belonging to the current map, searches around
-  every recorded pose, and ranks candidates using occupancy-map endpoint hits plus current-to-saved
-  scan correlation.
+- Mode 0 (`MODE_HISTORY`): searches every record on the current map first. If its best score is
+  below `history_match_threshold`, it discovers other maps with saved records, loads their
+  YAML/PGM files without changing the live map, and searches all of their records. A result on
+  another map requests a real map switch before localization continues.
 - Mode 1 (`MODE_POSE_FIRST`): searches around the supplied map-frame pose using occupancy-map
-  matching. If its score is below `pose_first_threshold`, it automatically runs mode 0.
+  matching. If its score is below `pose_first_threshold`, it searches historical records on the
+  current target map only, so an intentional elevator map switch cannot be reversed.
 
 Expected workflow:
 
 1. With localization known to be accurate (`robot_status=ready`), an external application calls
    the record service with a stable ID.
-2. After a map switch it calls mode 1 with the pre-switch pose. On first boot, it calls mode 0.
+2. After a map switch it calls mode 1 with the pre-switch pose.
+3. On first startup transition from `localizing` to `localization_lost`, the node automatically
+   retries mode 0 until inputs are ready. This can be disabled with
+   `auto_relocalize_on_startup=false`.
 
-Records are never carried across maps: the current map name from `RobotStatus` selects both the
-storage directory and the records eligible for matching. A map change invalidates the cached grid
-until a new `OccupancyGrid` is received.
+Records remain owned by their map directory. Cross-map scoring uses each candidate map's own
+YAML/PGM occupancy data. A live map change invalidates the cached grid until a new
+`OccupancyGrid` is received.
+
+Relevant optional parameters are `history_match_threshold=0.55`,
+`auto_relocalize_on_startup=true`, `auto_relocalize_retry_limit=30`, and
+`auto_relocalize_retry_period_sec=0.5`.
 
 The monitor's **记录重定位点** action calls the record service and, only after a successful capture,
 adds a `relocalization` point with the same ID to `<map>_points.json`. History loading reconciles

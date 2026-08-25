@@ -1,6 +1,7 @@
 #include "relocalization/relocalization_core.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -9,6 +10,8 @@
 #include <json/json.h>
 #include <limits>
 #include <regex>
+#include <sstream>
+#include <sys/stat.h>
 #include <unordered_set>
 
 namespace relocalization {
@@ -130,6 +133,98 @@ MatchResult search_window(
     }
   }
   return best;
+}
+
+std::string trim(const std::string & value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+std::string unquote(const std::string & value) {
+  if (value.size() >= 2 &&
+    ((value.front() == '"' && value.back() == '"') ||
+    (value.front() == '\'' && value.back() == '\'')))
+  {
+    return value.substr(1, value.size() - 2);
+  }
+  return value;
+}
+
+std::string parent_directory(const std::string & path) {
+  const auto separator = path.find_last_of('/');
+  if (separator == std::string::npos) return ".";
+  if (separator == 0) return "/";
+  return path.substr(0, separator);
+}
+
+bool path_is_directory(const std::string & path) {
+  struct stat info {};
+  return ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+bool path_is_file(const std::string & path) {
+  struct stat info {};
+  return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+}
+
+bool has_record_file(const std::string & directory) {
+  DIR * dir = opendir(directory.c_str());
+  if (!dir) return false;
+  bool found = false;
+  while (dirent * entry = readdir(dir)) {
+    const std::string name = entry->d_name;
+    if (name.size() > 5 && name.substr(name.size() - 5) == ".rloc") {
+      found = true;
+      break;
+    }
+  }
+  closedir(dir);
+  return found;
+}
+
+bool parse_number(const std::string & value, double * output) {
+  if (!output) return false;
+  std::istringstream stream(trim(value));
+  double number = 0.0;
+  stream >> number;
+  if (!stream || !std::isfinite(number)) return false;
+  stream >> std::ws;
+  if (!stream.eof()) return false;
+  *output = number;
+  return true;
+}
+
+bool parse_origin(const std::string & value, Pose2D * output) {
+  if (!output) return false;
+  std::string text = trim(value);
+  if (text.size() < 2 || text.front() != '[' || text.back() != ']') return false;
+  text = text.substr(1, text.size() - 2);
+  std::replace(text.begin(), text.end(), ',', ' ');
+  std::istringstream stream(text);
+  Pose2D origin;
+  stream >> origin.x >> origin.y >> origin.yaw;
+  stream >> std::ws;
+  if (!stream || !stream.eof() || !std::isfinite(origin.x) ||
+    !std::isfinite(origin.y) || !std::isfinite(origin.yaw))
+  {
+    return false;
+  }
+  *output = origin;
+  return true;
+}
+
+bool read_pgm_token(std::istream & stream, std::string * token) {
+  while (stream >> *token) {
+    if (!token->empty() && token->front() == '#') {
+      std::string ignored;
+      std::getline(stream, ignored);
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -267,6 +362,165 @@ std::vector<ScanRecord> load_records(
     }
   }
   return records;
+}
+
+std::vector<std::string> discover_record_maps(
+  const std::string & map_root, const std::string & current_map)
+{
+  std::vector<std::string> maps;
+  DIR * root = opendir(map_root.c_str());
+  if (!root) return maps;
+  while (dirent * entry = readdir(root)) {
+    const std::string name = entry->d_name;
+    if (!valid_record_id(name)) continue;
+    const std::string folder = map_root + "/" + name;
+    if (!path_is_directory(folder) ||
+      !path_is_file(folder + "/" + name + ".yaml") ||
+      !has_record_file(folder + "/relocalization"))
+    {
+      continue;
+    }
+    maps.push_back(name);
+  }
+  closedir(root);
+  std::sort(maps.begin(), maps.end());
+  const auto current = std::find(maps.begin(), maps.end(), current_map);
+  if (current != maps.end() && current != maps.begin()) {
+    std::rotate(maps.begin(), current, current + 1);
+  }
+  return maps;
+}
+
+bool load_grid_map_from_yaml(
+  const std::string & yaml_path, GridMap * map, std::string * error)
+{
+  if (!map) {
+    if (error) *error = "map output is null";
+    return false;
+  }
+  std::ifstream yaml(yaml_path);
+  if (!yaml) {
+    if (error) *error = "cannot open map yaml: " + yaml_path;
+    return false;
+  }
+  std::string image;
+  double resolution = 0.0;
+  double occupied_threshold = 0.65;
+  double free_threshold = 0.196;
+  double negate_number = 0.0;
+  Pose2D origin;
+  bool have_origin = false;
+  std::string line;
+  while (std::getline(yaml, line)) {
+    const auto separator = line.find(':');
+    if (separator == std::string::npos) continue;
+    const std::string key = trim(line.substr(0, separator));
+    std::string value = trim(line.substr(separator + 1));
+    const auto comment = value.find('#');
+    if (comment != std::string::npos) value = trim(value.substr(0, comment));
+    if (key == "image") {
+      image = unquote(value);
+    } else if (key == "resolution") {
+      if (!parse_number(value, &resolution)) resolution = 0.0;
+    } else if (key == "origin") {
+      have_origin = parse_origin(value, &origin);
+    } else if (key == "negate") {
+      if (!parse_number(value, &negate_number)) negate_number = 0.0;
+    } else if (key == "occupied_thresh") {
+      if (!parse_number(value, &occupied_threshold)) occupied_threshold = -1.0;
+    } else if (key == "free_thresh") {
+      if (!parse_number(value, &free_threshold)) free_threshold = -1.0;
+    }
+  }
+  if (image.empty() || resolution <= 0.0 || !have_origin ||
+    occupied_threshold < 0.0 || occupied_threshold > 1.0 ||
+    free_threshold < 0.0 || free_threshold > occupied_threshold)
+  {
+    if (error) *error = "invalid map yaml metadata: " + yaml_path;
+    return false;
+  }
+  const std::string image_path =
+    image.front() == '/' ? image : parent_directory(yaml_path) + "/" + image;
+  std::ifstream pgm(image_path, std::ios::binary);
+  std::string magic;
+  std::string width_text;
+  std::string height_text;
+  std::string max_value_text;
+  if (!pgm || !read_pgm_token(pgm, &magic) ||
+    !read_pgm_token(pgm, &width_text) || !read_pgm_token(pgm, &height_text) ||
+    !read_pgm_token(pgm, &max_value_text))
+  {
+    if (error) *error = "cannot read map image header: " + image_path;
+    return false;
+  }
+  uint64_t width = 0;
+  uint64_t height = 0;
+  uint64_t max_value = 0;
+  try {
+    width = std::stoull(width_text);
+    height = std::stoull(height_text);
+    max_value = std::stoull(max_value_text);
+  } catch (const std::exception &) {
+    if (error) *error = "invalid map image dimensions: " + image_path;
+    return false;
+  }
+  if ((magic != "P5" && magic != "P2") || width == 0 || height == 0 ||
+    width > std::numeric_limits<uint32_t>::max() ||
+    height > std::numeric_limits<uint32_t>::max() ||
+    width * height > 100000000ULL || max_value == 0 || max_value > 255)
+  {
+    if (error) *error = "unsupported map image: " + image_path;
+    return false;
+  }
+  if (magic == "P5") {
+    char separator = 0;
+    pgm.get(separator);
+    if (!std::isspace(static_cast<unsigned char>(separator))) {
+      if (error) *error = "invalid binary map image header: " + image_path;
+      return false;
+    }
+    if (separator == '\r' && pgm.peek() == '\n') pgm.get();
+  }
+  GridMap output;
+  output.width = static_cast<uint32_t>(width);
+  output.height = static_cast<uint32_t>(height);
+  output.resolution = resolution;
+  output.origin = origin;
+  output.cells.resize(static_cast<size_t>(width * height));
+  const bool negate = std::abs(negate_number) > 0.5;
+  for (uint64_t source_y = 0; source_y < height; ++source_y) {
+    for (uint64_t x = 0; x < width; ++x) {
+      int pixel = -1;
+      if (magic == "P5") {
+        pixel = pgm.get();
+      } else {
+        std::string pixel_text;
+        if (read_pgm_token(pgm, &pixel_text)) {
+          try {
+            pixel = std::stoi(pixel_text);
+          } catch (const std::exception &) {
+            pixel = -1;
+          }
+        }
+      }
+      if (pixel < 0 || static_cast<uint64_t>(pixel) > max_value) {
+        if (error) *error = "truncated or invalid map image: " + image_path;
+        return false;
+      }
+      const double shade = static_cast<double>(pixel) / static_cast<double>(max_value);
+      const double occupancy = negate ? shade : 1.0 - shade;
+      const int8_t cell = occupancy > occupied_threshold ? 100 :
+        (occupancy < free_threshold ? 0 : -1);
+      const uint64_t target_y = height - source_y - 1;
+      output.cells[static_cast<size_t>(target_y * width + x)] = cell;
+    }
+  }
+  if (!output.valid()) {
+    if (error) *error = "loaded map is invalid: " + yaml_path;
+    return false;
+  }
+  *map = std::move(output);
+  return true;
 }
 
 double map_match_score(

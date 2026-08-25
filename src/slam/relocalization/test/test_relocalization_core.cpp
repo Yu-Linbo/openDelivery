@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "gtest/gtest.h"
@@ -124,6 +125,84 @@ TEST(RelocalizationCore, PointJsonRemovalDeletesOrphanedRecord) {
   unlink(keep_path.c_str());
   unlink(points_path.c_str());
   rmdir(directory);
+}
+
+TEST(RelocalizationCore, DiscoversRecordMapsWithCurrentMapFirst) {
+  char root_template[] = "/tmp/open_delivery_relocalization_maps_XXXXXX";
+  char * directory = mkdtemp(root_template);
+  ASSERT_NE(directory, nullptr);
+  const std::string root(directory);
+  auto make_map = [&root](const std::string & name, bool with_record) {
+    const std::string folder = root + "/" + name;
+    const std::string records = folder + "/relocalization";
+    ASSERT_EQ(mkdir(folder.c_str(), 0755), 0);
+    ASSERT_EQ(mkdir(records.c_str(), 0755), 0);
+    std::ofstream(folder + "/" + name + ".yaml") << "image: " << name << ".pgm\n";
+    if (with_record) {
+      std::ofstream(records + "/point.rloc") << "placeholder";
+    }
+  };
+  make_map("floor_a", true);
+  make_map("floor_b", true);
+  make_map("floor_empty", false);
+
+  const auto maps = discover_record_maps(root, "floor_b");
+  ASSERT_EQ(maps.size(), 2u);
+  EXPECT_EQ(maps[0], "floor_b");
+  EXPECT_EQ(maps[1], "floor_a");
+
+  for (const std::string name : {"floor_a", "floor_b", "floor_empty"}) {
+    const std::string folder = root + "/" + name;
+    unlink((folder + "/relocalization/point.rloc").c_str());
+    unlink((folder + "/" + name + ".yaml").c_str());
+    rmdir((folder + "/relocalization").c_str());
+    rmdir(folder.c_str());
+  }
+  rmdir(root.c_str());
+}
+
+TEST(RelocalizationCore, LoadsMapYamlAndFlipsPgmRowsIntoMapCoordinates) {
+  char root_template[] = "/tmp/open_delivery_relocalization_grid_XXXXXX";
+  char * directory = mkdtemp(root_template);
+  ASSERT_NE(directory, nullptr);
+  const std::string root(directory);
+  const std::string yaml_path = root + "/floor.yaml";
+  const std::string image_path = root + "/floor.pgm";
+  {
+    std::ofstream yaml(yaml_path);
+    yaml << "image: floor.pgm\n"
+         << "resolution: 0.25\n"
+         << "origin: [1.0, -2.0, 0.5]\n"
+         << "negate: 0\n"
+         << "occupied_thresh: 0.65\n"
+         << "free_thresh: 0.196\n";
+  }
+  {
+    std::ofstream pgm(image_path, std::ios::binary);
+    pgm << "P5\n# top row then bottom row\n2 2\n255\n";
+    const unsigned char pixels[] = {0, 255, 128, 255};
+    pgm.write(reinterpret_cast<const char *>(pixels), sizeof(pixels));
+  }
+
+  GridMap map;
+  std::string error;
+  ASSERT_TRUE(load_grid_map_from_yaml(yaml_path, &map, &error)) << error;
+  ASSERT_TRUE(map.valid());
+  EXPECT_EQ(map.width, 2u);
+  EXPECT_EQ(map.height, 2u);
+  EXPECT_DOUBLE_EQ(map.resolution, 0.25);
+  EXPECT_DOUBLE_EQ(map.origin.x, 1.0);
+  EXPECT_DOUBLE_EQ(map.origin.y, -2.0);
+  EXPECT_DOUBLE_EQ(map.origin.yaw, 0.5);
+  ASSERT_EQ(map.cells.size(), 4u);
+  EXPECT_EQ(static_cast<int>(map.cells[0]), -1);
+  EXPECT_EQ(static_cast<int>(map.cells[1]), 0);
+  EXPECT_EQ(static_cast<int>(map.cells[2]), 100);
+  EXPECT_EQ(static_cast<int>(map.cells[3]), 0);
+
+  unlink(yaml_path.c_str());
+  unlink(image_path.c_str());
+  rmdir(root.c_str());
 }
 
 }  // namespace

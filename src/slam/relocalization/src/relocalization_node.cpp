@@ -1,4 +1,7 @@
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -7,6 +10,7 @@
 #include <sys/stat.h>
 #include <utility>
 
+#include "custom_msgs_srvs/msg/localize_nav_command.hpp"
 #include "custom_msgs_srvs/msg/robot_status.hpp"
 #include "custom_msgs_srvs/srv/record_relocalization.hpp"
 #include "custom_msgs_srvs/srv/relocalize.hpp"
@@ -42,6 +46,12 @@ geometry_msgs::msg::Quaternion yaw_quaternion(double yaw) {
   return q;
 }
 
+struct HistoricalMatch {
+  MatchResult result;
+  std::string map_name;
+  std::string record_id;
+};
+
 }  // namespace
 
 class RelocalizationNode : public rclcpp::Node {
@@ -56,6 +66,15 @@ public:
       base_frame_ = ns.empty() ? "base_footprint" : ns + "/base_footprint";
     }
     pose_first_threshold_ = declare_parameter<double>("pose_first_threshold", 0.55);
+    history_match_threshold_ =
+      declare_parameter<double>("history_match_threshold", 0.55);
+    auto_relocalize_on_startup_ =
+      declare_parameter<bool>("auto_relocalize_on_startup", true);
+    auto_retry_limit_ = static_cast<int>(std::max<int64_t>(
+      1, declare_parameter<int64_t>("auto_relocalize_retry_limit", 30)));
+    const double auto_retry_period = std::max(
+      0.1, declare_parameter<double>("auto_relocalize_retry_period_sec", 0.5));
+    robot_id_ = trim_slashes(get_namespace());
     max_scan_age_sec_ = declare_parameter<double>("max_scan_age_sec", 1.0);
     config_.search_xy = declare_parameter<double>("search_xy", config_.search_xy);
     config_.search_yaw = declare_parameter<double>("search_yaw", config_.search_yaw);
@@ -73,6 +92,8 @@ public:
       std::bind(&RelocalizationNode::on_map, this, std::placeholders::_1));
     initial_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "initial", rclcpp::QoS(10));
+    localize_command_pub_ =
+      create_publisher<custom_msgs_srvs::msg::LocalizeNavCommand>("localize_nav_command", 10);
 
     record_service_ = create_service<custom_msgs_srvs::srv::RecordRelocalization>(
       "record_relocalization",
@@ -83,17 +104,37 @@ public:
       std::bind(
         &RelocalizationNode::on_relocalize, this, std::placeholders::_1,
         std::placeholders::_2));
+    auto_timer_ = create_wall_timer(
+      std::chrono::duration<double>(auto_retry_period),
+      std::bind(&RelocalizationNode::on_auto_relocalize, this));
 
     RCLCPP_INFO(
       get_logger(),
-      "ready: map_root=%s base=%s services=record_relocalization,relocalize",
-      map_root_.c_str(), base_frame_.c_str());
+      "ready: map_root=%s base=%s auto_startup=%s services=record_relocalization,relocalize",
+      map_root_.c_str(), base_frame_.c_str(),
+      auto_relocalize_on_startup_ ? "true" : "false");
   }
 
 private:
   void on_status(const custom_msgs_srvs::msg::RobotStatus::SharedPtr message) {
     std::lock_guard<std::mutex> lock(mutex_);
     const std::string next_map = message->current_map;
+    const std::string next_status = message->robot_status;
+    if (auto_relocalize_on_startup_ && !auto_relocalize_done_) {
+      if (next_status == "localizing") {
+        startup_localizing_seen_ = true;
+      } else if (next_status == "localization_lost" &&
+        (startup_localizing_seen_ || robot_status_.empty()) && !auto_relocalize_pending_)
+      {
+        auto_relocalize_pending_ = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "startup localization lost; scheduling current-map-first all-map relocalization");
+      } else if (next_status == "shutdown") {
+        auto_relocalize_pending_ = false;
+        auto_relocalize_done_ = true;
+      }
+    }
     if (!current_map_.empty() && !next_map.empty() && next_map != current_map_) {
       map_ready_ = false;
       RCLCPP_INFO(
@@ -264,6 +305,149 @@ private:
     message->pose.covariance[35] = 0.03;
   }
 
+  HistoricalMatch match_records_on_map(
+    const std::string & map_name, const GridMap & map, const ScanData & scan)
+  {
+    HistoricalMatch best;
+    best.map_name = map_name;
+    const auto records = load_records(
+      record_directory(map_name), map_name,
+      map_root_ + "/" + map_name + "/" + map_name + "_points.json");
+    for (const auto & record : records) {
+      const MatchResult candidate = search_pose(map, scan, record.pose, &record, config_);
+      if (candidate.valid && (!best.result.valid || candidate.score > best.result.score)) {
+        best.result = candidate;
+        best.record_id = record.id;
+      }
+    }
+    return best;
+  }
+
+  bool find_history_match(
+    const std::string & current_map, const GridMap & current_grid,
+    const ScanData & scan, bool search_other_maps,
+    HistoricalMatch * output, std::string * error)
+  {
+    HistoricalMatch current = match_records_on_map(current_map, current_grid, scan);
+    HistoricalMatch best_seen = current;
+    if (current.result.valid && current.result.score >= history_match_threshold_) {
+      *output = std::move(current);
+      return true;
+    }
+    if (!search_other_maps) {
+      *error = current.result.valid ?
+        "best history match below threshold on current map" :
+        "no usable saved scan records on current map";
+      return false;
+    }
+
+    HistoricalMatch best_other;
+    const auto maps = discover_record_maps(map_root_, current_map);
+    for (const auto & candidate_name : maps) {
+      if (candidate_name == current_map) continue;
+      GridMap candidate_grid;
+      std::string map_error;
+      const std::string yaml =
+        map_root_ + "/" + candidate_name + "/" + candidate_name + ".yaml";
+      if (!load_grid_map_from_yaml(yaml, &candidate_grid, &map_error)) {
+        RCLCPP_WARN(
+          get_logger(), "skip relocalization map %s: %s",
+          candidate_name.c_str(), map_error.c_str());
+        continue;
+      }
+      HistoricalMatch candidate =
+        match_records_on_map(candidate_name, candidate_grid, scan);
+      if (candidate.result.valid &&
+        (!best_seen.result.valid || candidate.result.score > best_seen.result.score))
+      {
+        best_seen = candidate;
+      }
+      if (candidate.result.valid && candidate.result.score >= history_match_threshold_ &&
+        (!best_other.result.valid || candidate.result.score > best_other.result.score))
+      {
+        best_other = std::move(candidate);
+      }
+    }
+    if (best_other.result.valid) {
+      *output = std::move(best_other);
+      return true;
+    }
+    if (best_seen.result.valid) {
+      *error = "best history match below threshold on map " + best_seen.map_name;
+    } else {
+      *error = "no usable saved scan records on any map";
+    }
+    return false;
+  }
+
+  bool publish_localization(
+    const std::string & current_map, const HistoricalMatch & match,
+    custom_msgs_srvs::srv::Relocalize::Response * response)
+  {
+    fill_pose_message(match.result.pose, &response->corrected_pose);
+    if (match.map_name == current_map) {
+      initial_pub_->publish(response->corrected_pose);
+      response->message = "published corrected initial pose on current map " + current_map;
+      return true;
+    }
+    if (robot_id_.empty()) {
+      response->message = "cannot switch map from the root namespace";
+      return false;
+    }
+    custom_msgs_srvs::msg::LocalizeNavCommand command;
+    command.header.stamp = now();
+    command.header.frame_id = map_frame_;
+    command.robot_id = robot_id_;
+    command.map_name = match.map_name;
+    command.set_initial_pose = true;
+    command.x = match.result.pose.x;
+    command.y = match.result.pose.y;
+    command.yaw = match.result.pose.yaw;
+    localize_command_pub_->publish(command);
+    response->message =
+      "requested map switch and corrected initial pose on " + match.map_name;
+    return true;
+  }
+
+  void on_auto_relocalize() {
+    int attempt = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!auto_relocalize_pending_ || auto_relocalize_done_) return;
+      attempt = ++auto_retry_attempts_;
+    }
+    auto request = std::make_shared<custom_msgs_srvs::srv::Relocalize::Request>();
+    auto response = std::make_shared<custom_msgs_srvs::srv::Relocalize::Response>();
+    request->mode = custom_msgs_srvs::srv::Relocalize::Request::MODE_HISTORY;
+    on_relocalize(request, response);
+    bool exhausted = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (response->success) {
+        auto_relocalize_pending_ = false;
+        auto_relocalize_done_ = true;
+      } else if (attempt >= auto_retry_limit_) {
+        auto_relocalize_pending_ = false;
+        auto_relocalize_done_ = true;
+        exhausted = true;
+      }
+    }
+    if (response->success) {
+      RCLCPP_INFO(
+        get_logger(), "startup relocalization succeeded after %d attempt(s): %s",
+        attempt, response->message.c_str());
+    } else if (exhausted) {
+      RCLCPP_ERROR(
+        get_logger(), "startup relocalization stopped after %d attempt(s): %s",
+        attempt, response->message.c_str());
+    } else {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 3000,
+        "startup relocalization attempt %d/%d deferred: %s",
+        attempt, auto_retry_limit_, response->message.c_str());
+    }
+  }
+
   void on_relocalize(
     const std::shared_ptr<custom_msgs_srvs::srv::Relocalize::Request> request,
     std::shared_ptr<custom_msgs_srvs::srv::Relocalize::Response> response)
@@ -289,7 +473,8 @@ private:
       return;
     }
 
-    MatchResult best;
+    HistoricalMatch best;
+    best.map_name = map_name;
     if (request->mode == custom_msgs_srvs::srv::Relocalize::Request::MODE_POSE_FIRST) {
       const auto & input = request->pose;
       if (!input.header.frame_id.empty() && input.header.frame_id != map_frame_) {
@@ -300,48 +485,43 @@ private:
         input.pose.pose.position.x,
         input.pose.pose.position.y,
         tf2::getYaw(input.pose.pose.orientation)};
-      best = search_pose(map, scan, seed, nullptr, config_);
-      if (best.valid && best.score >= pose_first_threshold_) {
+      best.result = search_pose(map, scan, seed, nullptr, config_);
+      if (best.result.valid && best.result.score >= pose_first_threshold_) {
         response->used_fallback = false;
       } else {
         response->used_fallback = true;
-        best = MatchResult{};
+        best.result = MatchResult{};
       }
     }
 
     if (request->mode == custom_msgs_srvs::srv::Relocalize::Request::MODE_HISTORY ||
       response->used_fallback)
     {
-      const auto records = load_records(
-        record_directory(map_name), map_name,
-        map_root_ + "/" + map_name + "/" + map_name + "_points.json");
-      if (records.empty()) {
-        response->message = "no saved scan records for current map";
+      HistoricalMatch history;
+      const bool search_other_maps =
+        request->mode == custom_msgs_srvs::srv::Relocalize::Request::MODE_HISTORY;
+      if (!find_history_match(map_name, map, scan, search_other_maps, &history, &error)) {
+        response->message = error;
         return;
       }
-      for (const auto & record : records) {
-        const MatchResult candidate = search_pose(map, scan, record.pose, &record, config_);
-        if (candidate.valid && (!best.valid || candidate.score > best.score)) {
-          best = candidate;
-          response->matched_record_id = record.id;
-        }
-      }
+      best = std::move(history);
+      response->matched_record_id = best.record_id;
     }
 
-    if (!best.valid) {
+    if (!best.result.valid) {
       response->message = "scan matching produced no candidate";
       return;
     }
-    fill_pose_message(best.pose, &response->corrected_pose);
-    initial_pub_->publish(response->corrected_pose);
+    if (!publish_localization(map_name, best, response.get())) return;
     response->success = true;
-    response->score = best.score;
-    response->message = "published corrected initial pose";
+    response->score = best.result.score;
     RCLCPP_INFO(
       get_logger(),
-      "relocalized map=%s mode=%u fallback=%s score=%.3f map=%.3f scan=%.3f record=%s",
-      map_name.c_str(), request->mode, response->used_fallback ? "true" : "false",
-      best.score, best.map_score, best.scan_score,
+      "relocalized source_map=%s target_map=%s mode=%u fallback=%s "
+      "score=%.3f map_score=%.3f scan_score=%.3f record=%s",
+      map_name.c_str(), best.map_name.c_str(), request->mode,
+      response->used_fallback ? "true" : "false",
+      best.result.score, best.result.map_score, best.result.scan_score,
       response->matched_record_id.c_str());
   }
 
@@ -349,12 +529,20 @@ private:
   std::string map_root_;
   std::string map_frame_;
   std::string base_frame_;
+  std::string robot_id_;
   std::string current_map_;
   std::string grid_map_name_;
   std::string robot_status_;
   double pose_first_threshold_{0.55};
+  double history_match_threshold_{0.55};
   double max_scan_age_sec_{1.0};
   MatchConfig config_;
+  int auto_retry_limit_{30};
+  int auto_retry_attempts_{0};
+  bool auto_relocalize_on_startup_{true};
+  bool startup_localizing_seen_{false};
+  bool auto_relocalize_pending_{false};
+  bool auto_relocalize_done_{false};
   bool has_scan_{false};
   bool map_ready_{false};
   rclcpp::Time scan_received_at_{0, 0, RCL_ROS_TIME};
@@ -366,8 +554,11 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pub_;
+  rclcpp::Publisher<custom_msgs_srvs::msg::LocalizeNavCommand>::SharedPtr
+    localize_command_pub_;
   rclcpp::Service<custom_msgs_srvs::srv::RecordRelocalization>::SharedPtr record_service_;
   rclcpp::Service<custom_msgs_srvs::srv::Relocalize>::SharedPtr relocalize_service_;
+  rclcpp::TimerBase::SharedPtr auto_timer_;
 };
 
 }  // namespace relocalization

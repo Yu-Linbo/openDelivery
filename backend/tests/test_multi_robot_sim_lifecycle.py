@@ -62,6 +62,38 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
                 (robot110_slot, robot110_pose),
             )
 
+    def test_map_default_spawn_pose_uses_absolute_gazebo_coordinates(self):
+        orchestrator = self._orchestrator()
+        expected = {
+            "test_101": (-14.41, 12.54, 0.05, 0.0),
+            "test_102": (6.81, 12.92, 0.05, 0.0),
+            "test_103": (-6.01, -7.04, 0.05, 0.0),
+            "test_104": (6.45, -7.81, 0.05, 0.0),
+        }
+        fallback = (1.0, 2.0, 0.05, 0.25)
+        for map_name, pose in expected.items():
+            self.assertEqual(orchestrator._spawn_pose_for_map(map_name, fallback), pose)
+        self.assertEqual(
+            orchestrator._spawn_pose_for_map("robot1_mapping", fallback),
+            fallback,
+        )
+
+    def test_launch_spawn_slots_match_map_default_positions(self):
+        paths = (
+            PROJECT_ROOT / "src" / "simulate" / "simulate" / "launch" / "simulate.launch.py",
+            PROJECT_ROOT / "params" / "launch" / "simulate" / "simulate.launch.py",
+        )
+        expected_rows = (
+            '"1": (-14.41, 12.54, 0.05, 0.0)',
+            '"2": (6.81, 12.92, 0.05, 0.0)',
+            '"3": (-6.01, -7.04, 0.05, 0.0)',
+            '"4": (6.45, -7.81, 0.05, 0.0)',
+        )
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for row in expected_rows:
+                self.assertIn(row, text)
+
     def test_spawn_slot_assigns_unique_lidar_collision_bit(self):
         orchestrator = self._orchestrator()
         first = orchestrator._robot_process_spec(
@@ -209,6 +241,7 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
                     return_value={
                         "robot_status": "shutdown",
                         "localization_method": "gazebo_ground_truth",
+                        "current_map": "test_104",
                     },
                 )
             )
@@ -242,6 +275,8 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         terminate.assert_called_once_with("robot2")
         self.assertIn(("robot2", "pause"), manager.controls)
         self.assertTrue(start_robot.call_args.kwargs["force"])
+        self.assertIn(
+            "SIM_SPAWN_X=6.45 SIM_SPAWN_Y=-7.81", start_robot.call_args.args[1])
 
     def test_online_robot_with_missing_entity_recovers_only_its_stack(self):
         manager = FakeRosNodeManager()
