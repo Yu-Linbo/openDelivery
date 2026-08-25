@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260814-monitor-only-wide" />
+    <link rel="stylesheet" href="./styles.css?v=20260825-cst-auto-map" />
   </head>
   <body>
     <div class="layout">
@@ -373,7 +373,7 @@
         <section id="view-logs" class="view">
           <header class="view-header">
             <h1>日志</h1>
-            <p>读取 <code>log_bag/*/backup/match.json</code>，可多选 bag，勾选关联文件后下载 zip（仅含 <code>*_bag/</code> 与 <code>.txt</code>）</p>
+            <p>读取 <code>log_bag/*/backup/match.json</code>；可多选下载，或选择一个 bag 在浏览器中纯离线回放（不启动 ROS）</p>
           </header>
 
           <div class="log-bag-toolbar">
@@ -394,9 +394,10 @@
               <p id="log-bag-file-hint" class="log-bag-empty">请先在左侧选择一个 bag。</p>
               <div id="log-bag-file-list" class="log-bag-file-list"></div>
             </section>
-            <aside class="log-bag-download" aria-label="下载">
-              <h2>下载</h2>
+            <aside class="log-bag-download" aria-label="日志操作">
+              <h2>操作</h2>
               <p id="log-bag-selection-summary">未选择文件</p>
+              <button id="btn-play-log-bag" type="button" class="btn-log-bag-play" disabled>▶ 播放所选 bag</button>
               <button id="btn-download-log-bag" type="button" disabled>下载 .zip</button>
             </aside>
           </div>
@@ -550,7 +551,92 @@
       </aside>
     </div>
 
+    <div id="bag-replay-backdrop" class="bag-replay-backdrop" hidden></div>
+    <section
+      id="bag-replay-dialog"
+      class="bag-replay-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="bag-replay-title"
+      hidden
+    >
+      <header class="bag-replay-head">
+        <div>
+          <h2 id="bag-replay-title">离线 bag 回放</h2>
+          <p id="bag-replay-subtitle">等待加载…</p>
+        </div>
+        <span class="bag-replay-offline-badge">纯离线 · 不连接 ROS</span>
+        <button id="btn-bag-replay-close" type="button" class="bag-replay-close" aria-label="关闭回放">×</button>
+      </header>
+      <div class="bag-replay-body">
+        <div class="bag-replay-viewer">
+          <div class="bag-replay-toolbar">
+            <span class="bag-replay-map-follow">地图 <strong id="bag-replay-map-follow">跟随 current_map</strong></span>
+            <label class="checkbox"><input id="bag-replay-semantic-toggle" type="checkbox" checked />语义地图</label>
+            <label class="checkbox"><input id="bag-replay-points-toggle" type="checkbox" checked />点位</label>
+            <label class="checkbox"><input id="bag-replay-scan-toggle" type="checkbox" checked />scan_2d</label>
+            <label class="checkbox"><input id="bag-replay-path-toggle" type="checkbox" checked />路径</label>
+            <button id="btn-bag-replay-reset-view" type="button" class="btn-secondary">重置视图</button>
+            <span id="bag-replay-map-status" class="status">等待地图…</span>
+          </div>
+          <div id="bag-replay-canvas-wrap" class="bag-replay-canvas-wrap">
+            <canvas id="bag-replay-canvas" aria-label="bag 离线地图回放"></canvas>
+            <div id="bag-replay-loading" class="bag-replay-loading">正在只读解析 bag…</div>
+          </div>
+          <section class="bag-replay-cameras" aria-label="录制相机画面">
+            <figure class="bag-replay-camera">
+              <figcaption><strong>前视相机</strong><span id="bag-replay-front-camera-meta">等待图像…</span></figcaption>
+              <div class="bag-replay-camera-frame">
+                <img id="bag-replay-front-camera" alt="前视相机离线回放画面" hidden />
+                <span id="bag-replay-front-camera-empty">bag 未记录前视图像</span>
+              </div>
+            </figure>
+            <figure class="bag-replay-camera">
+              <figcaption><strong>下视相机</strong><span id="bag-replay-front-down-camera-meta">等待图像…</span></figcaption>
+              <div class="bag-replay-camera-frame">
+                <img id="bag-replay-front-down-camera" alt="下视相机离线回放画面" hidden />
+                <span id="bag-replay-front-down-camera-empty">bag 未记录下视图像</span>
+              </div>
+            </figure>
+          </section>
+        </div>
+        <aside class="bag-replay-state" aria-label="录制机器人状态">
+          <h3>机器人状态</h3>
+          <dl>
+            <div><dt>机器人</dt><dd id="bag-replay-robot">—</dd></div>
+            <div><dt>当前 bag</dt><dd id="bag-replay-current-bag">—</dd></div>
+            <div><dt>时间</dt><dd id="bag-replay-state-time">00:00.000</dd></div>
+            <div><dt>地图</dt><dd id="bag-replay-current-map">—</dd></div>
+            <div><dt>位姿</dt><dd id="bag-replay-pose">—</dd></div>
+            <div><dt>速度</dt><dd id="bag-replay-velocity">—</dd></div>
+            <div><dt>robot_status</dt><dd id="bag-replay-robot-status">—</dd></div>
+            <div><dt>task_id</dt><dd id="bag-replay-task-id">—</dd></div>
+            <div><dt>task_status</dt><dd id="bag-replay-task-status">—</dd></div>
+            <div><dt>task_progress</dt><dd id="bag-replay-task-progress">—</dd></div>
+            <div><dt>control_status</dt><dd id="bag-replay-control-status">—</dd></div>
+            <div><dt>定位方式</dt><dd id="bag-replay-localization">—</dd></div>
+            <div><dt>语义位置</dt><dd id="bag-replay-position">—</dd></div>
+          </dl>
+          <h3>bag 信息</h3>
+          <p id="bag-replay-summary" class="bag-replay-summary">—</p>
+          <div id="bag-replay-topics" class="bag-replay-topics"></div>
+        </aside>
+      </div>
+      <footer class="bag-replay-controls">
+        <button id="btn-bag-replay-toggle" type="button" class="bag-replay-toggle">▶ 播放</button>
+        <span id="bag-replay-current-time" class="bag-replay-time">00:00.000</span>
+        <input id="bag-replay-progress" type="range" min="0" max="0" step="0.01" value="0" aria-label="回放进度" />
+        <span id="bag-replay-duration" class="bag-replay-time">00:00.000</span>
+        <label class="bag-replay-speed">倍速
+          <select id="bag-replay-speed">
+            <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option><option value="1.5">1.5×</option>
+            <option value="2">2×</option><option value="4">4×</option>
+          </select>
+        </label>
+      </footer>
+    </section>
     <script src="./map_editor.js?v=20260817-elevator-workflow"></script>
-    <script src="./app.js?v=20260817-elevator-workflow"></script>
+    <script src="./app.js?v=20260825-cst-auto-map"></script>
   </body>
 </html>

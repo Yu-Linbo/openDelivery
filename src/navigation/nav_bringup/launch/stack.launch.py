@@ -140,6 +140,8 @@ def _launch_setup(context, *_args, **_kwargs):
                             "action_server_wait_sec": 15.0,
                             "nav2_goal_retry_count": 2,
                             "nav2_goal_retry_delay_sec": 1.0,
+                            "nav2_goal_response_timeout_sec": 10.0,
+                            "nav2_feedback_timeout_sec": 20.0,
                             "use_sim_time": use_sim,
                         }
                     ],

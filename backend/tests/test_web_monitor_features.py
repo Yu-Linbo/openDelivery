@@ -166,6 +166,72 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("max-width: 1400px", css)
         self.assertIn(".content.content--monitor", css)
 
+    def test_log_bag_player_is_offline_and_complete(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+        server_py = (ROOT / "backend" / "server.py").read_text(encoding="utf-8")
+        replay_py = (ROOT / "backend" / "bag_replay.py").read_text(encoding="utf-8")
+        recorder_cpp = (ROOT / "src" / "system" / "log_bag" / "src" / "robot_log_recorder.cpp").read_text(encoding="utf-8")
+
+        for element_id in (
+            "btn-play-log-bag",
+            "bag-replay-dialog",
+            "bag-replay-canvas",
+            "bag-replay-progress",
+            "bag-replay-speed",
+            "bag-replay-semantic-toggle",
+            "bag-replay-points-toggle",
+            "bag-replay-robot-status",
+            "bag-replay-task-id",
+            "bag-replay-current-bag",
+            "bag-replay-front-camera",
+            "bag-replay-front-down-camera",
+            "bag-replay-map-follow",
+        ):
+            self.assertIn('id="' + element_id + '"', html)
+        self.assertIn('API_BASE_URL + "/api/log_bag/replay"', js)
+        self.assertIn("selectedLogBagsForReplay", js)
+        self.assertIn("JSON.stringify({ bags:", js)
+        self.assertIn("bagReplaySegmentAt", js)
+        self.assertNotIn("selectedLogBagIndices.size !== 1", js)
+        self.assertIn("requestAnimationFrame(tickBagReplay)", js)
+        self.assertIn("loadBagReplayMap", js)
+        self.assertIn("bagReplayCameraAt", js)
+        self.assertIn("updateBagReplayCamera", js)
+        self.assertIn('data.get("bags")', server_py)
+        self.assertIn("bag_replay.merge_replays(replays)", server_py)
+        self.assertIn(".bag-replay-state", css)
+        self.assertIn(".bag-replay-cameras", css)
+        self.assertIn('path == "/api/log_bag/replay"', server_py)
+        self.assertIn('out["available_maps"] = list_floors()', server_py)
+        self.assertIn("?mode=ro", replay_py)
+        self.assertIn("PRAGMA query_only=ON", replay_py)
+        self.assertNotIn("import rclpy", replay_py)
+        self.assertNotIn("subprocess", replay_py)
+        self.assertIn("/front_camera/image_raw", recorder_cpp)
+        self.assertIn("/front_down_camera/image_raw", recorder_cpp)
+        self.assertIn('"sensor_msgs/msg/Image": 90', replay_py)
+        self.assertNotIn('id="bag-replay-map-select"', html)
+        self.assertIn("formatLogBagTimestamp", js)
+        self.assertIn('timeZone: "Asia/Shanghai"', js)
+        self.assertIn(" CST`;", js)
+        self.assertIn("bagReplayMapAt", js)
+        self.assertIn("syncBagReplayMapToCurrentTime", js)
+        self.assertIn('bagReplayTimeline("maps")', js)
+        self.assertIn("setBagReplayPlaying(duration > 0)", js)
+        self.assertIn('"maps": map_changes', replay_py)
+        self.assertIn('"initial_map_name": initial_map_name', replay_py)
+        self.assertIn("width: auto", css)
+        self.assertIn("height: auto", css)
+        self.assertIn("aspect-ratio: auto", css)
+        self.assertIn("append_unique(current_tags_, task_id)", recorder_cpp)
+        self.assertIn("write_bag_tags_marker(current_bag_path_, current_tags_)", recorder_cpp)
+        self.assertIn("log_bag::cst_iso8601", recorder_cpp)
+        self.assertIn("last_terminal_task_id_ == task_id", recorder_cpp)
+        self.assertIn("write_robot_status_sidecar", recorder_cpp)
+        self.assertIn("critical_status_topic", recorder_cpp)
+
     def test_standalone_editor_tool_modes_are_exclusive(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         editor = (ROOT / "web" / "map_editor.js").read_text(encoding="utf-8")

@@ -43,7 +43,7 @@ class FakeElevator(Node):
         self.declare_parameter("relocalize_retry_count", 10)
         self.declare_parameter("relocalize_retry_delay_sec", 0.3)
         self.declare_parameter("map_status_propagation_delay_sec", 0.5)
-        self.declare_parameter("post_relocalize_settle_sec", 1.5)
+        self.declare_parameter("post_relocalize_settle_sec", 3.0)
         self.declare_parameter("service_wait_sec", 10.0)
         self.declare_parameter(
             "web_api_base", os.environ.get("OPEN_DELIVERY_API", "http://127.0.0.1:8001")

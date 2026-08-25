@@ -1,14 +1,22 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rcl_interfaces/msg/log.hpp>
+#include <custom_msgs_srvs/msg/task_status.hpp>
+#include <custom_msgs_srvs/msg/robot_status.hpp>
+
+#include "log_bag/local_time.hpp"
+#include "log_bag/match_index_utils.hpp"
+#include "log_bag/retention_policy.hpp"
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <limits.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cerrno>
 #include <cstdio>
 #include <csignal>
@@ -20,6 +28,8 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -29,7 +39,7 @@
 
 namespace {
 
-constexpr std::uintmax_t kDefaultMaxBagBytes = 100U * 1024U * 1024U;
+constexpr std::uintmax_t kDefaultMaxBagBytes = 5U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
 
 std::atomic_bool g_stop_requested{false};
@@ -173,24 +183,29 @@ std::string basename_of(const std::string & path) {
   return path.substr(pos + 1);
 }
 
+bool same_existing_path(const std::string & a, const std::string & b) {
+  char resolved_a[PATH_MAX] {};
+  char resolved_b[PATH_MAX] {};
+  if (::realpath(a.c_str(), resolved_a) == nullptr ||
+    ::realpath(b.c_str(), resolved_b) == nullptr)
+  {
+    return false;
+  }
+  return std::strcmp(resolved_a, resolved_b) == 0;
+}
+
 std::string now_iso8601() {
   const auto now = std::chrono::system_clock::now();
-  const auto t = std::chrono::system_clock::to_time_t(now);
-  std::tm tm {};
-  gmtime_r(&t, &tm);
-  std::ostringstream os;
-  os << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-  return os.str();
+  const auto value = log_bag::cst_iso8601(
+    std::chrono::system_clock::to_time_t(now));
+  return value.empty() ? "1970-01-01T00:00:00+00:00" : value;
 }
 
 std::string timestamp_for_filename() {
   const auto now = std::chrono::system_clock::now();
-  const auto t = std::chrono::system_clock::to_time_t(now);
-  std::tm tm {};
-  gmtime_r(&t, &tm);
-  std::ostringstream os;
-  os << std::put_time(&tm, "%Y%m%dT%H%M%S");
-  return os.str();
+  const auto value = log_bag::cst_filename_timestamp(
+    std::chrono::system_clock::to_time_t(now));
+  return value.empty() ? "19700101T000000+0000" : value;
 }
 
 std::uintmax_t directory_size(const std::string & path) {
@@ -228,6 +243,110 @@ bool move_path(const std::string & from, const std::string & to) {
   return ::rename(from.c_str(), to.c_str()) == 0;
 }
 
+constexpr const char * kTaskTagsMarker = ".opendelivery_task_tags";
+constexpr const char * kRobotStatusSidecar = ".opendelivery_robot_status.json";
+
+struct RecordedRobotStatus {
+  std::int64_t timestamp_ns{0};
+  std::string robot_name;
+  std::string robot_model;
+  std::string current_map;
+  std::string current_position;
+  std::string robot_status;
+  std::string task_status;
+  std::string control_status;
+  std::string localization_method;
+  bool is_simulation{false};
+  float task_progress{-1.0F};
+};
+
+std::int64_t system_now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+RecordedRobotStatus record_robot_status(
+  const custom_msgs_srvs::msg::RobotStatus & msg)
+{
+  RecordedRobotStatus out;
+  out.timestamp_ns = system_now_ns();
+  out.robot_name = msg.robot_name;
+  out.robot_model = msg.robot_model;
+  out.current_map = msg.current_map;
+  out.current_position = msg.current_position;
+  out.robot_status = msg.robot_status;
+  out.task_status = msg.task_status;
+  out.control_status = msg.control_status;
+  out.localization_method = msg.localization_method;
+  out.is_simulation = msg.is_simulation;
+  out.task_progress = std::isfinite(msg.task_progress) ? msg.task_progress : -1.0F;
+  return out;
+}
+
+void write_robot_status_sidecar(
+  const std::string & bag_path, const std::vector<RecordedRobotStatus> & samples)
+{
+  if (!is_directory(bag_path) || samples.empty()) {
+    return;
+  }
+  const std::string path = join_path(bag_path, kRobotStatusSidecar);
+  const std::string tmp = path + ".tmp";
+  std::ofstream out(tmp, std::ios::trunc);
+  if (!out) {
+    return;
+  }
+  out << "{\n  \"version\": 1,\n  \"statuses\": [";
+  for (std::size_t index = 0; index < samples.size(); ++index) {
+    const auto & row = samples[index];
+    out << (index == 0 ? "\n" : ",\n")
+        << "    {\"timestamp_ns\": " << row.timestamp_ns
+        << ", \"robot_name\": \"" << json_escape(row.robot_name)
+        << "\", \"robot_model\": \"" << json_escape(row.robot_model)
+        << "\", \"current_map\": \"" << json_escape(row.current_map)
+        << "\", \"current_position\": \"" << json_escape(row.current_position)
+        << "\", \"robot_status\": \"" << json_escape(row.robot_status)
+        << "\", \"task_status\": \"" << json_escape(row.task_status)
+        << "\", \"control_status\": \"" << json_escape(row.control_status)
+        << "\", \"localization_method\": \"" << json_escape(row.localization_method)
+        << "\", \"is_simulation\": " << (row.is_simulation ? "true" : "false")
+        << ", \"task_progress\": " << std::setprecision(9) << row.task_progress << "}";
+  }
+  out << "\n  ]\n}\n";
+  out.close();
+  ::rename(tmp.c_str(), path.c_str());
+}
+
+void write_bag_tags_marker(
+  const std::string & bag_path, const std::vector<std::string> & tags)
+{
+  if (!is_directory(bag_path) || tags.empty()) {
+    return;
+  }
+  const std::string marker = join_path(bag_path, kTaskTagsMarker);
+  const std::string tmp = marker + ".tmp";
+  std::ofstream out(tmp, std::ios::trunc);
+  if (!out) {
+    return;
+  }
+  for (const auto & tag : tags) {
+    out << std::quoted(tag) << "\n";
+  }
+  out.close();
+  ::rename(tmp.c_str(), marker.c_str());
+}
+
+std::vector<std::string> read_bag_tags_marker(const std::string & bag_path) {
+  std::vector<std::string> tags;
+  std::ifstream in(join_path(bag_path, kTaskTagsMarker));
+  std::string tag;
+  while (in >> std::quoted(tag)) {
+    if (!trim(tag).empty() && std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+      tags.push_back(tag);
+    }
+  }
+  return tags;
+}
+
 bool has_suffix(const std::string & s, const std::string & suffix) {
   return s.size() >= suffix.size() &&
          s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -260,11 +379,8 @@ std::string file_prefix_before_terminal(const std::string & name) {
 }
 
 std::string iso8601_from_compact_timestamp(const std::string & compact) {
-  if (compact.size() != 15 || compact[8] != 'T') {
-    return now_iso8601();
-  }
-  return compact.substr(0, 4) + "-" + compact.substr(4, 2) + "-" + compact.substr(6, 2) + "T" +
-         compact.substr(9, 2) + ":" + compact.substr(11, 2) + ":" + compact.substr(13, 2) + "Z";
+  const auto value = log_bag::cst_iso8601_from_compact(compact);
+  return value.empty() ? now_iso8601() : value;
 }
 
 std::string file_mtime_iso8601(const std::string & path) {
@@ -272,11 +388,8 @@ std::string file_mtime_iso8601(const std::string & path) {
   if (::stat(path.c_str(), &st) != 0) {
     return now_iso8601();
   }
-  std::tm tm {};
-  gmtime_r(&st.st_mtime, &tm);
-  std::ostringstream os;
-  os << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-  return os.str();
+  const auto value = log_bag::cst_iso8601(st.st_mtime);
+  return value.empty() ? now_iso8601() : value;
 }
 
 pid_t spawn_shell_command(const std::string & command, int log_fd) {
@@ -407,7 +520,7 @@ struct Config {
   std::string robot_name;
   std::string root = default_root();
   std::uintmax_t max_bag_bytes = kDefaultMaxBagBytes;
-  double poll_seconds = 2.0;
+  double poll_seconds = 0.5;
 };
 
 void print_usage() {
@@ -487,6 +600,64 @@ public:
     os << "]\n"
        << "    }";
     new_bags_.push_back(os.str());
+    write();
+  }
+
+  std::vector<log_bag::MatchBagEntry> bag_entries() const {
+    std::vector<log_bag::MatchBagEntry> entries =
+      log_bag::parse_match_bag_members(previous_bags_raw_);
+    for (const auto & raw : new_bags_) {
+      const auto parsed = log_bag::parse_match_bag_members(raw);
+      entries.insert(entries.end(), parsed.begin(), parsed.end());
+    }
+
+    std::vector<log_bag::MatchBagEntry> merged;
+    for (const auto & entry : entries) {
+      if (entry.path.empty()) {
+        continue;
+      }
+      const auto existing = std::find_if(
+        merged.begin(), merged.end(),
+        [&entry](const log_bag::MatchBagEntry & candidate) {
+          return candidate.path == entry.path;
+        });
+      if (existing == merged.end()) {
+        merged.push_back(entry);
+      } else if (entry.tagged || !existing->tagged) {
+        // Prefer a tagged duplicate so an older valid tag can never be erased
+        // by a later malformed/untagged duplicate index member.
+        *existing = entry;
+      }
+    }
+    return merged;
+  }
+
+  void remove_bags(const std::set<std::string> & paths) {
+    if (paths.empty()) {
+      return;
+    }
+    std::vector<std::string> kept;
+    const auto retain_members = [&paths, &kept](const std::string & raw_members) {
+        for (const auto & entry : log_bag::parse_match_bag_members(raw_members)) {
+          if (entry.path.empty() || paths.count(entry.path) == 0) {
+            kept.push_back(entry.raw);
+          }
+        }
+      };
+    retain_members(previous_bags_raw_);
+    for (const auto & raw : new_bags_) {
+      retain_members(raw);
+    }
+
+    std::ostringstream os;
+    for (std::size_t i = 0; i < kept.size(); ++i) {
+      if (i > 0) {
+        os << ",\n";
+      }
+      os << kept[i];
+    }
+    previous_bags_raw_ = os.str();
+    new_bags_.clear();
     write();
   }
 
@@ -584,6 +755,7 @@ public:
     ensure_dir(backup_logs_dir_);
     ensure_dir(backup_bags_dir_);
     recover_leftover_artifacts();
+    prune_untagged_backups();
     open_text_log();
     ensure_ros();
   }
@@ -598,6 +770,12 @@ public:
     write_line("robot_log_recorder starting for robot=" + cfg_.robot_name);
     while (!g_stop_requested.load()) {
       rclcpp::spin_some(node_);
+      write_bag_tags_marker(current_bag_path_, current_tags_);
+      if (!task_boundary_reason_.empty()) {
+        const std::string reason = task_boundary_reason_;
+        task_boundary_reason_.clear();
+        stop_current_bag(reason);
+      }
       rotate_bag_if_needed();
       if (bag_pid_ <= 0) {
         start_next_bag_if_needed();
@@ -626,6 +804,86 @@ private:
       [this](const rcl_interfaces::msg::Log::SharedPtr msg) {
         write_rosout(*msg);
       });
+
+    const auto task_qos =
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().transient_local();
+    task_status_sub_ = node_->create_subscription<custom_msgs_srvs::msg::TaskStatus>(
+      "task_status",
+      task_qos,
+      [this](const custom_msgs_srvs::msg::TaskStatus::SharedPtr msg) {
+        on_task_status(*msg);
+      });
+
+    robot_status_sub_ = node_->create_subscription<custom_msgs_srvs::msg::RobotStatus>(
+      "robot_status",
+      rclcpp::SystemDefaultsQoS(),
+      [this](const custom_msgs_srvs::msg::RobotStatus::SharedPtr msg) {
+        on_robot_status(*msg);
+      });
+  }
+
+  static bool terminal_task_status(const std::string & status) {
+    return status == custom_msgs_srvs::msg::TaskStatus::STATUS_FINISHED ||
+           status == custom_msgs_srvs::msg::TaskStatus::STATUS_FAILED ||
+           status == custom_msgs_srvs::msg::TaskStatus::STATUS_TERMINATED;
+  }
+
+  static bool append_unique(std::vector<std::string> & values, const std::string & value) {
+    if (std::find(values.begin(), values.end(), value) != values.end()) {
+      return false;
+    }
+    values.push_back(value);
+    return true;
+  }
+
+
+  void on_robot_status(const custom_msgs_srvs::msg::RobotStatus & msg) {
+    latest_robot_status_ = record_robot_status(msg);
+    has_latest_robot_status_ = true;
+    if (!current_bag_path_.empty()) {
+      current_status_samples_.push_back(latest_robot_status_);
+      if (current_status_samples_.size() > 10000) {
+        current_status_samples_.erase(current_status_samples_.begin());
+      }
+    }
+  }
+  void on_task_status(const custom_msgs_srvs::msg::TaskStatus & msg) {
+    const std::string task_id = trim(msg.task_id);
+    if (task_id.empty()) {
+      return;
+    }
+
+    if (terminal_task_status(msg.task_status)) {
+      if (last_terminal_task_id_ == task_id) {
+        return;
+      }
+      last_terminal_task_id_ = task_id;
+      // A very short task can start and finish in one spin cycle. Tag the
+      // current slice; the previous untagged backup remains its pre-task context.
+      append_unique(current_tags_, task_id);
+      active_task_ids_.clear();
+      task_boundary_reason_ = "task_finished";
+      write_line(
+        "task terminal boundary id=" + task_id + " status=" + msg.task_status);
+      return;
+    }
+
+    if (last_terminal_task_id_ == task_id) {
+      last_terminal_task_id_.clear();
+    }
+    const bool first_active_task = active_task_ids_.empty();
+    const bool inserted = append_unique(active_task_ids_, task_id);
+    if (!inserted) {
+      return;
+    }
+    if (first_active_task) {
+      task_boundary_reason_ =
+        task_boundary_reason_ == "task_finished" ? "task_transition" : "task_started";
+    } else if (task_boundary_reason_.empty()) {
+      // Preserve every observed task ID if a replacement overlaps this bag.
+      append_unique(current_tags_, task_id);
+    }
+    write_line("task active id=" + task_id + " status=" + msg.task_status);
   }
 
   void log_recovery(const std::string & line) const {
@@ -704,6 +962,7 @@ private:
       const std::string started_at = iso8601_from_compact_timestamp(prefix);
       const std::string ended_at = file_mtime_iso8601(archived);
       const std::string reason = repaired ? "startup_recovery" : "startup_recovery_unrepaired";
+      const auto recovered_tags = read_bag_tags_marker(archived);
       match_.add_bag(
         cfg_.robot_name,
         archived,
@@ -712,10 +971,84 @@ private:
         ended_at,
         bytes,
         {},
-        {},
+        recovered_tags,
         reason);
       log_recovery("indexed leftover bag: " + archived + " reason=" + reason);
     }
+  }
+
+  void prune_untagged_backups() {
+    struct Candidate {
+      bool tagged{false};
+      std::set<std::string> index_paths;
+    };
+
+    const auto indexed = match_.bag_entries();
+    std::map<std::string, Candidate> candidates;
+    std::set<std::string> remove_from_index;
+    for (const auto & entry : indexed) {
+      // Never derive a deletion target from an arbitrary index path. Only
+      // accept records that identify a backup/bags member, then reconstruct the
+      // actual target under this recorder's own backup_bags_dir_.
+      if (entry.path.find("/backup/bags/") == std::string::npos) {
+        continue;
+      }
+      const std::string name = basename_of(entry.path);
+      if (!same_existing_path(dirname_of(entry.path), backup_bags_dir_)) {
+        continue;
+      }
+      if (name.empty() || name.find('/') != std::string::npos ||
+        !has_suffix(name, "_terminal_bag"))
+      {
+        continue;
+      }
+      const std::string target = join_path(backup_bags_dir_, name);
+      if (!is_directory(target)) {
+        remove_from_index.insert(entry.path);
+        continue;
+      }
+      auto & candidate = candidates[name];
+      candidate.tagged = candidate.tagged || entry.tagged;
+      candidate.index_paths.insert(entry.path);
+    }
+
+    std::vector<std::string> names;
+    std::vector<bool> tagged;
+    names.reserve(candidates.size());
+    tagged.reserve(candidates.size());
+    for (const auto & item : candidates) {
+      names.push_back(item.first);
+      tagged.push_back(item.second.tagged);
+    }
+    const auto keep = log_bag::retention_keep_mask(tagged);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (keep[i] || tagged[i]) {
+        continue;
+      }
+      const std::string & name = names[i];
+      const std::string target = join_path(backup_bags_dir_, name);
+      // This is the final guard immediately before deletion.
+      if (basename_of(target) != name || !has_suffix(name, "_terminal_bag") ||
+        !same_existing_path(dirname_of(target), backup_bags_dir_) ||
+        !is_directory(target))
+      {
+        continue;
+      }
+      if (remove_path_recursive(target)) {
+        remove_from_index.insert(
+          candidates[name].index_paths.begin(), candidates[name].index_paths.end());
+        if (log_fd_ >= 0) {
+          write_line("retention removed untagged backup bag path=" + target);
+        } else {
+          log_recovery("retention removed untagged backup bag: " + target);
+        }
+      } else if (log_fd_ >= 0) {
+        write_line("retention failed to remove untagged backup bag path=" + target);
+      } else {
+        log_recovery("retention failed to remove untagged backup bag: " + target);
+      }
+    }
+    match_.remove_bags(remove_from_index);
   }
 
   void open_text_log() {
@@ -754,6 +1087,9 @@ private:
 
   std::vector<std::string> robot_topics() {
     std::vector<std::string> topics;
+    // Keep camera subscriptions even when the publishers appear after recording starts.
+    topics.push_back("/" + cfg_.robot_name + "/front_camera/image_raw");
+    topics.push_back("/" + cfg_.robot_name + "/front_down_camera/image_raw");
     try {
       const auto graph = node_->get_topic_names_and_types();
       const std::string ns_prefix = "/" + cfg_.robot_name + "/";
@@ -774,15 +1110,41 @@ private:
     return topics;
   }
 
+  std::string next_bag_path() const {
+    const std::string timestamp = timestamp_for_filename();
+    for (unsigned int sequence = 0; sequence < 1000; ++sequence) {
+      std::ostringstream name;
+      name << timestamp;
+      if (sequence > 0) {
+        name << "_" << std::setw(3) << std::setfill('0') << sequence;
+      }
+      name << "_terminal_bag";
+      const std::string active = join_path(robot_dir_, name.str());
+      const std::string backup = join_path(backup_bags_dir_, name.str());
+      if (!path_exists(active) && !path_exists(backup)) {
+        return active;
+      }
+    }
+    throw std::runtime_error("unable to allocate unique bag path");
+  }
+
   void start_next_bag_if_needed() {
     const auto topics = robot_topics();
-    if (topics.empty()) {
-      write_line("no robot-related topics discovered yet; bag recorder waits");
+    const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
+    if (std::find(topics.begin(), topics.end(), critical_status_topic) == topics.end()) {
+      write_line("critical topic not discovered yet; bag recorder waits topic=" +
+        critical_status_topic);
       return;
     }
     current_bag_topics_ = topics;
+    current_tags_ = active_task_ids_;
     current_bag_started_at_ = now_iso8601();
-    current_bag_path_ = join_path(robot_dir_, timestamp_for_filename() + "_terminal_bag");
+    current_bag_path_ = next_bag_path();
+    current_status_samples_.clear();
+    if (has_latest_robot_status_) {
+      latest_robot_status_.timestamp_ns = system_now_ns();
+      current_status_samples_.push_back(latest_robot_status_);
+    }
     std::ostringstream cmd;
     cmd << "ros2 bag record -o " << shell_quote(current_bag_path_);
     for (const auto & topic : topics) {
@@ -827,14 +1189,20 @@ private:
     current_bag_path_.clear();
     current_bag_topics_.clear();
     current_bag_started_at_.clear();
+    current_tags_.clear();
+    current_status_samples_.clear();
   }
 
   void archive_current_bag(const std::string & reason) {
     if (current_bag_path_.empty() || !path_exists(current_bag_path_)) {
       current_bag_path_.clear();
       current_bag_topics_.clear();
+      current_bag_started_at_.clear();
+      current_tags_.clear();
+      current_status_samples_.clear();
       return;
     }
+    write_robot_status_sidecar(current_bag_path_, current_status_samples_);
     const auto bytes = directory_size(current_bag_path_);
     if (reason == "recorder_exit" && bytes < kMinArchiveBagBytes) {
       discard_current_bag(reason, bytes);
@@ -846,8 +1214,12 @@ private:
       discard_current_bag("duplicate_active", bytes);
       return;
     }
+    write_bag_tags_marker(current_bag_path_, current_tags_);
     repair_bag_directory(current_bag_path_);
-    move_path(current_bag_path_, archived);
+    if (!move_path(current_bag_path_, archived)) {
+      throw std::runtime_error(
+        "failed to move bag into backup directory: " + current_bag_path_);
+    }
     match_.add_bag(
       cfg_.robot_name,
       archived,
@@ -861,6 +1233,14 @@ private:
     current_bag_path_.clear();
     current_bag_topics_.clear();
     current_bag_started_at_.clear();
+    current_tags_.clear();
+
+    current_status_samples_.clear();
+    // The task_started slice is the pre-task context. Defer pruning until the
+    // first tagged slice is indexed, so adjacency can be evaluated correctly.
+    if (reason != "task_started" && reason != "task_transition") {
+      prune_untagged_backups();
+    }
   }
 
   void archive_text_log() {
@@ -895,6 +1275,14 @@ private:
   std::shared_ptr<rclcpp::Node> node_;
   rclcpp::Subscription<rcl_interfaces::msg::Log>::SharedPtr rosout_sub_;
   int log_fd_{-1};
+  rclcpp::Subscription<custom_msgs_srvs::msg::TaskStatus>::SharedPtr task_status_sub_;
+  rclcpp::Subscription<custom_msgs_srvs::msg::RobotStatus>::SharedPtr robot_status_sub_;
+  RecordedRobotStatus latest_robot_status_;
+  bool has_latest_robot_status_{false};
+  std::vector<RecordedRobotStatus> current_status_samples_;
+  std::vector<std::string> active_task_ids_;
+  std::string last_terminal_task_id_;
+  std::string task_boundary_reason_;
   std::string text_log_real_path_;
   std::string text_log_link_path_;
   std::string archived_text_log_path_;

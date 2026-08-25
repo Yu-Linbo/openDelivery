@@ -107,6 +107,7 @@ These endpoints are used by `web/app.js`.
 - `GET /api/log_bag/matches`
   - Purpose: list all robots with `log_bag/*/backup/match.json`.
 
+  - Recorder timestamps are CST (`+08:00` / filename suffix `+0800`); task-scoped bags expose their task IDs in `tags`.
 - `GET /api/log_bag/matches?robot_name={robot}`
   - Purpose: read one robot's `match.json`.
   - If not found, returns the robot entry with `no_log: true` and empty `bags`.
@@ -115,6 +116,12 @@ These endpoints are used by `web/app.js`.
   - Body: `{ "files": ["log_bag/robot2/backup/bags/20260609T080918_terminal_bag", "log_bag/robot2/backup/logs/20260609T080918_terminal_log.txt"] }`
   - Purpose: download selected log files/directories as a zip.
   - Zip layout: flat top-level entries only — `*_terminal_bag/` directories and `*_terminal_log.txt` files (no `log_bag/.../backup/...` prefix).
+
+- `POST /api/log_bag/replay`
+  - Multi-bag body: `{ "bags": ["log_bag/robot2/backup/bags/first_terminal_bag", "log_bag/robot2/backup/bags/second_terminal_bag"] }` (up to 24).
+  - Legacy single-bag body remains supported: `{ "bag": "log_bag/robot2/backup/bags/first_terminal_bag" }`.
+  - Purpose: read rosbag2 SQLite directories in read-only mode, sort them by recorded start time, and concatenate them into one gap-free offline timeline.
+  - Returns: bag segments/topic metadata plus decoded pose, scan, path, `RobotStatus`, `TaskStatus`, velocity, a deduplicated `timeline.maps` derived from `RobotStatus.current_map`, and bounded aspect-preserving JPEG preview samples from `/<robot>/front_camera/image_raw` and `/<robot>/front_down_camera/image_raw`. Each sample identifies its segment and source bag. This endpoint never starts a ROS node or publishes a topic.
 
 ## Web And AI Shared APIs
 

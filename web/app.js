@@ -92,6 +92,47 @@ const logBagSelectionSummary = document.getElementById("log-bag-selection-summar
 const logBagRobotSelect = document.getElementById("log-bag-robot-select");
 const btnRefreshLogBags = document.getElementById("btn-refresh-log-bags");
 const btnDownloadLogBag = document.getElementById("btn-download-log-bag");
+const btnPlayLogBag = document.getElementById("btn-play-log-bag");
+const bagReplayBackdrop = document.getElementById("bag-replay-backdrop");
+const bagReplayDialog = document.getElementById("bag-replay-dialog");
+const bagReplaySubtitle = document.getElementById("bag-replay-subtitle");
+const bagReplayCanvasWrap = document.getElementById("bag-replay-canvas-wrap");
+const bagReplayCanvas = document.getElementById("bag-replay-canvas");
+const bagReplayLoading = document.getElementById("bag-replay-loading");
+const bagReplayFrontCamera = document.getElementById("bag-replay-front-camera");
+const bagReplayFrontCameraEmpty = document.getElementById("bag-replay-front-camera-empty");
+const bagReplayFrontCameraMeta = document.getElementById("bag-replay-front-camera-meta");
+const bagReplayFrontDownCamera = document.getElementById("bag-replay-front-down-camera");
+const bagReplayFrontDownCameraEmpty = document.getElementById("bag-replay-front-down-camera-empty");
+const bagReplayFrontDownCameraMeta = document.getElementById("bag-replay-front-down-camera-meta");
+const bagReplayMapFollow = document.getElementById("bag-replay-map-follow");
+const bagReplayMapStatus = document.getElementById("bag-replay-map-status");
+const bagReplaySemanticToggle = document.getElementById("bag-replay-semantic-toggle");
+const bagReplayPointsToggle = document.getElementById("bag-replay-points-toggle");
+const bagReplayScanToggle = document.getElementById("bag-replay-scan-toggle");
+const bagReplayPathToggle = document.getElementById("bag-replay-path-toggle");
+const btnBagReplayResetView = document.getElementById("btn-bag-replay-reset-view");
+const btnBagReplayClose = document.getElementById("btn-bag-replay-close");
+const btnBagReplayToggle = document.getElementById("btn-bag-replay-toggle");
+const bagReplayProgress = document.getElementById("bag-replay-progress");
+const bagReplayCurrentTime = document.getElementById("bag-replay-current-time");
+const bagReplayDuration = document.getElementById("bag-replay-duration");
+const bagReplaySpeed = document.getElementById("bag-replay-speed");
+const bagReplayStateTime = document.getElementById("bag-replay-state-time");
+const bagReplayRobot = document.getElementById("bag-replay-robot");
+const bagReplayCurrentBag = document.getElementById("bag-replay-current-bag");
+const bagReplayCurrentMap = document.getElementById("bag-replay-current-map");
+const bagReplayPose = document.getElementById("bag-replay-pose");
+const bagReplayVelocity = document.getElementById("bag-replay-velocity");
+const bagReplayRobotStatus = document.getElementById("bag-replay-robot-status");
+const bagReplayTaskId = document.getElementById("bag-replay-task-id");
+const bagReplayTaskStatus = document.getElementById("bag-replay-task-status");
+const bagReplayTaskProgress = document.getElementById("bag-replay-task-progress");
+const bagReplayControlStatus = document.getElementById("bag-replay-control-status");
+const bagReplayLocalization = document.getElementById("bag-replay-localization");
+const bagReplayPosition = document.getElementById("bag-replay-position");
+const bagReplaySummary = document.getElementById("bag-replay-summary");
+const bagReplayTopics = document.getElementById("bag-replay-topics");
 const btnResetView = document.getElementById("btn-reset-view");
 const scan2dToggle = document.getElementById("scan-2d-toggle");
 const plannedPathToggle = document.getElementById("planned-path-toggle");
@@ -3162,6 +3203,7 @@ function appendLog(message) {
 }
 
 let logBagEntries = [];
+const MAX_LOG_BAG_REPLAY_SELECTION = 24;
 let selectedLogBagIndices = new Set();
 let logBagFileChecked = new Map();
 let logBagRobotOptions = [];
@@ -3249,6 +3291,25 @@ function formatLogBagSize(bytes) {
   return `${n} B`;
 }
 
+function formatLogBagTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "无时间";
+  const date = new Date(raw);
+  if (!Number.isFinite(date.getTime())) return raw;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second} CST`;
+}
+
 function basenameOfLogPath(path) {
   const text = String(path || "");
   const slash = text.lastIndexOf("/");
@@ -3306,7 +3367,7 @@ function renderLogBagList() {
 
     const meta = document.createElement("div");
     meta.className = "log-bag-item__meta";
-    meta.textContent = `${entry.ended_at || entry.started_at || "无时间"} · ${formatLogBagSize(entry.bytes)}`;
+    meta.textContent = `${formatLogBagTimestamp(entry.ended_at || entry.started_at)} · ${formatLogBagSize(entry.bytes)}`;
     body.appendChild(meta);
 
     const tags = Array.isArray(entry.tags) ? entry.tags : [];
@@ -3355,19 +3416,42 @@ function defaultLogBagFileChecked(file) {
   return file.kind === "bag";
 }
 
+function selectedLogBagsForReplay() {
+  return Array.from(selectedLogBagIndices)
+    .sort((a, b) => a - b)
+    .map((index) => logBagEntries[index])
+    .filter((entry) => {
+      if (!entry || !entry.bag) return false;
+      return Array.isArray(entry.files) &&
+        entry.files.some((file) => file && file.kind === "bag" && file.exists);
+    });
+}
+
 function updateLogBagDownloadState() {
-  if (!btnDownloadLogBag || !logBagSelectionSummary) return;
   const checked = Array.from(
     document.querySelectorAll(".log-bag-file-list input[type='checkbox']:checked")
   ).map((el) => el.value);
-  btnDownloadLogBag.disabled = checked.length === 0;
+  if (btnDownloadLogBag) btnDownloadLogBag.disabled = checked.length === 0;
   const bagCount = selectedLogBagIndices.size;
-  logBagSelectionSummary.textContent =
-    checked.length === 0
-      ? bagCount > 0
-        ? "未勾选下载文件"
-        : "未选择 bag"
-      : `${bagCount} 个 bag · ${checked.length} 个文件`;
+  if (btnPlayLogBag) {
+    const playable = selectedLogBagsForReplay();
+    const allPlayable = bagCount > 0 && playable.length === bagCount;
+    const withinLimit = bagCount <= MAX_LOG_BAG_REPLAY_SELECTION;
+    btnPlayLogBag.disabled = !allPlayable || !withinLimit;
+    btnPlayLogBag.title = !withinLimit
+      ? `一次最多回放 ${MAX_LOG_BAG_REPLAY_SELECTION} 个 bag`
+      : allPlayable
+        ? `按录制时间连续回放 ${bagCount} 个 bag，不启动 ROS`
+        : "请选择一个或多个可用的 bag";
+  }
+  if (logBagSelectionSummary) {
+    logBagSelectionSummary.textContent =
+      checked.length === 0
+        ? bagCount > 0
+          ? "未勾选下载文件"
+          : "未选择 bag"
+        : `${bagCount} 个 bag · ${checked.length} 个文件`;
+  }
 }
 
 function renderLogBagFiles() {
@@ -3515,6 +3599,833 @@ async function downloadSelectedLogBagFiles() {
   }
 }
 
+const bagReplayState = {
+  data: null,
+  mapPgm: null,
+  mapMeta: null,
+  mapBitmap: null,
+  semanticBitmap: null,
+  points: [],
+  availableMaps: [],
+  mapName: "",
+  currentTime: 0,
+  speed: 1,
+  playing: false,
+  animationFrame: 0,
+  lastAnimationTime: 0,
+  viewScale: 1,
+  panX: 0,
+  panY: 0,
+  dragging: false,
+  dragStartX: 0,
+  dragStartY: 0,
+  dragPanX: 0,
+  dragPanY: 0,
+  loadToken: 0,
+};
+const bagReplayCtx = bagReplayCanvas ? bagReplayCanvas.getContext("2d") : null;
+
+function formatBagReplayTime(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds - minutes * 60;
+  return String(minutes).padStart(2, "0") + ":" + remaining.toFixed(3).padStart(6, "0");
+}
+
+function bagReplaySegmentAt(time) {
+  const segments = bagReplayState.data && bagReplayState.data.segments;
+  if (!Array.isArray(segments) || segments.length === 0) return null;
+  let low = 0;
+  let high = segments.length - 1;
+  let found = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(segments[middle].start) <= time) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return segments[found] || null;
+}
+
+function latestBagReplaySample(rows, time) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  let low = 0;
+  let high = rows.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(rows[middle].t) <= time) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (found < 0) return null;
+  const sample = rows[found];
+  const segment = bagReplaySegmentAt(time);
+  if (
+    segment &&
+    sample.segment_index != null &&
+    Number(sample.segment_index) !== Number(segment.index)
+  ) return null;
+  return sample;
+}
+
+function bagReplayTimeline(name) {
+  const timeline = bagReplayState.data && bagReplayState.data.timeline;
+  return timeline && Array.isArray(timeline[name]) ? timeline[name] : [];
+}
+
+function bagReplayPoseAt(time) {
+  return latestBagReplaySample(bagReplayTimeline("poses"), time);
+}
+
+function bagReplayMapAt(time) {
+  const change = latestBagReplaySample(bagReplayTimeline("maps"), time);
+  const segment = bagReplaySegmentAt(time);
+  return (change && change.current_map) ||
+    (segment && (segment.initial_map_name || segment.map_name)) || "";
+}
+
+function syncBagReplayMapToCurrentTime() {
+  if (!bagReplayState.data) return;
+  const mapName = String(bagReplayMapAt(bagReplayState.currentTime) || "");
+  setBagReplayText(bagReplayMapFollow, mapName || "未记录 current_map");
+  if (mapName === bagReplayState.mapName) return;
+  const token = ++bagReplayState.loadToken;
+  void loadBagReplayMap(mapName, token);
+}
+
+function bagReplayCameraAt(camera, time) {
+  const rows = bagReplayTimeline("images");
+  const segment = bagReplaySegmentAt(time);
+  const segmentStart = segment ? Number(segment.start) : 0;
+  let low = 0;
+  let high = rows.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(rows[middle].t) <= time) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  for (let index = found; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (Number(row.t) < segmentStart) break;
+    if (row.camera !== camera) continue;
+    if (
+      segment &&
+      row.segment_index != null &&
+      Number(row.segment_index) !== Number(segment.index)
+    ) continue;
+    return row;
+  }
+  return null;
+}
+
+function updateBagReplayCamera(image, empty, meta, camera, time) {
+  if (!image || !empty || !meta) return;
+  const sample = bagReplayCameraAt(camera, time);
+  const sampleKey = sample
+    ? [sample.segment_index, sample.t, sample.topic].join(":")
+    : "";
+  if (image.dataset.sampleKey !== sampleKey) {
+    image.dataset.sampleKey = sampleKey;
+    if (sample && sample.data_url) {
+      image.src = sample.data_url;
+    } else {
+      image.removeAttribute("src");
+    }
+  }
+  image.hidden = !sample;
+  empty.hidden = Boolean(sample);
+  meta.textContent = sample
+    ? Number(sample.width) + "×" + Number(sample.height) + " · " +
+      String(sample.encoding || "?") + " · " + formatBagReplayTime(sample.t)
+    : "当前 bag 段无图像";
+}
+
+function bagReplayMapOrigin() {
+  const meta = bagReplayState.mapMeta || {};
+  const parsed = parseOrigin(meta.origin);
+  const explicitYaw = Number(meta.origin_yaw);
+  return {
+    x: Number(parsed[0]) || 0,
+    y: Number(parsed[1]) || 0,
+    yaw: Number.isFinite(explicitYaw) ? explicitYaw : (Number(parsed[2]) || 0),
+  };
+}
+
+function bagReplayWorldToPixel(point) {
+  const pgm = bagReplayState.mapPgm;
+  const meta = bagReplayState.mapMeta;
+  if (!pgm || !meta || !point) return null;
+  const resolution = Number(meta.resolution);
+  if (!Number.isFinite(resolution) || resolution <= 0) return null;
+  const origin = bagReplayMapOrigin();
+  const dx = Number(point.x) - origin.x;
+  const dy = Number(point.y) - origin.y;
+  const cosine = Math.cos(origin.yaw);
+  const sine = Math.sin(origin.yaw);
+  return {
+    x: (cosine * dx + sine * dy) / resolution,
+    y: pgm.height - (-sine * dx + cosine * dy) / resolution,
+  };
+}
+
+function bagReplayPixelToScreen(point) {
+  return {
+    x: bagReplayState.panX + point.x * bagReplayState.viewScale,
+    y: bagReplayState.panY + point.y * bagReplayState.viewScale,
+  };
+}
+
+function resizeBagReplayCanvas() {
+  if (!bagReplayCanvas || !bagReplayCanvasWrap || !bagReplayCtx) return;
+  const rect = bagReplayCanvasWrap.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(260, Math.floor(rect.height));
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.floor(width * dpr);
+  const pixelHeight = Math.floor(height * dpr);
+  if (
+    bagReplayCanvas.width === pixelWidth &&
+    bagReplayCanvas.height === pixelHeight &&
+    bagReplayCanvas.style.width === width + "px" &&
+    bagReplayCanvas.style.height === height + "px"
+  ) return;
+  bagReplayCanvas.width = pixelWidth;
+  bagReplayCanvas.height = pixelHeight;
+  bagReplayCanvas.style.width = width + "px";
+  bagReplayCanvas.style.height = height + "px";
+  bagReplayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function resetBagReplayView() {
+  if (!bagReplayCanvas || !bagReplayState.mapPgm) return;
+  const width = bagReplayCanvas.clientWidth || 900;
+  const height = bagReplayCanvas.clientHeight || 560;
+  const pgm = bagReplayState.mapPgm;
+  let minX = 0;
+  let minY = 0;
+  let maxX = pgm.width;
+  let maxY = pgm.height;
+  const poses = bagReplayTimeline("poses");
+  const stride = Math.max(1, Math.ceil(poses.length / 2000));
+  for (let index = 0; index < poses.length; index += stride) {
+    const pixel = bagReplayWorldToPixel(poses[index]);
+    if (!pixel) continue;
+    minX = Math.min(minX, pixel.x);
+    minY = Math.min(minY, pixel.y);
+    maxX = Math.max(maxX, pixel.x);
+    maxY = Math.max(maxY, pixel.y);
+  }
+  const spanX = Math.max(1, maxX - minX);
+  const spanY = Math.max(1, maxY - minY);
+  bagReplayState.viewScale = Math.min(width / spanX, height / spanY) * 0.92;
+  bagReplayState.panX = (width - spanX * bagReplayState.viewScale) / 2 - minX * bagReplayState.viewScale;
+  bagReplayState.panY = (height - spanY * bagReplayState.viewScale) / 2 - minY * bagReplayState.viewScale;
+}
+
+function drawBagReplayGrid(width, height) {
+  const ctx2 = bagReplayCtx;
+  const pgm = bagReplayState.mapPgm;
+  const resolution = Number(bagReplayState.mapMeta && bagReplayState.mapMeta.resolution);
+  if (!ctx2 || !pgm || !Number.isFinite(resolution) || resolution <= 0) return;
+  const step = 0.5 / resolution;
+  ctx2.save();
+  ctx2.strokeStyle = "rgba(56, 189, 248, 0.13)";
+  ctx2.lineWidth = 1;
+  for (let x = 0; x <= pgm.width; x += step) {
+    const screen = bagReplayPixelToScreen({ x: x, y: 0 });
+    if (screen.x < 0 || screen.x > width) continue;
+    ctx2.beginPath();
+    ctx2.moveTo(screen.x, Math.max(0, bagReplayState.panY));
+    ctx2.lineTo(screen.x, Math.min(height, bagReplayState.panY + pgm.height * bagReplayState.viewScale));
+    ctx2.stroke();
+  }
+  for (let y = 0; y <= pgm.height; y += step) {
+    const screen = bagReplayPixelToScreen({ x: 0, y: y });
+    if (screen.y < 0 || screen.y > height) continue;
+    ctx2.beginPath();
+    ctx2.moveTo(Math.max(0, bagReplayState.panX), screen.y);
+    ctx2.lineTo(Math.min(width, bagReplayState.panX + pgm.width * bagReplayState.viewScale), screen.y);
+    ctx2.stroke();
+  }
+  ctx2.restore();
+}
+
+function drawBagReplayPoints() {
+  if (!bagReplayCtx || !bagReplayPointsToggle || !bagReplayPointsToggle.checked) return;
+  bagReplayState.points.forEach((point) => {
+    const pixel = bagReplayWorldToPixel(point);
+    if (!pixel) return;
+    const screen = bagReplayPixelToScreen(pixel);
+    const color = point.type === "elevator" || point.type === "elevator_inside"
+      ? "#a78bfa"
+      : point.type === "elevator_waiting"
+        ? "#f472b6"
+        : point.type === "standby"
+          ? "#22c55e"
+          : point.type === "relocalization"
+            ? "#38bdf8"
+            : "#fb923c";
+    bagReplayCtx.save();
+    bagReplayCtx.fillStyle = color;
+    bagReplayCtx.strokeStyle = "#020617";
+    bagReplayCtx.lineWidth = 2;
+    bagReplayCtx.beginPath();
+    bagReplayCtx.arc(screen.x, screen.y, 5.5, 0, Math.PI * 2);
+    bagReplayCtx.fill();
+    bagReplayCtx.stroke();
+    const label = String(point.name || point.id || "point");
+    bagReplayCtx.font = '11px "Fira Code", monospace';
+    const width = bagReplayCtx.measureText(label).width + 8;
+    bagReplayCtx.fillStyle = "rgba(15, 23, 42, 0.9)";
+    bagReplayCtx.fillRect(screen.x + 7, screen.y - 18, width, 16);
+    bagReplayCtx.fillStyle = "#f8fafc";
+    bagReplayCtx.fillText(label, screen.x + 11, screen.y - 6);
+    bagReplayCtx.restore();
+  });
+}
+
+function drawBagReplayPath(path) {
+  if (!bagReplayCtx || !path || !Array.isArray(path.points) || path.points.length < 4) return;
+  bagReplayCtx.save();
+  bagReplayCtx.strokeStyle = "#38bdf8";
+  bagReplayCtx.lineWidth = 2.5;
+  bagReplayCtx.shadowColor = "rgba(56, 189, 248, 0.55)";
+  bagReplayCtx.shadowBlur = 4;
+  bagReplayCtx.beginPath();
+  let started = false;
+  for (let index = 0; index + 1 < path.points.length; index += 2) {
+    const pixel = bagReplayWorldToPixel({ x: path.points[index], y: path.points[index + 1] });
+    if (!pixel) continue;
+    const screen = bagReplayPixelToScreen(pixel);
+    if (!started) {
+      bagReplayCtx.moveTo(screen.x, screen.y);
+      started = true;
+    } else {
+      bagReplayCtx.lineTo(screen.x, screen.y);
+    }
+  }
+  if (started) bagReplayCtx.stroke();
+  bagReplayCtx.restore();
+}
+
+function drawBagReplayTrail(time) {
+  if (!bagReplayCtx) return;
+  const poses = bagReplayTimeline("poses");
+  if (poses.length < 2) return;
+  const lastIndex = poses.findIndex((row) => Number(row.t) > time);
+  const end = lastIndex < 0 ? poses.length : lastIndex;
+  const stride = Math.max(1, Math.ceil(end / 1500));
+  bagReplayCtx.save();
+  bagReplayCtx.strokeStyle = "rgba(34, 197, 94, 0.58)";
+  bagReplayCtx.lineWidth = 1.6;
+  bagReplayCtx.beginPath();
+  let started = false;
+  let currentSegment = null;
+  for (let index = 0; index < end; index += stride) {
+    const segmentIndex = poses[index].segment_index;
+    if (segmentIndex !== currentSegment) {
+      currentSegment = segmentIndex;
+      started = false;
+    }
+    const pixel = bagReplayWorldToPixel(poses[index]);
+    if (!pixel) continue;
+    const screen = bagReplayPixelToScreen(pixel);
+    if (!started) {
+      bagReplayCtx.moveTo(screen.x, screen.y);
+      started = true;
+    } else {
+      bagReplayCtx.lineTo(screen.x, screen.y);
+    }
+  }
+  if (started) bagReplayCtx.stroke();
+  bagReplayCtx.restore();
+}
+
+function drawBagReplayScan(scan) {
+  if (!bagReplayCtx || !scan || !Array.isArray(scan.points)) return;
+  const pose = bagReplayPoseAt(Number(scan.t));
+  if (!pose) return;
+  const cosine = Math.cos(Number(pose.yaw) || 0);
+  const sine = Math.sin(Number(pose.yaw) || 0);
+  bagReplayCtx.save();
+  bagReplayCtx.fillStyle = "#ef4444";
+  for (let index = 0; index + 1 < scan.points.length; index += 2) {
+    const localX = Number(scan.points[index]);
+    const localY = Number(scan.points[index + 1]);
+    const pixel = bagReplayWorldToPixel({
+      x: Number(pose.x) + cosine * localX - sine * localY,
+      y: Number(pose.y) + sine * localX + cosine * localY,
+    });
+    if (!pixel) continue;
+    const screen = bagReplayPixelToScreen(pixel);
+    bagReplayCtx.fillRect(screen.x - 1.2, screen.y - 1.2, 2.4, 2.4);
+  }
+  bagReplayCtx.restore();
+}
+
+function drawBagReplayRobot(pose) {
+  if (!bagReplayCtx || !pose) return;
+  const pixel = bagReplayWorldToPixel(pose);
+  if (!pixel) return;
+  const screen = bagReplayPixelToScreen(pixel);
+  bagReplayCtx.save();
+  bagReplayCtx.translate(screen.x, screen.y);
+  bagReplayCtx.rotate(-(Number(pose.yaw) || 0) + Math.PI / 2);
+  if (robotIconLoaded) {
+    bagReplayCtx.drawImage(robotIcon, -16, -16, 32, 32);
+  } else {
+    bagReplayCtx.fillStyle = "#22c55e";
+    bagReplayCtx.strokeStyle = "#dcfce7";
+    bagReplayCtx.lineWidth = 1.5;
+    bagReplayCtx.beginPath();
+    bagReplayCtx.moveTo(12, 0);
+    bagReplayCtx.lineTo(-9, -7);
+    bagReplayCtx.lineTo(-5, 0);
+    bagReplayCtx.lineTo(-9, 7);
+    bagReplayCtx.closePath();
+    bagReplayCtx.fill();
+    bagReplayCtx.stroke();
+  }
+  bagReplayCtx.restore();
+}
+
+function setBagReplayText(element, value) {
+  if (element) element.textContent = value == null || value === "" ? "—" : String(value);
+}
+
+function updateBagReplayStatePanel() {
+  const data = bagReplayState.data;
+  if (!data) return;
+  const time = bagReplayState.currentTime;
+  const segment = bagReplaySegmentAt(time);
+  const pose = bagReplayPoseAt(time);
+  const status = latestBagReplaySample(bagReplayTimeline("statuses"), time);
+  const task = latestBagReplaySample(bagReplayTimeline("tasks"), time);
+  const twist = latestBagReplaySample(bagReplayTimeline("twists"), time);
+  const linear = pose && Number.isFinite(Number(pose.linear_x))
+    ? Number(pose.linear_x)
+    : twist && Number(twist.linear_x);
+  const angular = pose && Number.isFinite(Number(pose.angular_z))
+    ? Number(pose.angular_z)
+    : twist && Number(twist.angular_z);
+  setBagReplayText(bagReplayStateTime, formatBagReplayTime(time));
+  setBagReplayText(
+    bagReplayRobot, (status && status.robot_name) || (segment && segment.robot_name) || data.robot_name);
+  setBagReplayText(
+    bagReplayCurrentBag,
+    segment
+      ? (Number(segment.index) + 1) + "/" +
+        (Array.isArray(data.segments) ? data.segments.length : 1) +
+        " · " + basenameOfLogPath(segment.bag)
+      : null
+  );
+  setBagReplayText(
+    bagReplayCurrentMap, bagReplayMapAt(time) || bagReplayState.mapName);
+  setBagReplayText(
+    bagReplayPose,
+    pose
+      ? "x " + Number(pose.x).toFixed(3) + " · y " + Number(pose.y).toFixed(3) +
+        " · yaw " + Number(pose.yaw).toFixed(3)
+      : "bag 未记录位姿"
+  );
+  setBagReplayText(
+    bagReplayVelocity,
+    Number.isFinite(linear) || Number.isFinite(angular)
+      ? "v " + (Number.isFinite(linear) ? linear.toFixed(3) : "—") +
+        " m/s · ω " + (Number.isFinite(angular) ? angular.toFixed(3) : "—") + " rad/s"
+      : "bag 未记录速度"
+  );
+  setBagReplayText(bagReplayRobotStatus, status && status.robot_status);
+  setBagReplayText(bagReplayTaskId, task && task.task_id);
+  setBagReplayText(bagReplayTaskStatus, (task && task.task_status) || (status && status.task_status));
+  const taskTotal = Number(task && task.total_count);
+  const taskIndex = Number(task && task.current_index);
+  const taskPercent = taskTotal > 0 && Number.isFinite(taskIndex)
+    ? Math.max(0, Math.min(100, Math.round(taskIndex / taskTotal * 100))) + "%"
+    : null;
+  setBagReplayText(
+    bagReplayTaskProgress,
+    taskPercent || (status && Number(status.task_progress) >= 0
+      ? Math.round(Number(status.task_progress) * 100) + "%"
+      : "—")
+  );
+  setBagReplayText(bagReplayControlStatus, status && status.control_status);
+  setBagReplayText(bagReplayLocalization, status && status.localization_method);
+  setBagReplayText(bagReplayPosition, status && status.current_position);
+}
+
+function renderBagReplayFrame() {
+  syncBagReplayMapToCurrentTime();
+  if (!bagReplayCtx || !bagReplayCanvas) return;
+  resizeBagReplayCanvas();
+  const width = bagReplayCanvas.clientWidth || 900;
+  const height = bagReplayCanvas.clientHeight || 560;
+  bagReplayCtx.fillStyle = "#020617";
+  bagReplayCtx.fillRect(0, 0, width, height);
+  const pgm = bagReplayState.mapPgm;
+  if (pgm && bagReplayState.mapBitmap) {
+    bagReplayCtx.imageSmoothingEnabled = false;
+    bagReplayCtx.drawImage(
+      bagReplayState.mapBitmap,
+      bagReplayState.panX,
+      bagReplayState.panY,
+      pgm.width * bagReplayState.viewScale,
+      pgm.height * bagReplayState.viewScale
+    );
+    if (bagReplaySemanticToggle && bagReplaySemanticToggle.checked && bagReplayState.semanticBitmap) {
+      bagReplayCtx.save();
+      bagReplayCtx.globalAlpha = 0.42;
+      bagReplayCtx.drawImage(
+        bagReplayState.semanticBitmap,
+        bagReplayState.panX,
+        bagReplayState.panY,
+        pgm.width * bagReplayState.viewScale,
+        pgm.height * bagReplayState.viewScale
+      );
+      bagReplayCtx.restore();
+    }
+    drawBagReplayGrid(width, height);
+    drawBagReplayPoints();
+    if (bagReplayPathToggle && bagReplayPathToggle.checked) {
+      drawBagReplayPath(latestBagReplaySample(bagReplayTimeline("paths"), bagReplayState.currentTime));
+    }
+    drawBagReplayTrail(bagReplayState.currentTime);
+    if (bagReplayScanToggle && bagReplayScanToggle.checked) {
+      drawBagReplayScan(latestBagReplaySample(bagReplayTimeline("scans"), bagReplayState.currentTime));
+    }
+    drawBagReplayRobot(bagReplayPoseAt(bagReplayState.currentTime));
+  } else {
+    bagReplayCtx.fillStyle = "#64748b";
+    bagReplayCtx.font = '13px "Fira Code", monospace';
+    bagReplayCtx.textAlign = "center";
+    bagReplayCtx.fillText("没有可用的已保存地图；可在上方切换地图", width / 2, height / 2);
+    bagReplayCtx.textAlign = "start";
+  }
+  if (bagReplayProgress) bagReplayProgress.value = String(bagReplayState.currentTime);
+  setBagReplayText(bagReplayCurrentTime, formatBagReplayTime(bagReplayState.currentTime));
+  updateBagReplayCamera(
+    bagReplayFrontCamera,
+    bagReplayFrontCameraEmpty,
+    bagReplayFrontCameraMeta,
+    "front",
+    bagReplayState.currentTime
+  );
+  updateBagReplayCamera(
+    bagReplayFrontDownCamera,
+    bagReplayFrontDownCameraEmpty,
+    bagReplayFrontDownCameraMeta,
+    "front_down",
+    bagReplayState.currentTime
+  );
+  updateBagReplayStatePanel();
+}
+
+function setBagReplayPlaying(playing) {
+  bagReplayState.playing = Boolean(playing && bagReplayState.data);
+  bagReplayState.lastAnimationTime = performance.now();
+  if (btnBagReplayToggle) {
+    btnBagReplayToggle.textContent = bagReplayState.playing ? "❚❚ 暂停" : "▶ 播放";
+  }
+  if (!bagReplayState.playing && bagReplayState.animationFrame) {
+    cancelAnimationFrame(bagReplayState.animationFrame);
+    bagReplayState.animationFrame = 0;
+  }
+  if (bagReplayState.playing && !bagReplayState.animationFrame) {
+    bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
+  }
+}
+
+function tickBagReplay(now) {
+  bagReplayState.animationFrame = 0;
+  if (!bagReplayState.playing || !bagReplayState.data) return;
+  const delta = Math.max(0, Math.min(0.25, (now - bagReplayState.lastAnimationTime) / 1000));
+  bagReplayState.lastAnimationTime = now;
+  const duration = Number(bagReplayState.data.duration) || 0;
+  bagReplayState.currentTime = Math.min(duration, bagReplayState.currentTime + delta * bagReplayState.speed);
+  renderBagReplayFrame();
+  if (bagReplayState.currentTime >= duration) {
+    setBagReplayPlaying(false);
+    return;
+  }
+  bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
+}
+
+function renderBagReplayMetadata() {
+  const data = bagReplayState.data;
+  if (!data) return;
+  const timeline = data.timeline || {};
+  const replayBagCount = Array.isArray(data.segments) ? data.segments.length : 1;
+  const warning = Array.isArray(data.warnings) && data.warnings.length
+    ? " · " + data.warnings.length + " 条解析提示"
+    : "";
+  setBagReplayText(
+    bagReplaySummary,
+    replayBagCount + " 个 bag · " +
+      Number(data.message_count || 0).toLocaleString() + " 条消息 · " +
+      Number(data.database_count || 0) + " 个 DB · 位姿 " + (timeline.poses || []).length +
+      " · 激光 " + (timeline.scans || []).length +
+      " · 图像 " + (timeline.images || []).length +
+      " · 状态 " + (timeline.statuses || []).length +
+      " · 任务 " + (timeline.tasks || []).length + warning
+  );
+  if (bagReplayTopics) {
+    bagReplayTopics.innerHTML = "";
+    (Array.isArray(data.topics) ? data.topics : [])
+      .filter((topic) => Number(topic.count) > 0)
+      .slice(0, 18)
+      .forEach((topic) => {
+        const chip = document.createElement("span");
+        chip.className = "bag-replay-topic";
+        chip.title = String(topic.type || "");
+        chip.textContent = String(topic.name || "?") + " · " + Number(topic.count);
+        bagReplayTopics.appendChild(chip);
+      });
+  }
+}
+
+async function loadBagReplayMap(mapName, token) {
+  bagReplayState.mapName = String(mapName || "");
+  bagReplayState.mapPgm = null;
+  bagReplayState.mapMeta = null;
+  bagReplayState.mapBitmap = null;
+  bagReplayState.semanticBitmap = null;
+  bagReplayState.points = [];
+  if (!bagReplayState.mapName) {
+    if (bagReplayMapStatus) bagReplayMapStatus.textContent = "bag 未关联已保存地图";
+    renderBagReplayFrame();
+    return;
+  }
+  if (!bagReplayState.availableMaps.includes(bagReplayState.mapName)) {
+    if (bagReplayMapStatus) {
+      bagReplayMapStatus.textContent = "记录地图 " + bagReplayState.mapName + " 未保存，无法绘制";
+    }
+    if (bagReplayLoading) bagReplayLoading.hidden = true;
+    renderBagReplayFrame();
+    return;
+  }
+  if (bagReplayLoading) {
+    bagReplayLoading.hidden = false;
+    bagReplayLoading.textContent = "正在从磁盘加载地图 " + bagReplayState.mapName + "…";
+  }
+  try {
+    const encoded = encodeURIComponent(bagReplayState.mapName);
+    const results = await Promise.all([
+      fetchJson(API_BASE_URL + "/api/maps/" + encoded, { cache: "no-store" }),
+      fetchJson(API_BASE_URL + "/api/maps/" + encoded + "/assets", { cache: "no-store" }),
+    ]);
+    if (token !== bagReplayState.loadToken) return;
+    const mapData = results[0];
+    const assets = results[1] || {};
+    const mapPgm = mapData.pgm;
+    const mapMeta = parseYaml(mapData.yaml || "");
+    const mapBitmap = buildMapBitmap(mapPgm);
+    const semanticBitmap = await buildSemanticBitmapFromDataUrl(assets.semantic_png || "");
+    if (token !== bagReplayState.loadToken) return;
+    bagReplayState.mapPgm = mapPgm;
+    bagReplayState.mapMeta = mapMeta;
+    bagReplayState.mapBitmap = mapBitmap;
+    bagReplayState.semanticBitmap = semanticBitmap;
+    bagReplayState.points = Array.isArray(assets.points) ? assets.points : [];
+    resizeBagReplayCanvas();
+    resetBagReplayView();
+    if (bagReplayMapStatus) {
+      bagReplayMapStatus.textContent = bagReplayState.mapName + " · " +
+        (bagReplayState.semanticBitmap ? "含语义层" : "无语义层") +
+        " · " + bagReplayState.points.length + " 个点位";
+    }
+  } catch (error) {
+    if (token !== bagReplayState.loadToken) return;
+    if (bagReplayMapStatus) bagReplayMapStatus.textContent = "地图加载失败：" + (error.message || error);
+  } finally {
+    if (token === bagReplayState.loadToken && bagReplayLoading) bagReplayLoading.hidden = true;
+    renderBagReplayFrame();
+  }
+}
+
+function setBagReplayDialogOpen(open) {
+  if (!bagReplayDialog || !bagReplayBackdrop) return;
+  bagReplayDialog.hidden = !open;
+  bagReplayBackdrop.hidden = !open;
+  document.body.classList.toggle("bag-replay-open", open);
+  if (!open) {
+    bagReplayState.loadToken += 1;
+    setBagReplayPlaying(false);
+  } else {
+    requestAnimationFrame(() => {
+      resizeBagReplayCanvas();
+      renderBagReplayFrame();
+      if (btnBagReplayClose) btnBagReplayClose.focus();
+    });
+  }
+}
+
+async function openSelectedLogBagReplay() {
+  const entries = selectedLogBagsForReplay();
+  if (
+    entries.length === 0 ||
+    entries.length !== selectedLogBagIndices.size ||
+    entries.length > MAX_LOG_BAG_REPLAY_SELECTION
+  ) return;
+  const token = ++bagReplayState.loadToken;
+  bagReplayState.data = null;
+  bagReplayState.currentTime = 0;
+  bagReplayState.speed = Number(bagReplaySpeed && bagReplaySpeed.value) || 1;
+  bagReplayState.availableMaps = [];
+  bagReplayState.mapName = "";
+  bagReplayState.mapPgm = null;
+  bagReplayState.mapMeta = null;
+  bagReplayState.mapBitmap = null;
+  bagReplayState.semanticBitmap = null;
+  bagReplayState.points = [];
+  setBagReplayText(bagReplayCurrentBag, "—");
+  setBagReplayPlaying(false);
+  setBagReplayDialogOpen(true);
+  const selectionLabel = entries.length === 1
+    ? basenameOfLogPath(entries[0].bag)
+    : entries.length + " 个 bag · 按录制时间连续播放";
+  if (bagReplaySubtitle) bagReplaySubtitle.textContent = selectionLabel;
+  if (bagReplayLoading) {
+    bagReplayLoading.hidden = false;
+    bagReplayLoading.textContent =
+      "正在只读解析 " + entries.length + " 个 bag（不会启动 ROS）…";
+  }
+  if (bagReplayMapStatus) bagReplayMapStatus.textContent = "等待 bag 元数据…";
+  try {
+    const response = await fetch(API_BASE_URL + "/api/log_bag/replay", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bags: entries.map((entry) => entry.bag) }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "bag 解析失败");
+    if (token !== bagReplayState.loadToken) return;
+    bagReplayState.data = data;
+    const duration = Math.max(0, Number(data.duration) || 0);
+    if (bagReplayProgress) {
+      bagReplayProgress.max = String(duration);
+      bagReplayProgress.value = "0";
+    }
+    setBagReplayText(bagReplayDuration, formatBagReplayTime(duration));
+    setBagReplayPlaying(duration > 0);
+    const tags = Array.from(new Set(
+      entries.flatMap((entry) => Array.isArray(entry.tags) ? entry.tags.map(String) : [])
+    ));
+    if (bagReplaySubtitle) {
+      bagReplaySubtitle.textContent =
+        selectionLabel + (tags.length ? " · tag: " + tags.join(", ") : "");
+    }
+    renderBagReplayMetadata();
+    bagReplayState.availableMaps = Array.isArray(data.available_maps)
+      ? data.available_maps.map(String)
+      : [];
+    const selectedMap = bagReplayMapAt(0);
+    setBagReplayText(bagReplayMapFollow, selectedMap || "未记录 current_map");
+    await loadBagReplayMap(selectedMap, token);
+    if (token !== bagReplayState.loadToken) return;
+    if (bagReplayLoading) bagReplayLoading.hidden = true;
+    renderBagReplayFrame();
+  } catch (error) {
+    if (token !== bagReplayState.loadToken) return;
+    if (bagReplayLoading) {
+      bagReplayLoading.hidden = false;
+      bagReplayLoading.textContent = "回放加载失败：" + (error.message || error);
+    }
+    if (bagReplayMapStatus) bagReplayMapStatus.textContent = "回放不可用";
+  }
+}
+
+function initBagReplayUi() {
+  if (!bagReplayDialog || !bagReplayCanvas) return;
+  if (btnPlayLogBag) btnPlayLogBag.addEventListener("click", openSelectedLogBagReplay);
+  if (btnBagReplayClose) btnBagReplayClose.addEventListener("click", () => setBagReplayDialogOpen(false));
+  if (bagReplayBackdrop) bagReplayBackdrop.addEventListener("click", () => setBagReplayDialogOpen(false));
+  if (btnBagReplayToggle) {
+    btnBagReplayToggle.addEventListener("click", () => {
+      if (!bagReplayState.data) return;
+      const duration = Number(bagReplayState.data.duration) || 0;
+      if (!bagReplayState.playing && bagReplayState.currentTime >= duration) {
+        bagReplayState.currentTime = 0;
+      }
+      setBagReplayPlaying(!bagReplayState.playing);
+    });
+  }
+  if (bagReplayProgress) {
+    bagReplayProgress.addEventListener("input", () => {
+      bagReplayState.currentTime = Number(bagReplayProgress.value) || 0;
+      bagReplayState.lastAnimationTime = performance.now();
+      renderBagReplayFrame();
+    });
+  }
+  if (bagReplaySpeed) {
+    bagReplaySpeed.addEventListener("change", () => {
+      bagReplayState.speed = Number(bagReplaySpeed.value) || 1;
+      bagReplayState.lastAnimationTime = performance.now();
+    });
+  }
+  [bagReplaySemanticToggle, bagReplayPointsToggle, bagReplayScanToggle, bagReplayPathToggle]
+    .filter(Boolean)
+    .forEach((control) => control.addEventListener("change", renderBagReplayFrame));
+  if (btnBagReplayResetView) {
+    btnBagReplayResetView.addEventListener("click", () => {
+      resetBagReplayView();
+      renderBagReplayFrame();
+    });
+  }
+  bagReplayCanvas.addEventListener("wheel", (event) => {
+    if (!bagReplayState.mapPgm) return;
+    event.preventDefault();
+    const rect = bagReplayCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const oldScale = bagReplayState.viewScale;
+    const nextScale = Math.min(32, Math.max(0.03, oldScale * (event.deltaY < 0 ? 1.12 : 0.89)));
+    const mapX = (x - bagReplayState.panX) / oldScale;
+    const mapY = (y - bagReplayState.panY) / oldScale;
+    bagReplayState.viewScale = nextScale;
+    bagReplayState.panX = x - mapX * nextScale;
+    bagReplayState.panY = y - mapY * nextScale;
+    renderBagReplayFrame();
+  }, { passive: false });
+  bagReplayCanvas.addEventListener("mousedown", (event) => {
+    bagReplayState.dragging = true;
+    bagReplayState.dragStartX = event.clientX;
+    bagReplayState.dragStartY = event.clientY;
+    bagReplayState.dragPanX = bagReplayState.panX;
+    bagReplayState.dragPanY = bagReplayState.panY;
+    if (bagReplayCanvasWrap) bagReplayCanvasWrap.classList.add("is-dragging");
+  });
+  window.addEventListener("mousemove", (event) => {
+    if (!bagReplayState.dragging) return;
+    bagReplayState.panX = bagReplayState.dragPanX + event.clientX - bagReplayState.dragStartX;
+    bagReplayState.panY = bagReplayState.dragPanY + event.clientY - bagReplayState.dragStartY;
+    renderBagReplayFrame();
+  });
+  window.addEventListener("mouseup", () => {
+    bagReplayState.dragging = false;
+    if (bagReplayCanvasWrap) bagReplayCanvasWrap.classList.remove("is-dragging");
+  });
+  window.addEventListener("resize", () => {
+    if (!bagReplayDialog.hidden) {
+      resizeBagReplayCanvas();
+      renderBagReplayFrame();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !bagReplayDialog.hidden) setBagReplayDialogOpen(false);
+  });
+}
 function initLogs() {
   if (logBagRobotSelect) {
     logBagRobotSelect.addEventListener("change", refreshLogBags);
@@ -3525,6 +4436,7 @@ function initLogs() {
   if (btnDownloadLogBag) {
     btnDownloadLogBag.addEventListener("click", downloadSelectedLogBagFiles);
   }
+  initBagReplayUi();
   refreshLogBags();
 }
 
@@ -5048,7 +5960,7 @@ function renderRobotDetailCpu(payload) {
 function renderRobotDetailLogs(payload) {
   const entries = flattenLogBagEntries(payload.logs || {});
   if (!entries.length) return '<p class="robot-detail-empty">该机器人暂无日志索引。</p>';
-  return `<div class="robot-detail-grid">${entries.slice(0, 12).map((entry) => `<section class="robot-detail-card"><h3>${escapeHtml(basenameOfLogPath(entry.bag) || "bag")}</h3><p>${escapeHtml(entry.ended_at || entry.started_at || "无时间")}</p><p>${escapeHtml(formatLogBagSize(entry.bytes))} · ${(entry.files || []).length} 个关联文件</p></section>`).join("")}</div><div class="robot-detail-param-actions"><button type="button" data-robot-detail-open-logs="1">打开完整日志页面</button></div>`;
+  return `<div class="robot-detail-grid">${entries.slice(0, 12).map((entry) => `<section class="robot-detail-card"><h3>${escapeHtml(basenameOfLogPath(entry.bag) || "bag")}</h3><p>${escapeHtml(formatLogBagTimestamp(entry.ended_at || entry.started_at))}</p><p>${escapeHtml(formatLogBagSize(entry.bytes))} · ${(entry.files || []).length} 个关联文件</p></section>`).join("")}</div><div class="robot-detail-param-actions"><button type="button" data-robot-detail-open-logs="1">打开完整日志页面</button></div>`;
 }
 
 function renderRobotDetailParams(payload) {

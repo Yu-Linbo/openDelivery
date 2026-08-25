@@ -78,10 +78,11 @@ except Exception:  # noqa: BLE001
     RobotStatus = None
 
 try:
-    from custom_msgs_srvs.msg import TaskInfo, TaskStatus
+    from custom_msgs_srvs.msg import TaskCommand, TaskInfo, TaskStatus
 except Exception:  # noqa: BLE001
     TaskInfo = None
     TaskStatus = None
+    TaskCommand = None
 
 try:
     from custom_msgs_srvs.srv import RecordRelocalization
@@ -238,6 +239,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._robot_status_cmd_pubs: Dict[str, Any] = {}
         self._localize_nav_pubs: Dict[str, Any] = {}
         self._task_info_pubs: Dict[str, Any] = {}
+        self._task_command_pubs: Dict[str, Any] = {}
         self._task_status_subs: Dict[str, Any] = {}
         self._record_relocalization_clients: Dict[str, Any] = {}
 
@@ -705,6 +707,10 @@ class OpenDeliveryTfBridgeNode(Node):
             topic = f"/{rid}/task_info"
             self._task_info_pubs[rid] = self.create_publisher(TaskInfo, topic, 10)
             self.get_logger().info(f"task publisher: {topic}")
+        if TaskCommand is not None and rid not in self._task_command_pubs:
+            topic = f"/{rid}/task_command"
+            self._task_command_pubs[rid] = self.create_publisher(TaskCommand, topic, 10)
+            self.get_logger().info(f"task command publisher: {topic}")
         if rid not in self._task_status_subs:
             topic = f"/{rid}/task_status"
             self._task_status_subs[rid] = self.create_subscription(
@@ -764,6 +770,28 @@ class OpenDeliveryTfBridgeNode(Node):
         msg.poses = [pose]
         publisher.publish(msg)
         self.get_logger().info(f"publish TaskInfo {task_id} -> /{rid}/task_info")
+
+    def _publish_task_command(self, cmd: Dict[str, Any]) -> None:
+        if TaskCommand is None:
+            raise RuntimeError("TaskCommand type unavailable; rebuild custom_msgs_srvs")
+        rid = str(cmd.get("robot_id") or "").strip()
+        task_id = str(cmd.get("task_id") or "").strip()
+        command = str(cmd.get("command") or "").strip().lower()
+        if not rid or not task_id or command not in ("pause", "resume", "terminate"):
+            raise ValueError("robot_id, task_id and valid command are required")
+        self._ensure_task_interfaces(rid)
+        publisher = self._task_command_pubs.get(rid)
+        if publisher is None:
+            raise RuntimeError(f"task command publisher unavailable for {rid}")
+        msg = TaskCommand()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._map_frame_for_robot(rid)
+        msg.task_id = task_id
+        msg.command = command
+        publisher.publish(msg)
+        self.get_logger().info(
+            f"publish TaskCommand {task_id} command={command} -> /{rid}/task_command"
+        )
 
     def _ensure_localize_nav_pub(self, rid: str) -> None:
         if LocalizeNavCommand is None:
@@ -948,6 +976,9 @@ class OpenDeliveryTfBridgeNode(Node):
             return self._record_relocalization(cmd)
         if ctype == "localize_nav_command":
             self._handle_localize_nav_command(cmd)
+            return False
+        if ctype == "task_command":
+            self._publish_task_command(cmd)
             return False
         if ctype == "navigation_task":
             self._publish_navigation_task(cmd)

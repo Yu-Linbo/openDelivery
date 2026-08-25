@@ -63,6 +63,21 @@ class RobotDetailPayloadTest(unittest.TestCase):
                 "robot_id": "robot2", "x": float("nan"), "y": 0, "yaw": 0
             })
 
+    def test_task_control_command_is_strictly_validated(self):
+        command = server._task_control_command({
+            "robot_id": "robot2", "task_id": "web_nav_1", "command": "Resume"
+        })
+        self.assertEqual(command, {
+            "type": "task_command",
+            "robot_id": "robot2",
+            "task_id": "web_nav_1",
+            "command": "resume",
+        })
+        with self.assertRaisesRegex(ValueError, "command must be"):
+            server._task_control_command({
+                "robot_id": "robot2", "task_id": "web_nav_1", "command": "retry"
+            })
+
 
 class MultiRobotNavigationTest(unittest.TestCase):
     def test_each_robot_uses_its_own_lifecycle_and_action_namespace(self):

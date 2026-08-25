@@ -5,6 +5,11 @@ bt_navigator:
     global_frame: map
     robot_base_frame: "@@ROBOT@@/base_footprint"
     odom_topic: "/@@ROBOT@@/odom"
+    bt_loop_duration: 10
+    # Foxy's 20 ms default is too short when planner/controller callbacks share
+    # a loaded simulator host; a late goal acknowledgement otherwise aborts the
+    # whole NavigateToPose action with "send_goal failed".
+    default_server_timeout: 2000
     enable_groot_monitoring: False
     groot_zmq_publisher_port: 1666
     groot_zmq_server_port: 1667

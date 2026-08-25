@@ -283,7 +283,7 @@ def launch_setup(context, *_args, **_kwargs):
                         "robot_name": ns or robot_name,
                         "map_root": map_root,
                         "world_path": world_path,
-                        "post_relocalize_settle_sec": 1.5,
+                        "post_relocalize_settle_sec": 3.0,
                     }
                 ],
             )

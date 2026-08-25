@@ -31,7 +31,7 @@
    `localization_lost`，再调用 `/<robot>/map_server/load_map` 加载
    `<map_root>/<floor>/<floor>.yaml`。
 4. `Relocalizing`：使用上一楼层梯内点调用 `/<robot>/relocalize` 模式 1；成功后等待
-   `post_relocalize_settle_sec`（默认 1.5 秒），让新 TF 和全局代价地图完成传播。
+   `post_relocalize_settle_sec`（默认 3.0 秒），让新 TF 和全局代价地图完成传播。
 5. `Finished` 或 `Failed`：将最终结果和匹配分数写入状态消息。
 
 Pause、Resume、Terminate 对当前电梯子任务生效。状态话题使用 transient-local QoS，使后加入的

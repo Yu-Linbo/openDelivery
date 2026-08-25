@@ -1,4 +1,5 @@
 import threading
+import time
 
 from action_msgs.msg import GoalStatus
 from custom_msgs_srvs.msg import TaskInfo, TaskStatus
@@ -47,6 +48,14 @@ class FakeTimer:
         self.cancelled = True
 
 
+class FakeGoalHandle:
+    def __init__(self):
+        self.cancelled = False
+
+    def cancel_goal_async(self):
+        self.cancelled = True
+
+
 class RetryHarness:
     def __init__(self, attempts=0):
         self._lock = threading.RLock()
@@ -56,7 +65,10 @@ class RetryHarness:
         self._nav2_goal_retry_count = 2
         self._nav2_goal_retry_delay_sec = 1.0
         self._retry_timer = None
-        self._goal_handle = object()
+        self._goal_watchdog_timer = None
+        self._goal_watchdog_phase = ""
+        self._goal_handle = FakeGoalHandle()
+        self._dispatch_id = 9
         self.published = []
         self.dispatched = []
         self.finished = []
@@ -78,6 +90,9 @@ class RetryHarness:
     def _finish(self, generation, status, message):
         self.finished.append((generation, status, message))
 
+    def _cancel_goal_watchdog(self):
+        NavigationTaskNode._cancel_goal_watchdog(self)
+
 
 def test_aborted_goal_retry_is_delayed_once_and_then_dispatched():
     node = RetryHarness()
@@ -85,6 +100,7 @@ def test_aborted_goal_retry_is_delayed_once_and_then_dispatched():
 
     assert node._retry_attempt == 1
     assert node._goal_handle is None
+    assert node._dispatch_id == 10
     assert node.published == [
         (TaskStatus.STATUS_WAITING, "Nav2 goal status=6; retrying Nav2 goal 1/2")
     ]
@@ -103,3 +119,38 @@ def test_aborted_goal_retry_stops_at_configured_limit():
         (4, TaskStatus.STATUS_FAILED, "Nav2 goal status=6")
     ]
     assert node._retry_timer is None
+
+
+class WatchdogHarness(RetryHarness):
+    def __init__(self, phase="feedback", elapsed=21.0):
+        super().__init__()
+        self._goal_watchdog_phase = phase
+        self._goal_activity_at = time.monotonic() - elapsed
+        self._nav2_goal_response_timeout_sec = 10.0
+        self._nav2_feedback_timeout_sec = 20.0
+        self._goal_watchdog_timer = FakeTimer(lambda: None)
+        self.retries = []
+
+    def _retry_goal(self, generation, message):
+        self.retries.append((generation, message))
+
+
+def test_feedback_watchdog_cancels_stuck_goal_and_retries():
+    node = WatchdogHarness()
+    handle = node._goal_handle
+
+    NavigationTaskNode._check_goal_watchdog(node, 4, 9)
+
+    assert handle.cancelled
+    assert node._goal_handle is None
+    assert node._dispatch_id == 10
+    assert node.retries == [(4, "Nav2 goal produced no feedback for 20.0s")]
+
+
+def test_goal_response_watchdog_waits_until_deadline():
+    node = WatchdogHarness(phase="response", elapsed=9.0)
+
+    NavigationTaskNode._check_goal_watchdog(node, 4, 9)
+
+    assert not node._goal_handle.cancelled
+    assert node.retries == []

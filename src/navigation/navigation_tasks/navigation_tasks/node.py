@@ -1,5 +1,6 @@
 import copy
 import threading
+import time
 
 from action_msgs.msg import GoalStatus
 from custom_msgs_srvs.msg import TaskCommand, TaskInfo, TaskStatus
@@ -30,6 +31,8 @@ class NavigationTaskNode(Node):
         self.declare_parameter("action_server_wait_sec", 15.0)
         self.declare_parameter("nav2_goal_retry_count", 2)
         self.declare_parameter("nav2_goal_retry_delay_sec", 1.0)
+        self.declare_parameter("nav2_goal_response_timeout_sec", 10.0)
+        self.declare_parameter("nav2_feedback_timeout_sec", 20.0)
         robot = str(self.get_parameter("robot_name").value).strip().strip("/") or "robot2"
         self._map_frame = str(self.get_parameter("map_frame").value).strip() or "map"
         self._action_server_wait_sec = max(
@@ -40,6 +43,12 @@ class NavigationTaskNode(Node):
         )
         self._nav2_goal_retry_delay_sec = max(
             0.1, float(self.get_parameter("nav2_goal_retry_delay_sec").value)
+        )
+        self._nav2_goal_response_timeout_sec = max(
+            0.5, float(self.get_parameter("nav2_goal_response_timeout_sec").value)
+        )
+        self._nav2_feedback_timeout_sec = max(
+            1.0, float(self.get_parameter("nav2_feedback_timeout_sec").value)
         )
         qos = QoSProfile(depth=10)
         qos.reliability = ReliabilityPolicy.RELIABLE
@@ -61,6 +70,10 @@ class NavigationTaskNode(Node):
         self._goal_handle = None
         self._retry_attempt = 0
         self._retry_timer = None
+        self._goal_watchdog_timer = None
+        self._goal_watchdog_phase = ""
+        self._goal_activity_at = 0.0
+        self._dispatch_id = 0
         self._generation = 0
         self._publish_status()
 
@@ -152,6 +165,8 @@ class NavigationTaskNode(Node):
 
     def _cancel_goal(self):
         self._cancel_retry()
+        self._cancel_goal_watchdog()
+        self._dispatch_id += 1
         handle = self._goal_handle
         self._goal_handle = None
         if handle is not None:
@@ -163,6 +178,55 @@ class NavigationTaskNode(Node):
         if timer is not None:
             timer.cancel()
             self.destroy_timer(timer)
+
+    def _cancel_goal_watchdog(self):
+        timer = self._goal_watchdog_timer
+        self._goal_watchdog_timer = None
+        self._goal_watchdog_phase = ""
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+
+    def _start_goal_watchdog(self, generation, dispatch_id):
+        self._cancel_goal_watchdog()
+        self._goal_watchdog_phase = "response"
+        self._goal_activity_at = time.monotonic()
+        self._goal_watchdog_timer = self.create_timer(
+            1.0,
+            lambda: self._check_goal_watchdog(generation, dispatch_id),
+        )
+
+    def _check_goal_watchdog(self, generation, dispatch_id):
+        with self._lock:
+            if generation != self._generation or dispatch_id != self._dispatch_id:
+                return
+            phase = self._goal_watchdog_phase
+            timeout = (
+                self._nav2_goal_response_timeout_sec
+                if phase == "response"
+                else self._nav2_feedback_timeout_sec
+            )
+            if not phase or time.monotonic() - self._goal_activity_at < timeout:
+                return
+            message = (
+                f"Nav2 goal response timed out after {timeout:.1f}s"
+                if phase == "response"
+                else f"Nav2 goal produced no feedback for {timeout:.1f}s"
+            )
+            self._cancel_goal_watchdog()
+            self._dispatch_id += 1
+            handle = self._goal_handle
+            self._goal_handle = None
+            if handle is not None:
+                handle.cancel_goal_async()
+        self._retry_goal(generation, message)
+
+    def _goal_feedback(self, _feedback, generation, dispatch_id):
+        with self._lock:
+            if generation != self._generation or dispatch_id != self._dispatch_id:
+                return
+            self._goal_watchdog_phase = "feedback"
+            self._goal_activity_at = time.monotonic()
 
     @staticmethod
     def _retryable_goal_status(status):
@@ -178,7 +242,12 @@ class NavigationTaskNode(Node):
             if self._retry_attempt >= self._nav2_goal_retry_count:
                 self._finish(generation, TaskStatus.STATUS_FAILED, failure_message)
                 return
+            self._cancel_goal_watchdog()
+            self._dispatch_id += 1
+            handle = self._goal_handle
             self._goal_handle = None
+            if handle is not None:
+                handle.cancel_goal_async()
             self._retry_attempt += 1
             attempt = self._retry_attempt
             self._status = TaskStatus.STATUS_WAITING
@@ -240,38 +309,61 @@ class NavigationTaskNode(Node):
                 self._status = TaskStatus.STATUS_NAVIGATING
             self._message = "goal dispatched"
             self._publish_status()
-            future = client.send_goal_async(goal)
-            future.add_done_callback(lambda done: self._goal_response(done, generation))
+            self._dispatch_id += 1
+            dispatch_id = self._dispatch_id
+            self._start_goal_watchdog(generation, dispatch_id)
+            try:
+                future = client.send_goal_async(
+                    goal,
+                    feedback_callback=lambda feedback: self._goal_feedback(
+                        feedback, generation, dispatch_id
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._retry_goal(generation, f"goal request failed: {exc}")
+                return
+            future.add_done_callback(
+                lambda done: self._goal_response(done, generation, dispatch_id)
+            )
 
-    def _goal_response(self, future, generation):
+    def _goal_response(self, future, generation, dispatch_id):
         try:
             handle = future.result()
         except Exception as exc:  # noqa: BLE001
-            self._finish(generation, TaskStatus.STATUS_FAILED, f"goal request failed: {exc}")
+            with self._lock:
+                current = generation == self._generation and dispatch_id == self._dispatch_id
+            if current:
+                self._retry_goal(generation, f"goal request failed: {exc}")
             return
         with self._lock:
-            if generation != self._generation:
+            if generation != self._generation or dispatch_id != self._dispatch_id:
                 if handle.accepted:
                     handle.cancel_goal_async()
                 return
             if not handle.accepted:
-                self._finish(generation, TaskStatus.STATUS_FAILED, "Nav2 rejected goal")
+                self._retry_goal(generation, "Nav2 rejected goal")
                 return
             self._goal_handle = handle
+            self._goal_watchdog_phase = "feedback"
+            self._goal_activity_at = time.monotonic()
             handle.get_result_async().add_done_callback(
-                lambda done: self._goal_result(done, generation)
+                lambda done: self._goal_result(done, generation, dispatch_id)
             )
 
-    def _goal_result(self, future, generation):
+    def _goal_result(self, future, generation, dispatch_id):
         try:
             result = future.result()
             status = result.status
         except Exception as exc:  # noqa: BLE001
-            self._finish(generation, TaskStatus.STATUS_FAILED, f"goal result failed: {exc}")
+            with self._lock:
+                current = generation == self._generation and dispatch_id == self._dispatch_id
+            if current:
+                self._retry_goal(generation, f"goal result failed: {exc}")
             return
         with self._lock:
-            if generation != self._generation:
+            if generation != self._generation or dispatch_id != self._dispatch_id:
                 return
+            self._cancel_goal_watchdog()
             self._goal_handle = None
             if status != GoalStatus.STATUS_SUCCEEDED:
                 message = f"Nav2 goal status={status}"
@@ -295,7 +387,12 @@ class NavigationTaskNode(Node):
             if generation != self._generation:
                 return
             self._cancel_retry()
+            self._cancel_goal_watchdog()
+            self._dispatch_id += 1
+            handle = self._goal_handle
             self._goal_handle = None
+            if handle is not None:
+                handle.cancel_goal_async()
             self._status = status
             self._message = message
             self._publish_status()

@@ -2437,3 +2437,400 @@ body.standalone-map-editor-open { overflow: hidden; }
   .standalone-map-editor__map-panel { min-height: 62vh; }
   .standalone-map-editor__canvas-toolbar .checkbox { padding: 5px 8px; }
 }
+/* Pure offline rosbag2 player. It never consumes the live monitor data stores. */
+.btn-log-bag-play {
+  margin-bottom: 9px;
+  border-color: #38bdf8 !important;
+  color: #e0f2fe;
+  background: linear-gradient(135deg, rgba(3, 105, 161, 0.72), rgba(14, 116, 144, 0.58));
+}
+
+.btn-log-bag-play:disabled {
+  opacity: 0.45;
+}
+
+.bag-replay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(3px);
+}
+
+.bag-replay-dialog {
+  position: fixed;
+  inset: 18px;
+  z-index: 1210;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  border-radius: 16px;
+  color: var(--text);
+  background: #07101f;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+}
+
+.bag-replay-dialog[hidden],
+.bag-replay-backdrop[hidden] {
+  display: none !important;
+}
+
+.bag-replay-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 68px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(8, 47, 73, 0.9));
+}
+
+.bag-replay-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.bag-replay-head p {
+  max-width: min(58vw, 760px);
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 11px "Fira Code", ui-monospace, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bag-replay-offline-badge {
+  margin-left: auto;
+  border: 1px solid rgba(34, 197, 94, 0.52);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.24);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bag-replay-close {
+  min-width: 36px;
+  padding: 5px 10px;
+  border-color: rgba(248, 113, 113, 0.55);
+  color: #fecaca;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.bag-replay-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
+  min-height: 0;
+}
+
+.bag-replay-viewer {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.bag-replay-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.9);
+  font-size: 12px;
+}
+
+.bag-replay-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.bag-replay-map-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.bag-replay-map-follow strong {
+  color: #7dd3fc;
+  font-family: "Fira Code", ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.bag-replay-toolbar select,
+.bag-replay-speed select {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: #0f172a;
+}
+
+.bag-replay-toolbar .status {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.bag-replay-canvas-wrap {
+  position: relative;
+  min-height: 360px;
+  overflow: hidden;
+  cursor: grab;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(14, 116, 144, 0.12), transparent 45%),
+    #020617;
+}
+
+.bag-replay-canvas-wrap.is-dragging {
+  cursor: grabbing;
+}
+.bag-replay-cameras {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  background: rgba(2, 6, 23, 0.86);
+}
+
+.bag-replay-camera {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 8px;
+  background: #020617;
+}
+
+.bag-replay-camera figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.95);
+  font-size: 10px;
+}
+
+.bag-replay-camera figcaption span {
+  overflow: hidden;
+  color: #64748b;
+  font-family: "Fira Code", ui-monospace, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bag-replay-camera-frame {
+  --bag-replay-camera-max-height: 132px;
+  display: grid;
+  place-items: center;
+  min-height: 72px;
+  max-height: var(--bag-replay-camera-max-height);
+  padding: 6px;
+  box-sizing: border-box;
+  color: #475569;
+  font-size: 11px;
+}
+.bag-replay-camera-frame img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: var(--bag-replay-camera-max-height);
+  aspect-ratio: auto;
+  object-fit: contain;
+  background: #000;
+}
+.bag-replay-camera-frame img[hidden],
+.bag-replay-camera-frame span[hidden] {
+  display: none;
+}
+
+#bag-replay-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bag-replay-loading {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: min(80%, 520px);
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 10px;
+  padding: 10px 14px;
+  color: #bae6fd;
+  background: rgba(7, 16, 31, 0.9);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.bag-replay-loading[hidden] {
+  display: none;
+}
+
+.bag-replay-state {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  border-left: 1px solid var(--line);
+  background: rgba(15, 23, 42, 0.74);
+}
+
+.bag-replay-state h3 {
+  margin: 2px 0 9px;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+
+.bag-replay-state h3:not(:first-child) {
+  margin-top: 18px;
+}
+
+.bag-replay-state dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.bag-replay-state dl > div {
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 6px 7px;
+  border: 1px solid rgba(51, 65, 85, 0.7);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.38);
+}
+
+.bag-replay-state dt {
+  color: #64748b;
+  font-size: 10px;
+}
+
+.bag-replay-state dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #dbeafe;
+  font: 11px "Fira Code", ui-monospace, monospace;
+}
+
+.bag-replay-summary {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.bag-replay-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.bag-replay-topic {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #bae6fd;
+  background: rgba(14, 116, 144, 0.12);
+  font: 9px "Fira Code", ui-monospace, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bag-replay-controls {
+  display: grid;
+  grid-template-columns: auto auto minmax(160px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 62px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+  background: #0f172a;
+}
+
+.bag-replay-toggle {
+  min-width: 86px;
+  border-color: #38bdf8;
+}
+
+#bag-replay-progress {
+  width: 100%;
+  accent-color: #38bdf8;
+  cursor: pointer;
+}
+
+.bag-replay-time {
+  color: #cbd5e1;
+  font: 11px "Fira Code", ui-monospace, monospace;
+}
+
+.bag-replay-speed {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+body.bag-replay-open {
+  overflow: hidden;
+}
+
+@media (max-width: 820px) {
+  .bag-replay-dialog {
+    inset: 6px;
+  }
+
+  .bag-replay-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(340px, 1fr) minmax(160px, 34vh);
+  }
+
+  .bag-replay-camera-frame {
+    --bag-replay-camera-max-height: 96px;
+    max-height: 96px;
+  }
+
+  .bag-replay-canvas-wrap {
+    min-height: 250px;
+  }
+
+  .bag-replay-state {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .bag-replay-controls {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .bag-replay-controls .bag-replay-time {
+    display: none;
+  }
+
+  .bag-replay-speed {
+    grid-column: 3;
+  }
+
+  .bag-replay-offline-badge {
+    display: none;
+  }
+}

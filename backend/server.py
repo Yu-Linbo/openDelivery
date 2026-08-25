@@ -30,6 +30,7 @@ from ros_sensor_store import (
 )
 from robot_lifecycle import RobotLifecycleOrchestrator
 import map_assets
+import bag_replay
 import ros_task_store
 
 _BACKEND_DIR = Path(__file__).resolve().parent
@@ -39,6 +40,7 @@ if str(_BACKEND_DIR) not in sys.path:
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
 LOG_BAG_DIR = ROOT_DIR / "log_bag"
+MAX_LOG_BAG_REPLAY_SELECTION = 24
 
 
 def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
@@ -1546,6 +1548,29 @@ def _navigation_task_command(data: dict) -> dict:
     }
 
 
+def _task_control_command(data: dict) -> dict:
+    """Validate a Web task control request for the root TaskCommand bridge."""
+    if not isinstance(data, dict):
+        raise ValueError("body must be an object")
+    robot_id = str(data.get("robot_id") or "").strip()
+    task_id = str(data.get("task_id") or "").strip()
+    command = str(data.get("command") or "").strip().lower()
+    pattern = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+    if not re.fullmatch(pattern, robot_id):
+        raise ValueError("invalid robot_id")
+    if not re.fullmatch(pattern, task_id):
+        raise ValueError("invalid task_id")
+    if command not in ("pause", "resume", "terminate"):
+        raise ValueError("command must be pause, resume, or terminate")
+    return {
+        "type": "task_command",
+        "robot_id": robot_id,
+        "task_id": task_id,
+        "command": command,
+    }
+
+
+
 def _safe_log_bag_path(raw_path: str) -> Path:
     raw = str(raw_path or "").strip()
     if not raw:
@@ -1880,6 +1905,52 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 500)
                 return
             self._send_zip(payload, filename)
+            return
+
+        if path == "/api/log_bag/replay":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                requested = data.get("bags")
+                if requested is None:
+                    requested = [data.get("bag")]
+                if not isinstance(requested, list):
+                    raise ValueError("bags must be an array")
+                bag_values = []
+                for value in requested:
+                    text = str(value or "").strip()
+                    if text and text not in bag_values:
+                        bag_values.append(text)
+                if not bag_values:
+                    raise ValueError("at least one bag is required")
+                if len(bag_values) > MAX_LOG_BAG_REPLAY_SELECTION:
+                    raise ValueError(
+                        f"at most {MAX_LOG_BAG_REPLAY_SELECTION} bags can be replayed together"
+                    )
+
+                replays = []
+                for value in bag_values:
+                    bag_path = _safe_log_bag_path(value)
+                    if not bag_path.exists():
+                        raise FileNotFoundError(f"bag does not exist: {value}")
+                    relative = bag_path.resolve().relative_to(LOG_BAG_DIR.resolve())
+                    robot_name = relative.parts[0] if relative.parts else ""
+                    replay = bag_replay.extract_replay(bag_path, robot_name=robot_name)
+                    replay["bag"] = _log_bag_display_path(bag_path)
+                    replays.append(replay)
+                out = bag_replay.merge_replays(replays)
+                out["available_maps"] = list_floors()
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+                return
+            except (ValueError, bag_replay.BagReplayError) as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(out)
             return
 
         if path == "/api/ros/lifecycle/startup":
@@ -2638,7 +2709,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         y = data.get("y")
         yaw = data.get("yaw")
 
-        if ctype == "localize_nav_command":
+        if ctype == "task_command":
+            try:
+                cmd = _task_control_command(data)
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+        elif ctype == "localize_nav_command":
             set_initial_pose = bool(data.get("set_initial_pose"))
             if not map_name and not set_initial_pose:
                 self._send_json(
