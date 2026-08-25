@@ -134,6 +134,37 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         commands = [call.args[0] for call in run.call_args_list]
         self.assertIn(["gz", "model", "-m", "robot2", "-d"], commands)
 
+    def test_entity_delete_accepts_lowercase_service_success(self):
+        orchestrator = self._orchestrator()
+        response = subprocess.CompletedProcess(
+            ["ros2"], 0, stdout="success: true\n", stderr=""
+        )
+        with mock.patch.object(
+            orchestrator, "_run_shell", return_value=response
+        ), mock.patch.object(
+            orchestrator,
+            "_native_simulation_entity_present",
+            side_effect=[True, False],
+        ), mock.patch.object(robot_lifecycle.subprocess, "run") as native_run, mock.patch.object(
+            robot_lifecycle.time, "sleep"
+        ):
+            self.assertTrue(orchestrator._delete_simulation_entity("robot2"))
+        native_run.assert_not_called()
+
+    def test_entity_delete_accepts_native_request_during_visibility_lag(self):
+        orchestrator = self._orchestrator()
+        accepted = subprocess.CompletedProcess(["gz"], 0, stdout="", stderr="")
+        with mock.patch.object(
+            orchestrator, "_run_shell", side_effect=RuntimeError("dds")
+        ), mock.patch.object(
+            orchestrator, "_native_simulation_entity_present", return_value=True
+        ), mock.patch.object(
+            robot_lifecycle.subprocess, "run", return_value=accepted
+        ), mock.patch.object(
+            robot_lifecycle.time, "sleep"
+        ):
+            self.assertTrue(orchestrator._delete_simulation_entity("robot2"))
+
     def test_native_entity_query_reports_absent_model(self):
         orchestrator = self._orchestrator()
         completed = subprocess.CompletedProcess(
@@ -147,8 +178,28 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             ["gz"], 0, stdout="Invalid arguments\n", stderr=""
         )
-        with mock.patch.object(robot_lifecycle.subprocess, "run", return_value=completed):
+        with mock.patch.object(
+            robot_lifecycle.subprocess, "run", return_value=completed
+        ) as run:
             self.assertFalse(orchestrator._gazebo_transport_ready())
+        self.assertEqual(
+            run.call_args.args[0],
+            ["gz", "model", "-m", "ground_plane", "-p"],
+        )
+
+    def test_gazebo_transport_accepts_ground_plane_pose(self):
+        orchestrator = self._orchestrator()
+        completed = subprocess.CompletedProcess(
+            ["gz"], 0, stdout="0 0 0 0 -0 0\n", stderr=""
+        )
+        with mock.patch.object(
+            robot_lifecycle.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertTrue(orchestrator._gazebo_transport_ready())
+        self.assertEqual(
+            run.call_args.args[0],
+            ["gz", "model", "-m", "ground_plane", "-p"],
+        )
 
     def test_shared_world_is_started_once_for_concurrent_requests(self):
         orchestrator = self._orchestrator()
@@ -315,6 +366,7 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
             stack.enter_context(mock.patch.object(orchestrator, "_ensure_robot_specs"))
             stack.enter_context(mock.patch.object(orchestrator, "_delete_simulation_entity", return_value=False))
+            stack.enter_context(mock.patch.object(orchestrator, "_other_simulation_entity_present", return_value=False))
             recover = stack.enter_context(mock.patch.object(orchestrator, "_restart_simulation_world"))
             start_robot = stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed"))
             stack.enter_context(mock.patch.object(orchestrator, "status", return_value={"robots": []}))
@@ -324,6 +376,42 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
 
         recover.assert_called_once_with()
         start_robot.assert_called_once()
+
+    def test_startup_preserves_shared_world_when_peer_entity_exists(self):
+        orchestrator = self._orchestrator()
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_simulation_entity_present", return_value=True)
+            )
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_sim_managed_running", return_value=False)
+            )
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_robot_specs"))
+            stack.enter_context(
+                mock.patch.object(orchestrator, "_delete_simulation_entity", return_value=False)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    orchestrator, "_other_simulation_entity_present", return_value=True
+                )
+            )
+            recover = stack.enter_context(
+                mock.patch.object(orchestrator, "_restart_simulation_world")
+            )
+            start_robot = stack.enter_context(
+                mock.patch.object(orchestrator, "_start_if_needed")
+            )
+            with self.assertRaisesRegex(RuntimeError, "preserving shared world"):
+                orchestrator.startup_selected_robot(
+                    "robot2", is_online=lambda _rid: False
+                )
+
+        recover.assert_not_called()
+        start_robot.assert_not_called()
 
     def test_shutdown_never_stops_shared_world(self):
         manager = FakeRosNodeManager()

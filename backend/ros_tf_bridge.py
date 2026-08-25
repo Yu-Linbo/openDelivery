@@ -67,6 +67,7 @@ from gazebo_msgs.msg import ModelStates
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, Image
 from tf2_msgs.msg import TFMessage
+from rosgraph_msgs.msg import Clock
 
 try:
     # custom_msgs_srvs/RobotStatus: string robot_status / task_status
@@ -267,6 +268,19 @@ class OpenDeliveryTfBridgeNode(Node):
 
         cache_sec = float(os.environ.get("ROS_TF_CACHE_SEC", "30"))
         self._buffer = Buffer(cache_time=Duration(seconds=cache_sec))
+        self._last_sim_clock_ns: Optional[int] = None
+        self._clock_reset_tolerance_ns = int(
+            float(os.environ.get("ROS_CLOCK_RESET_TOLERANCE_SEC", "0.5"))
+            * 1_000_000_000
+        )
+
+        clock_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
+        self.create_subscription(Clock, "/clock", self._on_clock, clock_qos)
 
         topics = sorted({str(s["tf_topic"]) for s in robot_specs})
         if not topics:
@@ -277,7 +291,9 @@ class OpenDeliveryTfBridgeNode(Node):
 
         static_topic = os.environ.get("ROS_TF_STATIC_TOPIC", "/tf_static").strip()
         if static_topic and static_topic not in topics:
-            self.create_subscription(TFMessage, static_topic, self._on_tf_message, 10)
+            self.create_subscription(
+                TFMessage, static_topic, self._on_tf_static_message, 10
+            )
             self.get_logger().info(f"subscribing TFMessage on {static_topic} (static)")
 
         sensor_qos = QoSProfile(
@@ -1009,6 +1025,39 @@ class OpenDeliveryTfBridgeNode(Node):
                 self._buffer.set_transform(t, "open_delivery_web")
             except Exception as ex:  # noqa: BLE001
                 self.get_logger().debug(f"set_transform skip: {ex}")
+
+    def _on_tf_static_message(self, msg: TFMessage) -> None:
+        for transform in msg.transforms:
+            try:
+                self._buffer.set_transform_static(transform, "open_delivery_web")
+            except Exception as ex:  # noqa: BLE001
+                self.get_logger().debug(f"set static transform skip: {ex}")
+
+    def _on_clock(self, msg: Clock) -> None:
+        now_ns = int(msg.clock.sec) * 1_000_000_000 + int(msg.clock.nanosec)
+        previous_ns = self._last_sim_clock_ns
+        self._last_sim_clock_ns = now_ns
+        if (
+            previous_ns is None
+            or now_ns + self._clock_reset_tolerance_ns >= previous_ns
+        ):
+            return
+
+        # Gazebo restarts /clock at zero. BufferCore otherwise keeps transforms
+        # from the previous simulation epoch and rejects every new transform as
+        # TF_OLD_DATA until simulation time catches up with that old epoch.
+        self._buffer.clear()
+        try:
+            import ros_sensor_store
+
+            ros_sensor_store.clear_gazebo_models()
+        except Exception:  # noqa: BLE001
+            pass
+        self.get_logger().warning(
+            "simulation clock moved backwards from "
+            f"{previous_ns / 1_000_000_000:.3f}s to "
+            f"{now_ns / 1_000_000_000:.3f}s; cleared Web TF cache"
+        )
 
     def _on_gazebo_model_states(self, msg: ModelStates) -> None:
         try:

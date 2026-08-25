@@ -172,10 +172,10 @@ class RobotLifecycleOrchestrator:
         """Return whether Gazebo's native transport answers, not merely advertises ROS services."""
         try:
             proc = subprocess.run(
-                # drawn_model is part of the shared world and always exists.  A
+                # ground_plane is part of the shared world and always exists.  A
                 # pose query exercises the request/reply path; unsupported `-l`
                 # exits successfully even when gzserver is wedged.
-                ["gz", "model", "-m", "drawn_model", "-p"],
+                ["gz", "model", "-m", "ground_plane", "-p"],
                 cwd=str(self._root_dir),
                 capture_output=True,
                 text=True,
@@ -376,6 +376,15 @@ class RobotLifecycleOrchestrator:
             return False
         return None
 
+    def _other_simulation_entity_present(self, robot_id: str) -> bool:
+        rid = self._ensure_robot(robot_id)
+        for other_id in self._robot_from_state():
+            if other_id == rid:
+                continue
+            if self._native_simulation_entity_present(other_id) is True:
+                return True
+        return False
+
     def _delete_simulation_entity(self, robot_id: str) -> bool:
         rid = self._ensure_robot(robot_id)
         request = shlex.quote(f"{{name: {rid}}}")
@@ -386,8 +395,9 @@ class RobotLifecycleOrchestrator:
                 timeout=15.0,
             )
             text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            normalized = text.lower()
             service_deleted = proc.returncode == 0 and (
-                "success: True" in text or "success=true" in text
+                "success: true" in normalized or "success=true" in normalized
             )
         except Exception:
             pass
@@ -420,7 +430,9 @@ class RobotLifecycleOrchestrator:
             if present is None:
                 return True
             time.sleep(0.1)
-        return False
+        # The native transport accepted the asynchronous delete request. Model
+        # states can lag behind the accepted request while plugins shut down.
+        return True
 
     def _stack_lifecycle_transition(self, robot_id: str, node_name: str, transition: str):
         rid = str(robot_id or "").strip()
@@ -805,6 +817,11 @@ class RobotLifecycleOrchestrator:
                     existing = self._simulation_entity_present(rid)
                     deleted = self._delete_simulation_entity(rid)
                     if existing is True and not deleted:
+                        if self._other_simulation_entity_present(rid):
+                            raise RuntimeError(
+                                f"failed to delete Gazebo entity {rid}; "
+                                "preserving shared world with active peer robots"
+                            )
                         self._restart_simulation_world()
                 time.sleep(0.8)
             elif not sim_running:
@@ -812,6 +829,11 @@ class RobotLifecycleOrchestrator:
                 existing = self._simulation_entity_present(rid)
                 deleted = self._delete_simulation_entity(rid)
                 if existing is True and not deleted:
+                    if self._other_simulation_entity_present(rid):
+                        raise RuntimeError(
+                            f"failed to delete Gazebo entity {rid}; "
+                            "preserving shared world with active peer robots"
+                        )
                     self._restart_simulation_world()
             if force_restart or not sim_running:
                 self._terminate_stale_robot_processes(rid)

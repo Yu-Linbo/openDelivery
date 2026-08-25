@@ -50,6 +50,11 @@ def clear_all() -> None:
         _topdown_image.clear()
 
 
+def clear_gazebo_models() -> None:
+    with _lock:
+        _gazebo_models.clear()
+
+
 def set_gazebo_models(payload: Dict[str, Any]) -> None:
     with _lock:
         _gazebo_models.clear()
