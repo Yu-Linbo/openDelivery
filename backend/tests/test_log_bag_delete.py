@@ -111,6 +111,44 @@ class LogBagDeleteTest(unittest.TestCase):
         names = [Path(row["bag"]).name for row in listed["robots"][0]["bags"]]
         self.assertEqual(names, ["002_terminal_bag"])
 
+    def test_live_bag_is_listed_without_match_json_or_rotation(self):
+        self.match.unlink()
+        live = self.robot / "20260826T102037+0800_terminal_bag"
+        live.mkdir()
+        (live / "active.db3").write_bytes(b"live sqlite")
+        (live / "active.db3-wal").write_bytes(b"wal")
+        (live / ".opendelivery_task_tags").write_text(
+            '"task-1"\n"task-2"\n', encoding="utf-8"
+        )
+
+        listed = server._list_log_bag_matches("robot1")
+        discovered = server._list_log_bag_matches()
+
+        robot = listed["robots"][0]
+        self.assertFalse(robot["no_log"])
+        self.assertEqual(len(robot["bags"]), 1)
+        entry = robot["bags"][0]
+        self.assertEqual(Path(entry["bag"]).name, live.name)
+        self.assertEqual(entry["tags"], ["task-1", "task-2"])
+        self.assertEqual(entry["started_at"], "2026-08-26T10:20:37+08:00")
+        self.assertEqual(entry["reason"], "recording")
+        self.assertTrue(entry["live"])
+        self.assertFalse(entry["deletable"])
+        self.assertFalse(entry["downloadable"])
+        self.assertTrue(entry["files"][0]["exists"])
+        self.assertFalse(entry["files"][0]["downloadable"])
+        self.assertGreater(entry["bytes"], 0)
+        self.assertEqual(discovered["robots"][0]["robot_name"], "robot1")
+
+    def test_indexed_bag_remains_downloadable_and_deletable(self):
+        listed = server._list_log_bag_matches("robot1")
+        entry = listed["robots"][0]["bags"][0]
+
+        self.assertFalse(entry["live"])
+        self.assertTrue(entry["deletable"])
+        self.assertTrue(entry["downloadable"])
+        self.assertTrue(entry["files"][0]["downloadable"])
+
 
 if __name__ == "__main__":
     unittest.main()

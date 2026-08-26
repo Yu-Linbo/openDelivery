@@ -105,12 +105,13 @@ These endpoints are used by `web/app.js`.
 ### Logs
 
 - `GET /api/log_bag/matches`
-  - Purpose: list all robots with `log_bag/*/backup/match.json`.
+  - Purpose: list indexed backup bags plus active `log_bag/{robot}/*_terminal_bag` directories.
+  - Active bags are returned with `live: true`, `deletable: false`, and `downloadable: false`; they remain read-only replayable before the 10 MiB rotation threshold is reached.
 
   - Recorder timestamps are CST (`+08:00` / filename suffix `+0800`); task-scoped bags expose their task IDs in `tags`.
 - `GET /api/log_bag/matches?robot_name={robot}`
-  - Purpose: read one robot's `match.json`.
-  - If not found, returns the robot entry with `no_log: true` and empty `bags`.
+  - Purpose: read one robot's indexed and active bags.
+  - If neither `match.json` nor an active bag exists, returns the robot entry with `no_log: true` and empty `bags`.
 
 - `POST /api/log_bag/download`
   - Body: `{ "files": ["log_bag/robot2/backup/bags/20260609T080918_terminal_bag", "log_bag/robot2/backup/logs/20260609T080918_terminal_log.txt"] }`

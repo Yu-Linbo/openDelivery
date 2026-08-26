@@ -3302,6 +3302,7 @@ function formatLogBagReason(reason) {
     task_started: "旧版任务开始切包",
     task_finished: "旧版任务结束切包",
     task_transition: "旧版任务切换切包",
+    recording: "录制中 · 仅回放",
   };
   const key = String(reason || "");
   return labels[key] || key;
@@ -3378,7 +3379,8 @@ function renderLogBagList() {
 
     const title = document.createElement("div");
     title.className = "log-bag-item__title";
-    title.textContent = basenameOfLogPath(entry.bag) || "(unknown bag)";
+    title.textContent = (basenameOfLogPath(entry.bag) || "(unknown bag)") +
+      (entry.live ? "（录制中）" : "");
     body.appendChild(title);
 
     const meta = document.createElement("div");
@@ -3433,7 +3435,7 @@ function selectedLogBagFiles() {
 }
 
 function defaultLogBagFileChecked(file) {
-  return file.kind === "bag";
+  return file.kind === "bag" && file.downloadable !== false;
 }
 
 function selectedLogBagsForReplay() {
@@ -3453,7 +3455,20 @@ function updateLogBagDownloadState() {
   ).map((el) => el.value);
   if (btnDownloadLogBag) btnDownloadLogBag.disabled = checked.length === 0;
   const bagCount = selectedLogBagIndices.size;
-  if (btnDeleteLogBag) btnDeleteLogBag.disabled = bagCount === 0;
+  const selectedEntries = Array.from(selectedLogBagIndices)
+    .map((index) => logBagEntries[index])
+    .filter(Boolean);
+  const allDeletable = bagCount > 0 &&
+    selectedEntries.length === bagCount &&
+    selectedEntries.every((entry) => entry.deletable !== false);
+  if (btnDeleteLogBag) {
+    btnDeleteLogBag.disabled = !allDeletable;
+    btnDeleteLogBag.title = allDeletable
+      ? "删除所选已归档 bag"
+      : bagCount > 0
+        ? "录制中的 bag 不能删除"
+        : "请先选择 bag";
+  }
   if (btnPlayLogBag) {
     const playable = selectedLogBagsForReplay();
     const allPlayable = bagCount > 0 && playable.length === bagCount;
@@ -3519,7 +3534,7 @@ function renderLogBagFiles() {
       logBagFileChecked.set(file.path, checked);
     }
     input.checked = checked;
-    input.disabled = !file.exists;
+    input.disabled = !file.exists || file.downloadable === false;
     input.addEventListener("change", () => {
       logBagFileChecked.set(file.path, input.checked);
       updateLogBagDownloadState();
@@ -3533,7 +3548,7 @@ function renderLogBagFiles() {
     name.textContent = basenameOfLogPath(file.path);
     const meta = document.createElement("span");
     meta.className = "log-bag-file__meta";
-    meta.textContent = `${file.kind || "file"}${file.is_dir ? " · directory" : ""}${file.exists ? "" : " · missing"}`;
+    meta.textContent = `${file.kind || "file"}${file.is_dir ? " · directory" : ""}${file.exists ? "" : " · missing"}${file.downloadable === false ? " · 录制中不可下载" : ""}`;
     body.appendChild(name);
     body.appendChild(meta);
     row.appendChild(body);
@@ -3558,7 +3573,7 @@ async function refreshLogBags() {
       logBagStatus.textContent = "无机器人，暂无日志索引";
       return;
     }
-    logBagStatus.textContent = `正在读取 ${robotName} 的 match.json...`;
+    logBagStatus.textContent = `正在读取 ${robotName} 的归档和活动 bag...`;
     const url = `${API_BASE_URL}/api/log_bag/matches?robot_name=${encodeURIComponent(robotName)}`;
     const res = await fetch(url, { cache: "no-store" });
     const payload = await res.json();

@@ -14,6 +14,7 @@ import time
 import signal
 import zipfile
 import uuid
+from datetime import datetime
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1806,6 +1807,9 @@ def _delete_log_bags(raw_bags: list) -> dict:
 
 
 def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict:
+    live = bool(meta.get("live", False))
+    deletable = bool(meta.get("deletable", not live))
+    downloadable = bool(meta.get("downloadable", not live))
     txt_raw = meta.get("txt")
     if txt_raw is None:
         txt_raw = meta.get("txt_paths")
@@ -1839,6 +1843,7 @@ def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict
                 "kind": "bag" if p.suffix == ".bag" or p.name.endswith("_terminal_bag") else "txt",
                 "exists": p.exists(),
                 "is_dir": p.is_dir(),
+                "downloadable": downloadable,
             }
         )
 
@@ -1853,7 +1858,85 @@ def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict
         "reason": meta.get("reason"),
         "topics": meta.get("topics") or (meta.get("important_fields") or {}).get("topics") or [],
         "files": normalized_files,
+        "live": live,
+        "deletable": deletable,
+        "downloadable": downloadable,
     }
+
+
+def _live_log_bag_tags(bag_path: Path) -> List[str]:
+    marker = bag_path / ".opendelivery_task_tags"
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    tags = []
+    for line in lines:
+        try:
+            tag = str(json.loads(line)).strip()
+        except (json.JSONDecodeError, TypeError, ValueError):
+            tag = line.strip().strip('"')
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _live_log_bag_started_at(bag_path: Path) -> str:
+    match = re.match(r"^(\d{8}T\d{6}[+-]\d{4})", bag_path.name)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S%z").isoformat()
+        except ValueError:
+            pass
+    try:
+        modified = bag_path.stat().st_mtime
+    except OSError:
+        modified = time.time()
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(modified))
+
+
+def _live_log_bag_size(bag_path: Path) -> int:
+    total = 0
+    try:
+        children = bag_path.rglob("*")
+        for child in children:
+            try:
+                if child.is_file():
+                    total += child.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return total
+    return total
+
+
+def _live_log_bag_entries(robot_name: str) -> list:
+    robot_dir = LOG_BAG_DIR / robot_name
+    if not robot_dir.is_dir():
+        return []
+    entries = []
+    for bag_path in sorted(robot_dir.glob("*_terminal_bag"), reverse=True):
+        if not bag_path.is_dir() or bag_path.parent != robot_dir:
+            continue
+        display_path = _log_bag_display_path(bag_path)
+        entries.append(
+            (
+                display_path,
+                {
+                    "robot_name": robot_name,
+                    "tags": _live_log_bag_tags(bag_path),
+                    "started_at": _live_log_bag_started_at(bag_path),
+                    "ended_at": None,
+                    "bytes": _live_log_bag_size(bag_path),
+                    "reason": "recording",
+                    "topics": [],
+                    "live": True,
+                    "deletable": False,
+                    "downloadable": False,
+                },
+            )
+        )
+    return entries
 
 
 def _list_log_bag_matches(
@@ -1862,39 +1945,33 @@ def _list_log_bag_matches(
 ) -> dict:
     wanted = str(robot_filter or "").strip()
     robots = []
-    if wanted:
-        match_path = LOG_BAG_DIR / wanted / "backup" / "match.json"
-        if not match_path.is_file():
-            return {
-                "robots": [
-                    {
-                        "robot_name": wanted,
-                        "match_path": _log_bag_display_path(match_path),
-                        "no_log": True,
-                        "bags": [],
-                    }
-                ],
-                "timestamp": time.time(),
-            }
     if not LOG_BAG_DIR.is_dir():
         return {"robots": robots, "timestamp": time.time()}
-    match_paths = [LOG_BAG_DIR / wanted / "backup" / "match.json"] if wanted else sorted(LOG_BAG_DIR.glob("*/backup/match.json"))
-    for match_path in match_paths:
-        robot_name = match_path.parent.parent.name
-        try:
-            with open(match_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as exc:  # noqa: BLE001
-            robots.append(
-                {
-                    "robot_name": robot_name,
-                    "match_path": _log_bag_display_path(match_path),
-                    "error": str(exc),
-                    "bags": [],
-                }
-            )
-            continue
-        raw_entries = []
+    if wanted:
+        robot_names = [wanted]
+    else:
+        robot_names = sorted(
+            {path.parent.parent.name for path in LOG_BAG_DIR.glob("*/backup/match.json")}
+            | {
+                path.name
+                for path in LOG_BAG_DIR.iterdir()
+                if path.is_dir() and any(path.glob("*_terminal_bag"))
+            }
+        )
+    for robot_name in robot_names:
+        match_path = LOG_BAG_DIR / robot_name / "backup" / "match.json"
+        data = {}
+        index_error = ""
+        if match_path.is_file():
+            try:
+                with open(match_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("match.json must contain a JSON object")
+            except Exception as exc:  # noqa: BLE001
+                index_error = str(exc)
+                data = {}
+        raw_entries = _live_log_bag_entries(robot_name)
         raw_bags = data.get("bags")
         if isinstance(raw_bags, dict):
             for bag_path, meta in raw_bags.items():
@@ -1934,6 +2011,8 @@ def _list_log_bag_matches(
                 "robot_name": robot_name,
                 "match_path": _log_bag_display_path(match_path),
                 "updated_at": data.get("updated_at"),
+                "no_log": not bags,
+                **({"error": index_error} if index_error else {}),
                 "bags": bags,
             }
         )
