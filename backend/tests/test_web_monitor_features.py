@@ -219,6 +219,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("bagReplayMapAt", js)
         self.assertIn("syncBagReplayMapToCurrentTime", js)
         self.assertIn('bagReplayTimeline("maps")', js)
+        self.assertIn('const stride = Math.max(1, Math.ceil(poses.length / 1500));', js)
+        self.assertIn('coordinates === "map"', js)
         self.assertIn("setBagReplayPlaying(duration > 0)", js)
         self.assertIn('"maps": map_changes', replay_py)
         self.assertIn('"initial_map_name": initial_map_name', replay_py)

@@ -12,7 +12,7 @@ import sqlite3
 import struct
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from PIL import Image
@@ -170,7 +170,7 @@ def _decode_laser_scan(payload: bytes, max_hits: int = 240) -> Dict[str, Any]:
         reader.float32()
     return {
         "frame_id": head["frame_id"],
-        "coordinates": "robot_base",
+        "coordinates": "sensor_frame",
         "points": points,
         "valid_count": valid_count,
     }
@@ -334,47 +334,136 @@ def _inverse_2d(value: Tuple[float, float, float]):
     return (-cosine * x - sine * y, sine * x - cosine * y, -yaw)
 
 
-def _find_tf_pose(
-    graph: Dict[Tuple[str, str], Tuple[float, float, float]], robot_name: str
+def _tf_frames(
+    graph: Dict[Tuple[str, str], Tuple[float, float, float]]
+) -> Set[str]:
+    return {
+        frame
+        for parent_child in graph
+        for frame in parent_child
+        if frame
+    }
+
+
+def _ranked_tf_frames(
+    frames: Iterable[str], suffixes: Tuple[str, ...], robot_name: str
+) -> List[str]:
+    robot_prefix = _clean_frame(robot_name)
+    return sorted(
+        (
+            frame
+            for frame in frames
+            if any(frame == suffix or frame.endswith("/" + suffix) for suffix in suffixes)
+        ),
+        key=lambda frame: (
+            0 if robot_prefix and frame.startswith(robot_prefix + "/") else 1,
+            len(frame),
+        ),
+    )
+
+
+def _lookup_tf_2d(
+    graph: Dict[Tuple[str, str], Tuple[float, float, float]],
+    sources: Iterable[str],
+    targets: Iterable[str],
 ) -> Optional[Dict[str, Any]]:
-    frames = set()
     adjacency: Dict[str, List[Tuple[str, Tuple[float, float, float]]]] = {}
     for (parent, child), transform in graph.items():
         if not parent or not child:
             continue
-        frames.update((parent, child))
         adjacency.setdefault(parent, []).append((child, transform))
         adjacency.setdefault(child, []).append((parent, _inverse_2d(transform)))
 
-    def ranked(candidates: Iterable[str], suffixes: Tuple[str, ...]) -> List[str]:
-        robot_prefix = _clean_frame(robot_name)
-        return sorted(
-            (frame for frame in candidates if any(frame == suffix or frame.endswith("/" + suffix) for suffix in suffixes)),
-            key=lambda frame: (0 if robot_prefix and frame.startswith(robot_prefix + "/") else 1, len(frame)),
-        )
-
-    sources = ranked(frames, ("map",)) or ranked(frames, ("odom",))
-    targets = ranked(frames, ("base_footprint", "base_link"))
     target_set = set(targets)
     for source in sources:
+        if source in target_set:
+            return {"source": source, "target": source, "transform": (0.0, 0.0, 0.0)}
         queue = deque([(source, (0.0, 0.0, 0.0))])
         visited = {source}
         while queue:
             frame, accumulated = queue.popleft()
             if frame in target_set:
-                return {
-                    "x": accumulated[0],
-                    "y": accumulated[1],
-                    "yaw": accumulated[2],
-                    "frame_id": source,
-                    "child_frame_id": frame,
-                }
+                return {"source": source, "target": frame, "transform": accumulated}
             for next_frame, edge in adjacency.get(frame, []):
                 if next_frame in visited:
                     continue
                 visited.add(next_frame)
                 queue.append((next_frame, _compose_2d(accumulated, edge)))
     return None
+
+
+def _transform_scan_points(
+    scan: Dict[str, Any], transform: Tuple[float, float, float]
+) -> None:
+    origin_x, origin_y, yaw = transform
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    source_points = scan.get("points") or []
+    transformed: List[float] = []
+    for index in range(0, len(source_points) - 1, 2):
+        local_x = float(source_points[index])
+        local_y = float(source_points[index + 1])
+        transformed.extend(
+            (
+                round(origin_x + cosine * local_x - sine * local_y, 4),
+                round(origin_y + sine * local_x + cosine * local_y, 4),
+            )
+        )
+    scan["points"] = transformed
+
+
+def _place_scan_in_tf_graph(
+    scan: Dict[str, Any],
+    graph: Dict[Tuple[str, str], Tuple[float, float, float]],
+    robot_name: str,
+) -> None:
+    scan_frame = _clean_frame(scan.get("frame_id", ""))
+    scan["frame_id"] = scan_frame
+    if not scan_frame:
+        return
+
+    frames = _tf_frames(graph)
+    map_frames = _ranked_tf_frames(frames, ("map",), robot_name)
+    located = _lookup_tf_2d(graph, map_frames, (scan_frame,))
+    coordinates = "map"
+    if not located:
+        base_frames = _ranked_tf_frames(
+            frames, ("base_footprint", "base_link"), robot_name
+        )
+        located = _lookup_tf_2d(graph, base_frames, (scan_frame,))
+        coordinates = "robot_base"
+    if not located:
+        return
+
+    _transform_scan_points(scan, located["transform"])
+    scan.update(
+        {
+            "source_frame_id": scan_frame,
+            "frame_id": located["source"],
+            "coordinates": coordinates,
+            "tf_applied": True,
+        }
+    )
+
+
+def _find_tf_pose(
+    graph: Dict[Tuple[str, str], Tuple[float, float, float]], robot_name: str
+) -> Optional[Dict[str, Any]]:
+    frames = _tf_frames(graph)
+    sources = _ranked_tf_frames(frames, ("map",), robot_name) or _ranked_tf_frames(
+        frames, ("odom",), robot_name
+    )
+    targets = _ranked_tf_frames(frames, ("base_footprint", "base_link"), robot_name)
+    located = _lookup_tf_2d(graph, sources, targets)
+    if not located:
+        return None
+    x, y, yaw = located["transform"]
+    return {
+        "x": x,
+        "y": y,
+        "yaw": yaw,
+        "frame_id": located["source"],
+        "child_frame_id": located["target"],
+    }
 
 
 _TYPE_CAPS = {
@@ -583,6 +672,21 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
     warnings: List[str] = []
     tf_graph: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
 
+    # Static transforms are valid for the whole bag. Seed them first so a scan
+    # can be placed correctly even when rosbag reception order puts /tf_static
+    # after the first LaserScan sample.
+    for _, type_name, topic_name, payload in events:
+        if type_name != "tf2_msgs/msg/TFMessage" or not topic_name.rstrip("/").endswith("tf_static"):
+            continue
+        try:
+            for transform in _decode_tf(payload):
+                if transform["parent"] and transform["child"]:
+                    tf_graph[(transform["parent"], transform["child"])] = (
+                        transform["x"], transform["y"], transform["yaw"]
+                    )
+        except (BagReplayError, UnicodeError, ValueError, struct.error):
+            pass
+
     def relative_time(timestamp: int) -> float:
         return round((timestamp - start_ns) / 1_000_000_000.0, 6)
 
@@ -613,6 +717,7 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                 poses_from_messages.append(pose)
             elif type_name == "sensor_msgs/msg/LaserScan":
                 decoded = _decode_laser_scan(payload)
+                _place_scan_in_tf_graph(decoded, tf_graph, robot_name)
                 decoded.update({"t": relative_time(timestamp), "topic": topic_name})
                 scans.append(decoded)
             elif type_name == "nav_msgs/msg/Path":

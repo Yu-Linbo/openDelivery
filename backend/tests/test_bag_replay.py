@@ -124,6 +124,32 @@ def image_payload(encoding, pixels, step, width=2, height=2):
     out.u32(step)
     out.octets(pixels)
     return out.bytes()
+
+
+def tf_payload(transforms):
+    out = CdrWriter()
+    out.u32(len(transforms))
+    for parent, child, x, y, yaw in transforms:
+        out.header(parent)
+        out.string(child)
+        for value in (x, y, 0.0):
+            out.f64(value)
+        for value in (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)):
+            out.f64(value)
+    return out.bytes()
+
+
+def laser_scan_payload(frame_id="robot2/laser_link"):
+    out = CdrWriter()
+    out.header(frame_id)
+    for value in (0.0, 0.0, 1.0, 0.0, 0.1, 0.1, 10.0):
+        out.f32(value)
+    out.u32(1)
+    out.f32(1.0)
+    out.u32(0)
+    return out.bytes()
+
+
 class BagReplayTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -267,6 +293,44 @@ class BagReplayTest(unittest.TestCase):
         self.assertEqual(result["timeline"]["maps"], [{"t": 0.0, "current_map": "test_103"}])
         self.assertEqual(len(result["timeline"]["statuses"]), 1)
         self.assertEqual(result["timeline"]["statuses"][0]["source"], "recorder_sidecar")
+
+    def test_transforms_laser_scan_from_sensor_frame_into_map(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.execute(
+                "INSERT INTO topics VALUES(6, ?, ?, 'cdr')",
+                ("/robot2/tf_static", "tf2_msgs/msg/TFMessage"),
+            )
+            connection.execute(
+                "INSERT INTO topics VALUES(7, ?, ?, 'cdr')",
+                ("/robot2/tf", "tf2_msgs/msg/TFMessage"),
+            )
+            connection.execute(
+                "INSERT INTO topics VALUES(8, ?, ?, 'cdr')",
+                ("/robot2/scan_2d", "sensor_msgs/msg/LaserScan"),
+            )
+            connection.execute(
+                "INSERT INTO messages VALUES(7, 6, 1300000000, ?)",
+                (tf_payload([("robot2/base_footprint", "robot2/laser_link", 0.2, 0.0, 0.0)]),),
+            )
+            connection.execute(
+                "INSERT INTO messages VALUES(8, 7, 1100000000, ?)",
+                (tf_payload([("map", "robot2/base_footprint", 1.0, 2.0, math.pi / 2)]),),
+            )
+            connection.execute(
+                "INSERT INTO messages VALUES(9, 8, 1200000000, ?)",
+                (laser_scan_payload(),),
+            )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        scan = result["timeline"]["scans"][0]
+        self.assertEqual(scan["source_frame_id"], "robot2/laser_link")
+        self.assertEqual(scan["frame_id"], "map")
+        self.assertEqual(scan["coordinates"], "map")
+        self.assertTrue(scan["tf_applied"])
+        self.assertAlmostEqual(scan["points"][0], 1.0, places=4)
+        self.assertAlmostEqual(scan["points"][1], 3.2, places=4)
 
     def test_merges_multiple_bags_in_recording_order(self):
         first = extract_replay(self.bag, robot_name="robot2")

@@ -3926,20 +3926,33 @@ function drawBagReplayTrail(time) {
   if (poses.length < 2) return;
   const lastIndex = poses.findIndex((row) => Number(row.t) > time);
   const end = lastIndex < 0 ? poses.length : lastIndex;
-  const stride = Math.max(1, Math.ceil(end / 1500));
+  const stride = Math.max(1, Math.ceil(poses.length / 1500));
+  const activeMap = String(bagReplayMapAt(time) || "");
+  const activeSegment = bagReplaySegmentAt(time);
   bagReplayCtx.save();
   bagReplayCtx.strokeStyle = "rgba(34, 197, 94, 0.58)";
   bagReplayCtx.lineWidth = 1.6;
   bagReplayCtx.beginPath();
   let started = false;
   let currentSegment = null;
-  for (let index = 0; index < end; index += stride) {
-    const segmentIndex = poses[index].segment_index;
+  const indexes = [];
+  for (let index = 0; index < end; index += stride) indexes.push(index);
+  if (end > 0 && indexes[indexes.length - 1] !== end - 1) indexes.push(end - 1);
+  for (const index of indexes) {
+    const pose = poses[index];
+    const segmentIndex = pose.segment_index;
     if (segmentIndex !== currentSegment) {
       currentSegment = segmentIndex;
       started = false;
     }
-    const pixel = bagReplayWorldToPixel(poses[index]);
+    const sameSegment = !activeSegment || segmentIndex == null ||
+      Number(segmentIndex) === Number(activeSegment.index);
+    const poseMap = String(bagReplayMapAt(Number(pose.t)) || "");
+    if (!sameSegment || (activeMap && poseMap && poseMap !== activeMap)) {
+      started = false;
+      continue;
+    }
+    const pixel = bagReplayWorldToPixel(pose);
     if (!pixel) continue;
     const screen = bagReplayPixelToScreen(pixel);
     if (!started) {
@@ -3955,19 +3968,22 @@ function drawBagReplayTrail(time) {
 
 function drawBagReplayScan(scan) {
   if (!bagReplayCtx || !scan || !Array.isArray(scan.points)) return;
-  const pose = bagReplayPoseAt(Number(scan.t));
-  if (!pose) return;
-  const cosine = Math.cos(Number(pose.yaw) || 0);
-  const sine = Math.sin(Number(pose.yaw) || 0);
+  const coordinates = String(scan.coordinates || "sensor_frame");
+  const pose = coordinates === "map" ? null : bagReplayPoseAt(Number(scan.t));
+  if (coordinates !== "map" && coordinates !== "robot_base") return;
+  if (coordinates === "robot_base" && !pose) return;
+  const cosine = Math.cos(Number(pose && pose.yaw) || 0);
+  const sine = Math.sin(Number(pose && pose.yaw) || 0);
   bagReplayCtx.save();
   bagReplayCtx.fillStyle = "#ef4444";
   for (let index = 0; index + 1 < scan.points.length; index += 2) {
     const localX = Number(scan.points[index]);
     const localY = Number(scan.points[index + 1]);
-    const pixel = bagReplayWorldToPixel({
+    const point = coordinates === "map" ? { x: localX, y: localY } : {
       x: Number(pose.x) + cosine * localX - sine * localY,
       y: Number(pose.y) + sine * localX + cosine * localY,
-    });
+    };
+    const pixel = bagReplayWorldToPixel(point);
     if (!pixel) continue;
     const screen = bagReplayPixelToScreen(pixel);
     bagReplayCtx.fillRect(screen.x - 1.2, screen.y - 1.2, 2.4, 2.4);
