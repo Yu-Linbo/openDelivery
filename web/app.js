@@ -93,6 +93,7 @@ const logBagRobotSelect = document.getElementById("log-bag-robot-select");
 const btnRefreshLogBags = document.getElementById("btn-refresh-log-bags");
 const btnDownloadLogBag = document.getElementById("btn-download-log-bag");
 const btnPlayLogBag = document.getElementById("btn-play-log-bag");
+const btnDeleteLogBag = document.getElementById("btn-delete-log-bag");
 const bagReplayBackdrop = document.getElementById("bag-replay-backdrop");
 const bagReplayDialog = document.getElementById("bag-replay-dialog");
 const bagReplaySubtitle = document.getElementById("bag-replay-subtitle");
@@ -3452,6 +3453,7 @@ function updateLogBagDownloadState() {
   ).map((el) => el.value);
   if (btnDownloadLogBag) btnDownloadLogBag.disabled = checked.length === 0;
   const bagCount = selectedLogBagIndices.size;
+  if (btnDeleteLogBag) btnDeleteLogBag.disabled = bagCount === 0;
   if (btnPlayLogBag) {
     const playable = selectedLogBagsForReplay();
     const allPlayable = bagCount > 0 && playable.length === bagCount;
@@ -3614,6 +3616,37 @@ async function downloadSelectedLogBagFiles() {
   } catch (err) {
     if (logBagStatus) logBagStatus.textContent = `下载失败：${err.message || err}`;
   } finally {
+    updateLogBagDownloadState();
+  }
+}
+
+async function deleteSelectedLogBags() {
+  const entries = Array.from(selectedLogBagIndices)
+    .sort((a, b) => a - b)
+    .map((index) => logBagEntries[index])
+    .filter((entry) => entry && entry.bag);
+  if (entries.length === 0) return;
+  const names = entries.map((entry) => basenameOfLogPath(entry.bag));
+  if (!window.confirm(`确定删除所选 ${entries.length} 个 bag？\n\n${names.join("\n")}\n\n无其他 bag 引用的关联 txt 也会删除。`)) {
+    return;
+  }
+  if (btnDeleteLogBag) btnDeleteLogBag.disabled = true;
+  if (logBagStatus) logBagStatus.textContent = "正在删除所选 bag...";
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/log_bag/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bags: entries.map((entry) => entry.bag) }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || "删除失败");
+    const txtCount = Array.isArray(payload.deleted_txt) ? payload.deleted_txt.length : 0;
+    await refreshLogBags();
+    if (logBagStatus) {
+      logBagStatus.textContent = `已删除 ${entries.length} 个 bag${txtCount ? `，同时删除 ${txtCount} 个孤立 txt` : ""}`;
+    }
+  } catch (err) {
+    if (logBagStatus) logBagStatus.textContent = `删除失败：${err.message || err}`;
     updateLogBagDownloadState();
   }
 }
@@ -4507,6 +4540,9 @@ function initLogs() {
   }
   if (btnDownloadLogBag) {
     btnDownloadLogBag.addEventListener("click", downloadSelectedLogBagFiles);
+  }
+  if (btnDeleteLogBag) {
+    btnDeleteLogBag.addEventListener("click", deleteSelectedLogBags);
   }
   initBagReplayUi();
   refreshLogBags();

@@ -614,6 +614,8 @@ public:
     const std::vector<std::string> & topics,
     const std::vector<std::string> & tags,
     const std::string & reason) {
+    load_previous_bags();
+    new_bags_.clear();
     std::ostringstream os;
     os << "    \"" << json_escape(bag_path) << "\": {\n"
        << "      \"txt\": [\"" << json_escape(text_log_path) << "\"],\n"
@@ -676,6 +678,8 @@ public:
     if (paths.empty()) {
       return;
     }
+    load_previous_bags();
+    new_bags_.clear();
     std::vector<std::string> kept;
     const auto retain_members = [&paths, &kept](const std::string & raw_members) {
         for (const auto & entry : log_bag::parse_match_bag_members(raw_members)) {
@@ -703,6 +707,7 @@ public:
 
 private:
   void load_previous_bags() {
+    previous_bags_raw_.clear();
     std::ifstream in(path_);
     if (!in) {
       return;

@@ -176,6 +176,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
 
         for element_id in (
             "btn-play-log-bag",
+            "btn-delete-log-bag",
             "bag-replay-dialog",
             "bag-replay-canvas",
             "bag-replay-progress",
@@ -191,6 +192,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
         ):
             self.assertIn('id="' + element_id + '"', html)
         self.assertIn('API_BASE_URL + "/api/log_bag/replay"', js)
+        self.assertIn("/api/log_bag/delete", js)
+        self.assertIn('path == "/api/log_bag/delete"', server_py)
         self.assertIn("selectedLogBagsForReplay", js)
         self.assertIn("JSON.stringify({ bags:", js)
         self.assertIn("bagReplaySegmentAt", js)

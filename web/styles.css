@@ -1052,6 +1052,13 @@ button {
   border-color: var(--accent);
 }
 
+.log-bag-download .btn-log-bag-delete {
+  margin-top: 10px;
+  border-color: var(--danger);
+  color: #fee2e2;
+  background: rgba(127, 29, 29, 0.42);
+}
+
 .ros-page-toolbar {
   display: flex;
   align-items: center;

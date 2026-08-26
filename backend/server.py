@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -41,6 +42,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
 LOG_BAG_DIR = ROOT_DIR / "log_bag"
 MAX_LOG_BAG_REPLAY_SELECTION = 24
+_LOG_BAG_DELETE_LOCK = threading.Lock()
 
 
 def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
@@ -1594,6 +1596,215 @@ def _log_bag_display_path(path: Path) -> str:
         return str(path)
 
 
+def _terminal_bag_delete_target(raw_path: str) -> Tuple[Path, str, Path]:
+    bag_path = _safe_log_bag_path(raw_path)
+    relative = bag_path.relative_to(LOG_BAG_DIR.resolve())
+    if (
+        len(relative.parts) != 4
+        or relative.parts[1:3] != ("backup", "bags")
+        or not relative.parts[3].endswith("_terminal_bag")
+        or bag_path.parent != (LOG_BAG_DIR / relative.parts[0] / "backup" / "bags").resolve()
+    ):
+        raise ValueError("only indexed xxx_terminal_bag directories can be deleted")
+    return bag_path, relative.parts[0], LOG_BAG_DIR / relative.parts[0] / "backup" / "match.json"
+
+
+def _entry_txt_values(meta: dict) -> List[str]:
+    raw = meta.get("txt")
+    if raw is None:
+        raw = meta.get("txt_paths")
+    if raw is None:
+        raw = meta.get("text_log")
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    if isinstance(raw, list):
+        return [str(value) for value in raw if str(value or "").strip()]
+    return []
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _indexed_txt_paths() -> set:
+    references = set()
+    for match_path in LOG_BAG_DIR.glob("*/backup/match.json"):
+        try:
+            data = json.loads(match_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        entries = []
+        if isinstance(data.get("bags"), dict):
+            entries.extend(data["bags"].items())
+        if isinstance(data.get("records"), list):
+            entries.extend(
+                (meta.get("bag"), meta)
+                for meta in data["records"]
+                if isinstance(meta, dict)
+            )
+        for raw_bag, meta in entries:
+            if not isinstance(meta, dict):
+                continue
+            try:
+                if not _safe_log_bag_path(raw_bag).is_dir():
+                    continue
+            except ValueError:
+                continue
+            for raw in _entry_txt_values(meta):
+                try:
+                    references.add(_safe_log_bag_path(raw))
+                except ValueError:
+                    continue
+    return references
+
+
+def _txt_is_live_recorder_target(path: Path, robot_name: str) -> bool:
+    robot_dir = LOG_BAG_DIR / robot_name
+    for link in robot_dir.glob("*_terminal_log.txt"):
+        if not link.is_symlink():
+            continue
+        try:
+            if link.resolve() == path:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _delete_log_bags(raw_bags: list) -> dict:
+    if not isinstance(raw_bags, list) or not raw_bags:
+        raise ValueError("bags must be a non-empty array")
+    if len(raw_bags) > 100:
+        raise ValueError("at most 100 bags can be deleted together")
+
+    targets = []
+    seen = set()
+    for raw in raw_bags:
+        bag_path, robot_name, match_path = _terminal_bag_delete_target(str(raw))
+        if bag_path in seen:
+            continue
+        if not bag_path.is_dir():
+            raise FileNotFoundError(f"bag does not exist: {raw}")
+        targets.append((bag_path, robot_name, match_path))
+        seen.add(bag_path)
+    robot_names = {item[1] for item in targets}
+    if len(robot_names) != 1:
+        raise ValueError("all selected bags must belong to the same robot")
+
+    match_path = targets[0][2]
+    try:
+        data = json.loads(match_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("match.json does not exist") from exc
+    if not isinstance(data, dict):
+        raise ValueError("match.json must contain a JSON object")
+
+    target_paths = {item[0] for item in targets}
+    removed_meta = []
+    matched_paths = set()
+    raw_index = data.get("bags")
+    if isinstance(raw_index, dict):
+        kept = {}
+        for raw_path, meta in raw_index.items():
+            try:
+                indexed_path = _safe_log_bag_path(raw_path)
+            except ValueError:
+                indexed_path = None
+            if indexed_path in target_paths:
+                matched_paths.add(indexed_path)
+                if isinstance(meta, dict):
+                    removed_meta.append(meta)
+            else:
+                kept[raw_path] = meta
+        data["bags"] = kept
+    records = data.get("records")
+    if isinstance(records, list):
+        kept_records = []
+        for meta in records:
+            try:
+                indexed_path = _safe_log_bag_path(meta.get("bag")) if isinstance(meta, dict) else None
+            except ValueError:
+                indexed_path = None
+            if indexed_path in target_paths:
+                matched_paths.add(indexed_path)
+                removed_meta.append(meta)
+            else:
+                kept_records.append(meta)
+        data["records"] = kept_records
+    missing_index = target_paths - matched_paths
+    if missing_index:
+        missing = ", ".join(sorted(path.name for path in missing_index))
+        raise ValueError(f"bag is not indexed in match.json: {missing}")
+
+    candidate_txt = set()
+    for meta in removed_meta:
+        for raw in _entry_txt_values(meta):
+            try:
+                candidate_txt.add(_safe_log_bag_path(raw))
+            except ValueError:
+                continue
+
+    staged = []
+    try:
+        for bag_path, _, _ in targets:
+            temporary = bag_path.with_name(f".{bag_path.name}.deleting-{uuid.uuid4().hex}")
+            bag_path.rename(temporary)
+            staged.append((bag_path, temporary))
+    except OSError:
+        for original, temporary in reversed(staged):
+            if temporary.exists() and not original.exists():
+                temporary.rename(original)
+        raise
+    data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    try:
+        _atomic_write_json(match_path, data)
+    except Exception:
+        for original, temporary in reversed(staged):
+            if temporary.exists() and not original.exists():
+                temporary.rename(original)
+        raise
+
+    for _, temporary in staged:
+        shutil.rmtree(temporary)
+
+    references = _indexed_txt_paths()
+    deleted_txt = []
+    kept_txt = []
+    robot_name = targets[0][1]
+    expected_logs_dir = (LOG_BAG_DIR / robot_name / "backup" / "logs").resolve()
+    for txt_path in sorted(candidate_txt):
+        if (
+            txt_path.parent != expected_logs_dir
+            or not txt_path.name.endswith("_terminal_log.txt")
+            or txt_path in references
+            or _txt_is_live_recorder_target(txt_path, robot_name)
+        ):
+            kept_txt.append(_log_bag_display_path(txt_path))
+            continue
+        if txt_path.is_file() or txt_path.is_symlink():
+            txt_path.unlink()
+            deleted_txt.append(_log_bag_display_path(txt_path))
+
+    return {
+        "ok": True,
+        "deleted_bags": [_log_bag_display_path(item[0]) for item in targets],
+        "deleted_txt": deleted_txt,
+        "kept_txt": kept_txt,
+    }
+
+
 def _normalize_log_bag_entry(robot_name: str, bag_path: str, meta: dict) -> dict:
     txt_raw = meta.get("txt")
     if txt_raw is None:
@@ -1687,12 +1898,24 @@ def _list_log_bag_matches(
         raw_bags = data.get("bags")
         if isinstance(raw_bags, dict):
             for bag_path, meta in raw_bags.items():
-                if isinstance(meta, dict):
+                try:
+                    exists = _safe_log_bag_path(bag_path).is_dir()
+                except ValueError:
+                    exists = False
+                if isinstance(meta, dict) and exists:
                     raw_entries.append((str(bag_path), meta))
         raw_records = data.get("records")
         if isinstance(raw_records, list):
             for item in raw_records:
-                if isinstance(item, dict) and item.get("bag"):
+                try:
+                    exists = (
+                        _safe_log_bag_path(item.get("bag")).is_dir()
+                        if isinstance(item, dict) and item.get("bag")
+                        else False
+                    )
+                except ValueError:
+                    exists = False
+                if isinstance(item, dict) and item.get("bag") and exists:
                     raw_entries.append((str(item.get("bag")), item))
         raw_entries.sort(
             key=lambda entry: str(
@@ -1905,6 +2128,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 500)
                 return
             self._send_zip(payload, filename)
+            return
+
+        if path == "/api/log_bag/delete":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                with _LOG_BAG_DELETE_LOCK:
+                    result = _delete_log_bags(data.get("bags"))
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+                return
+            except OSError as err:
+                self._send_json({"error": str(err)}, 500)
+                return
+            self._send_json(result)
             return
 
         if path == "/api/log_bag/replay":
