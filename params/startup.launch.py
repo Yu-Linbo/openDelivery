@@ -23,7 +23,7 @@ def generate_launch_description():
             DeclareLaunchArgument("control_status", default_value="AUTO"),
             DeclareLaunchArgument("localization_method", default_value="slam_toolbox"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
-            DeclareLaunchArgument("max_bag_bytes", default_value="5242880"),
+            DeclareLaunchArgument("max_bag_bytes", default_value="10485760"),
             DeclareLaunchArgument("enable_fake_pub", default_value="true"),
             Node(
                 package="log_bag",

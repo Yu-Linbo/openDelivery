@@ -3291,6 +3291,21 @@ function formatLogBagSize(bytes) {
   return `${n} B`;
 }
 
+function formatLogBagReason(reason) {
+  const labels = {
+    size_limit: "达到分包阈值",
+    shutdown: "录制停止",
+    recorder_exit: "录制器退出",
+    startup_recovery: "启动恢复",
+    startup_recovery_unrepaired: "恢复未完成",
+    task_started: "旧版任务开始切包",
+    task_finished: "旧版任务结束切包",
+    task_transition: "旧版任务切换切包",
+  };
+  const key = String(reason || "");
+  return labels[key] || key;
+}
+
 function formatLogBagTimestamp(value) {
   const raw = String(value || "").trim();
   if (!raw) return "无时间";
@@ -3367,7 +3382,11 @@ function renderLogBagList() {
 
     const meta = document.createElement("div");
     meta.className = "log-bag-item__meta";
-    meta.textContent = `${formatLogBagTimestamp(entry.ended_at || entry.started_at)} · ${formatLogBagSize(entry.bytes)}`;
+    meta.textContent = [
+      formatLogBagTimestamp(entry.ended_at || entry.started_at),
+      formatLogBagSize(entry.bytes),
+      formatLogBagReason(entry.reason),
+    ].filter(Boolean).join(" · ");
     body.appendChild(meta);
 
     const tags = Array.isArray(entry.tags) ? entry.tags : [];
@@ -3682,6 +3701,43 @@ function bagReplayTimeline(name) {
 
 function bagReplayPoseAt(time) {
   return latestBagReplaySample(bagReplayTimeline("poses"), time);
+}
+
+function bagReplayPathAt(time) {
+  const rows = bagReplayTimeline("paths");
+  if (rows.length === 0) return null;
+  let low = 0;
+  let high = rows.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(rows[middle].t) <= time) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const segment = bagReplaySegmentAt(time);
+  const segmentStart = segment ? Number(segment.start) : 0;
+  const matchesSegment = (row) => !segment || row.segment_index == null ||
+    Number(row.segment_index) === Number(segment.index);
+  const isMapFrame = (row) => {
+    const frame = String(row.frame_id || "").replace(/^\/+|\/+$/g, "");
+    return frame === "map" || frame.endsWith("/map");
+  };
+  for (const preferReceivedGlobal of [true, false]) {
+    for (let index = found; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (Number(row.t) < segmentStart) break;
+      if (!matchesSegment(row) || !isMapFrame(row)) continue;
+      if (preferReceivedGlobal && !String(row.topic || "").endsWith("/received_global_plan")) {
+        continue;
+      }
+      return row;
+    }
+  }
+  return null;
 }
 
 function bagReplayMapAt(time) {
@@ -4115,7 +4171,7 @@ function renderBagReplayFrame() {
     drawBagReplayGrid(width, height);
     drawBagReplayPoints();
     if (bagReplayPathToggle && bagReplayPathToggle.checked) {
-      drawBagReplayPath(latestBagReplaySample(bagReplayTimeline("paths"), bagReplayState.currentTime));
+      drawBagReplayPath(bagReplayPathAt(bagReplayState.currentTime));
     }
     drawBagReplayTrail(bagReplayState.currentTime);
     if (bagReplayScanToggle && bagReplayScanToggle.checked) {

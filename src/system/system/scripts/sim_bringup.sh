@@ -23,7 +23,7 @@
 #   SIM_BRINGUP_MANAGER_ONLY=1     仅起 simulate + heartbeat + manager（health_monitor/task_manager），跳过 slam/nav（测 manager 用）
 #   SIM_BRINGUP_MANAGER_WAIT=2   heartbeat 就绪后等待秒数再拉 manager（默认 2）
 #   SIM_BRINGUP_MANAGER_POSE_TOPIC=amcl_pose   传给 health_monitor；置空则关闭位姿判定 ready
-#   SIM_BRINGUP_MAX_BAG_BYTES=5242880          rosbag 单包上限（默认 5MB，测试轮转用）
+#   SIM_BRINGUP_MAX_BAG_BYTES=10485760         rosbag 单包上限（默认 10MiB）
 #
 # 勿用 set -u：/opt/ros/*/setup.bash 与 install/setup.bash 会引用未设置的变量（如 AMENT_TRACE_SETUP_FILES），
 # 与 backend RosNodeManager._bash_prefix 一致，仅用 -e 与 pipefail。
@@ -166,7 +166,7 @@ if [[ "${AUTO_MAPPING}" == "1" ]]; then
 fi
 log "NAV_GRID_MODE=${NAV_GRID_MODE}"
 
-MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-5242880}"
+MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-10485760}"
 log "MAX_BAG_BYTES=${MAX_BAG_BYTES}"
 
 HB_CURRENT_MAP="${RID}_mapping"

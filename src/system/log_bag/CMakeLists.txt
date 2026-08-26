@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(custom_msgs_srvs REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 add_executable(robot_log_recorder
   src/robot_log_recorder.cpp
@@ -21,6 +22,7 @@ ament_target_dependencies(robot_log_recorder
   rcl_interfaces
   custom_msgs_srvs
 )
+target_link_libraries(robot_log_recorder SQLite::SQLite3)
 
 if(BUILD_TESTING)
   enable_testing()

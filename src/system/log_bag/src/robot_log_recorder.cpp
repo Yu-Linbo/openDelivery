@@ -2,6 +2,7 @@
 #include <rcl_interfaces/msg/log.hpp>
 #include <custom_msgs_srvs/msg/task_status.hpp>
 #include <custom_msgs_srvs/msg/robot_status.hpp>
+#include <sqlite3.h>
 
 #include "log_bag/local_time.hpp"
 #include "log_bag/match_index_utils.hpp"
@@ -39,7 +40,7 @@
 
 namespace {
 
-constexpr std::uintmax_t kDefaultMaxBagBytes = 5U * 1024U * 1024U;
+constexpr std::uintmax_t kDefaultMaxBagBytes = 10U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
 
 std::atomic_bool g_stop_requested{false};
@@ -367,6 +368,45 @@ std::vector<std::string> list_dir_basenames(const std::string & path) {
   }
   ::closedir(dir);
   return names;
+}
+
+std::uintmax_t sqlite_pragma_value(sqlite3 * db, const char * statement) {
+  sqlite3_stmt * query = nullptr;
+  if (sqlite3_prepare_v2(db, statement, -1, &query, nullptr) != SQLITE_OK) {
+    return 0;
+  }
+  const auto value = sqlite3_step(query) == SQLITE_ROW
+    ? static_cast<std::uintmax_t>(sqlite3_column_int64(query, 0)) : 0;
+  sqlite3_finalize(query);
+  return value;
+}
+
+std::uintmax_t sqlite_logical_bag_size(const std::string & path) {
+  std::uintmax_t total = 0;
+  for (const auto & name : list_dir_basenames(path)) {
+    if (!has_suffix(name, ".db3")) {
+      continue;
+    }
+    sqlite3 * db = nullptr;
+    const std::string database = join_path(path, name);
+    if (sqlite3_open_v2(
+        database.c_str(), &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK)
+    {
+      if (db) {
+        sqlite3_close(db);
+      }
+      return 0;
+    }
+    sqlite3_busy_timeout(db, 100);
+    const auto page_count = sqlite_pragma_value(db, "PRAGMA page_count");
+    const auto page_size = sqlite_pragma_value(db, "PRAGMA page_size");
+    sqlite3_close(db);
+    if (!page_count || !page_size) {
+      return 0;
+    }
+    total += page_count * page_size;
+  }
+  return total;
 }
 
 std::string file_prefix_before_terminal(const std::string & name) {
@@ -771,11 +811,6 @@ public:
     while (!g_stop_requested.load()) {
       rclcpp::spin_some(node_);
       write_bag_tags_marker(current_bag_path_, current_tags_);
-      if (!task_boundary_reason_.empty()) {
-        const std::string reason = task_boundary_reason_;
-        task_boundary_reason_.clear();
-        stop_current_bag(reason);
-      }
       rotate_bag_if_needed();
       if (bag_pid_ <= 0) {
         start_next_bag_if_needed();
@@ -854,36 +889,19 @@ private:
     }
 
     if (terminal_task_status(msg.task_status)) {
-      if (last_terminal_task_id_ == task_id) {
-        return;
-      }
-      last_terminal_task_id_ = task_id;
-      // A very short task can start and finish in one spin cycle. Tag the
-      // current slice; the previous untagged backup remains its pre-task context.
       append_unique(current_tags_, task_id);
-      active_task_ids_.clear();
-      task_boundary_reason_ = "task_finished";
-      write_line(
-        "task terminal boundary id=" + task_id + " status=" + msg.task_status);
+      active_task_ids_.erase(
+        std::remove(active_task_ids_.begin(), active_task_ids_.end(), task_id),
+        active_task_ids_.end());
+      write_line("task terminal tag id=" + task_id + " status=" + msg.task_status);
       return;
     }
 
-    if (last_terminal_task_id_ == task_id) {
-      last_terminal_task_id_.clear();
-    }
-    const bool first_active_task = active_task_ids_.empty();
     const bool inserted = append_unique(active_task_ids_, task_id);
-    if (!inserted) {
-      return;
+    append_unique(current_tags_, task_id);
+    if (inserted) {
+      write_line("task active tag id=" + task_id + " status=" + msg.task_status);
     }
-    if (first_active_task) {
-      task_boundary_reason_ =
-        task_boundary_reason_ == "task_finished" ? "task_transition" : "task_started";
-    } else if (task_boundary_reason_.empty()) {
-      // Preserve every observed task ID if a replacement overlaps this bag.
-      append_unique(current_tags_, task_id);
-    }
-    write_line("task active id=" + task_id + " status=" + msg.task_status);
   }
 
   void log_recovery(const std::string & line) const {
@@ -1165,9 +1183,10 @@ private:
       archive_current_bag("recorder_exit");
       return;
     }
-    const auto bytes = directory_size(current_bag_path_);
+    const auto logical_bytes = sqlite_logical_bag_size(current_bag_path_);
+    const auto bytes = logical_bytes ? logical_bytes : directory_size(current_bag_path_);
     if (bytes >= cfg_.max_bag_bytes) {
-      write_line("bag reached max size; rotating bytes=" + std::to_string(bytes));
+      write_line("bag reached max size; rotating logical_bytes=" + std::to_string(bytes));
       stop_current_bag("size_limit");
     }
   }
@@ -1236,11 +1255,7 @@ private:
     current_tags_.clear();
 
     current_status_samples_.clear();
-    // The task_started slice is the pre-task context. Defer pruning until the
-    // first tagged slice is indexed, so adjacency can be evaluated correctly.
-    if (reason != "task_started" && reason != "task_transition") {
-      prune_untagged_backups();
-    }
+    prune_untagged_backups();
   }
 
   void archive_text_log() {
@@ -1281,8 +1296,6 @@ private:
   bool has_latest_robot_status_{false};
   std::vector<RecordedRobotStatus> current_status_samples_;
   std::vector<std::string> active_task_ids_;
-  std::string last_terminal_task_id_;
-  std::string task_boundary_reason_;
   std::string text_log_real_path_;
   std::string text_log_link_path_;
   std::string archived_text_log_path_;

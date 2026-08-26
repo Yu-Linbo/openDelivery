@@ -9,7 +9,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("robot_name", default_value="robot2"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
-            DeclareLaunchArgument("max_bag_bytes", default_value="5242880"),
+            DeclareLaunchArgument("max_bag_bytes", default_value="10485760"),
             Node(
                 package="log_bag",
                 executable="robot_log_recorder",
