@@ -93,6 +93,7 @@ class FakeElevator(Node):
         self._generation = 0
         self._timer = None
         self._observed_floor = ""
+        self._pending_target_pose = None
         self._publish()
 
     def _on_robot_status(self, msg):
@@ -307,6 +308,7 @@ class FakeElevator(Node):
         with self._lock:
             self._cancel_timer()
             self._info = msg
+            self._pending_target_pose = None
             self._generation += 1
             generation = self._generation
             self._schedule_operation(generation)
@@ -383,9 +385,6 @@ class FakeElevator(Node):
                     f"map yaml missing: {yaml_path}",
                 )
                 return
-            self._status = ElevatorStatus.STATUS_MOVING_MODEL
-            self._message = f"moving Gazebo model to {self._info.target_floor} elevator interior"
-            self._publish()
             try:
                 target_inside_pose = self._target_inside_pose(target)
             except RuntimeError as exc:
@@ -415,19 +414,10 @@ class FakeElevator(Node):
                 f"{unavailable} service unavailable",
             )
             return
-        try:
-            response = self._move_model_through_web(target_pose)
-        except RuntimeError as exc:
-            self._finish(
-                generation, ElevatorStatus.STATUS_FAILED,
-                f"Web Gazebo move failed: {exc}",
-            )
-            return
-        self.get_logger().info(
-            f"Web Gazebo move succeeded: {self._robot} -> "
-            f"x={float(response.get('x', target_pose.position.x)):.3f} "
-            f"y={float(response.get('y', target_pose.position.y)):.3f}"
-        )
+        with self._lock:
+            if generation != self._generation or not self._info:
+                return
+            self._pending_target_pose = target_pose
         self._switch_map(generation)
 
     def _switch_map(self, generation):
@@ -466,11 +456,42 @@ class FakeElevator(Node):
         except Exception as exc:  # noqa: BLE001
             self._rollback_floor(generation, f"load_map exception: {exc}")
             return
-        # LoadMap response can arrive before RobotStatus/current_map and the new
-        # OccupancyGrid callbacks reach the relocalization node.  Defer the first
-        # request so it cannot accidentally match against the previous floor.
+        self._move_model_after_map_loaded(generation)
+
+    def _move_model_after_map_loaded(self, generation):
+        if not self._active(generation):
+            return
+        with self._lock:
+            target_pose = self._pending_target_pose
+            target_floor = str(self._info.target_floor).strip()
+            self._status = ElevatorStatus.STATUS_MOVING_MODEL
+            self._message = (
+                f"map {target_floor} loaded; moving Gazebo model to elevator interior"
+            )
+            self._publish()
+        if target_pose is None:
+            self._rollback_floor(
+                generation,
+                "target model pose missing after map switch",
+                reload_map=True,
+            )
+            return
+        try:
+            response = self._move_model_through_web(target_pose)
+        except RuntimeError as exc:
+            self._rollback_floor(
+                generation,
+                f"Web Gazebo move failed: {exc}",
+                reload_map=True,
+            )
+            return
+        self.get_logger().info(
+            f"Web Gazebo move succeeded after map switch: {self._robot} -> "
+            f"x={float(response.get('x', target_pose.position.x)):.3f} "
+            f"y={float(response.get('y', target_pose.position.y)):.3f}"
+        )
         self._schedule_relocalize_retry(
-            generation, 1, "waiting for target map propagation"
+            generation, 1, "waiting for moved model scan/TF propagation"
         )
 
     def _map_status_updated(self, future, generation, yaml_path):
@@ -518,8 +539,8 @@ class FakeElevator(Node):
                 )
                 return
             if elapsed >= self._service_wait:
-                self._finish(
-                    generation, ElevatorStatus.STATUS_FAILED,
+                self._rollback_floor(
+                    generation,
                     f"target floor status not observed: expected {target}, "
                     f"got {observed or 'empty'}",
                 )
@@ -636,23 +657,35 @@ class FakeElevator(Node):
             self._cancel_timer()
         self._begin_relocalize(generation, attempt)
 
-    def _rollback_floor(self, generation, reason):
+    def _rollback_floor(self, generation, reason, reload_map=False):
         if not self._active(generation):
             return
         with self._lock:
             from_floor = str(self._info.from_floor).strip()
-        if not from_floor or not self._heartbeat.wait_for_service(timeout_sec=self._service_wait):
+        if not from_floor:
             self._finish(generation, ElevatorStatus.STATUS_FAILED, reason)
+            return
+        if not self._heartbeat.wait_for_service(timeout_sec=self._service_wait):
+            suffix = "; heartbeat floor rollback unavailable"
+            if reload_map:
+                self._reload_original_map(generation, reason + suffix, from_floor)
+            else:
+                self._finish(generation, ElevatorStatus.STATUS_FAILED, reason + suffix)
             return
         request = SetHeartbeatParams.Request()
         request.current_map = from_floor
+        request.robot_status = "localization_lost"
         request.rate_hz = 0.0
         request.task_progress = -1.0
         self._heartbeat.call_async(request).add_done_callback(
-            lambda future: self._rollback_finished(future, generation, reason)
+            lambda future: self._rollback_finished(
+                future, generation, reason, reload_map, from_floor
+            )
         )
 
-    def _rollback_finished(self, future, generation, reason):
+    def _rollback_finished(
+        self, future, generation, reason, reload_map=False, from_floor=""
+    ):
         suffix = ""
         try:
             response = future.result()
@@ -660,7 +693,64 @@ class FakeElevator(Node):
                 suffix = "; heartbeat floor rollback failed"
         except Exception as exc:  # noqa: BLE001
             suffix = f"; heartbeat floor rollback exception: {exc}"
+        if reload_map:
+            self._reload_original_map(generation, reason + suffix, from_floor)
+            return
         self._finish(generation, ElevatorStatus.STATUS_FAILED, reason + suffix)
+
+    def _reload_original_map(self, generation, reason, from_floor):
+        if not self._active(generation):
+            return
+        yaml_path = self._map_root / from_floor / f"{from_floor}.yaml"
+        if not yaml_path.is_file():
+            self._finish(
+                generation,
+                ElevatorStatus.STATUS_FAILED,
+                reason + f"; original map yaml missing: {yaml_path}",
+            )
+            return
+        if not self._load_map.wait_for_service(timeout_sec=self._service_wait):
+            self._finish(
+                generation,
+                ElevatorStatus.STATUS_FAILED,
+                reason + "; original map load service unavailable",
+            )
+            return
+        request = LoadMap.Request()
+        request.map_url = str(yaml_path)
+        self._load_map.call_async(request).add_done_callback(
+            lambda future: self._original_map_reloaded(
+                future, generation, reason, from_floor
+            )
+        )
+
+    def _original_map_reloaded(self, future, generation, reason, from_floor):
+        if not self._active(generation):
+            return
+        try:
+            response = future.result()
+            if response is None or int(response.result) != int(
+                LoadMap.Response.RESULT_SUCCESS
+            ):
+                result = getattr(response, "result", "empty")
+                self._finish(
+                    generation,
+                    ElevatorStatus.STATUS_FAILED,
+                    reason + f"; original map reload failed: {result}",
+                )
+                return
+        except Exception as exc:  # noqa: BLE001
+            self._finish(
+                generation,
+                ElevatorStatus.STATUS_FAILED,
+                reason + f"; original map reload exception: {exc}",
+            )
+            return
+        self._finish(
+            generation,
+            ElevatorStatus.STATUS_FAILED,
+            reason + f"; rolled back to {from_floor}",
+        )
 
     def _active(self, generation):
         with self._lock:
@@ -672,6 +762,7 @@ class FakeElevator(Node):
                 return
             self._status = status
             self._message = message
+            self._pending_target_pose = None
             self._publish()
 
     def _publish(self):

@@ -40,6 +40,7 @@ def bare_elevator():
     node._timer = None
     node._service_wait = 10.0
     node._observed_floor = ""
+    node._pending_target_pose = None
     return node
 
 
@@ -101,7 +102,7 @@ def test_publish_supports_older_elevator_status_schema(monkeypatch):
     assert published[0].elevator_status == "Calling"
 
 
-def test_ride_loads_target_floor_inside_point_and_moves_through_web(tmp_path):
+def test_ride_prepares_target_pose_and_switches_map_before_moving_model(tmp_path):
     node = bare_elevator()
     info = MODULE.ElevatorInfo()
     info.operation = MODULE.ElevatorInfo.OPERATION_RIDE
@@ -137,11 +138,12 @@ def test_ride_loads_target_floor_inside_point_and_moves_through_web(tmp_path):
     )
     node._after_delay(generation=7)
 
-    assert moved[0].position.x == 4.2
-    assert moved[0].position.y == -1.3
-    assert FakeElevator._yaw(moved[0]) == pytest.approx(0.4)
+    assert moved == []
+    assert node._pending_target_pose.position.x == 4.2
+    assert node._pending_target_pose.position.y == -1.3
+    assert FakeElevator._yaw(node._pending_target_pose) == pytest.approx(0.4)
     assert switched == [7]
-    assert info_logs == ["Web Gazebo move succeeded: robot2 -> x=4.200 y=-1.300"]
+    assert info_logs == []
 
 
 def test_map_target_uses_centered_floor_generation_rule(tmp_path):
@@ -299,17 +301,95 @@ def test_load_map_failure_rolls_heartbeat_floor_back():
     assert calls == [(7, "load_map failed: 1")]
 
 
-def test_successful_load_map_defers_relocalization_for_map_propagation():
+def test_successful_load_map_moves_model_next():
     node = bare_elevator()
     calls = []
-    node._schedule_relocalize_retry = lambda generation, attempt, detail: calls.append(
-        (generation, attempt, detail)
-    )
+    node._move_model_after_map_loaded = calls.append
     response = SimpleNamespace(result=MODULE.LoadMap.Response.RESULT_SUCCESS)
 
     node._map_loaded(SimpleNamespace(result=lambda: response), generation=7)
 
-    assert calls == [(7, 1, "waiting for target map propagation")]
+    assert calls == [7]
+
+
+def test_model_moves_after_target_map_loaded_then_relocalizes():
+    node = bare_elevator()
+    node._info.target_floor = "floor2"
+    node._robot = "robot2"
+    node._publish = lambda: None
+    pose = MODULE.Pose()
+    pose.position.x = 4.2
+    pose.position.y = -1.3
+    node._pending_target_pose = pose
+    events = []
+    node._move_model_through_web = lambda target: events.append(("move", target)) or {
+        "ok": True, "x": target.position.x, "y": target.position.y
+    }
+    node._schedule_relocalize_retry = lambda *args: events.append(("relocalize", args))
+    node.get_logger = lambda: SimpleNamespace(info=lambda _message: None)
+
+    node._move_model_after_map_loaded(7)
+
+    assert events == [
+        ("move", pose),
+        ("relocalize", (7, 1, "waiting for moved model scan/TF propagation")),
+    ]
+
+
+def test_model_move_failure_requests_original_map_reload():
+    node = bare_elevator()
+    node._info.target_floor = "floor2"
+    node._publish = lambda: None
+    node._pending_target_pose = MODULE.Pose()
+    node._move_model_through_web = lambda _pose: (_ for _ in ()).throw(
+        RuntimeError("service unavailable")
+    )
+    rollbacks = []
+    node._rollback_floor = lambda *args, **kwargs: rollbacks.append((args, kwargs))
+
+    node._move_model_after_map_loaded(7)
+
+    assert rollbacks == [
+        ((7, "Web Gazebo move failed: service unavailable"), {"reload_map": True})
+    ]
+
+
+def test_full_rollback_restores_heartbeat_and_original_map(tmp_path):
+    original_yaml = tmp_path / "floor1" / "floor1.yaml"
+    original_yaml.parent.mkdir()
+    original_yaml.write_text("image: floor1.pgm\n", encoding="utf-8")
+    node = bare_elevator()
+    node._map_root = tmp_path
+    node._heartbeat = RecordingClient()
+    node._load_map = RecordingClient()
+    finished = []
+    node._finish = lambda *args: finished.append(args)
+
+    node._rollback_floor(7, "move failed", reload_map=True)
+
+    assert node._heartbeat.request.current_map == "floor1"
+    assert node._heartbeat.request.robot_status == "localization_lost"
+    node._rollback_finished(
+        SimpleNamespace(result=lambda: SimpleNamespace(success=True)),
+        7,
+        "move failed",
+        True,
+        "floor1",
+    )
+    assert node._load_map.request.map_url == str(original_yaml)
+    node._original_map_reloaded(
+        SimpleNamespace(
+            result=lambda: SimpleNamespace(
+                result=MODULE.LoadMap.Response.RESULT_SUCCESS
+            )
+        ),
+        7,
+        "move failed",
+        "floor1",
+    )
+    assert finished == [
+        (7, MODULE.ElevatorStatus.STATUS_FAILED, "move failed; rolled back to floor1")
+    ]
 
 
 def test_floor_status_must_be_observed_before_load_map_request(monkeypatch):
@@ -347,12 +427,12 @@ def test_floor_status_wait_times_out_without_loading_map(monkeypatch):
     node._cancel_timer = lambda: None
     node._service_wait = 1.0
     monkeypatch.setattr(MODULE.time, "monotonic", lambda: 2.0)
-    failures = []
-    node._finish = lambda *args: failures.append(args)
+    rollbacks = []
+    node._rollback_floor = lambda *args: rollbacks.append(args)
 
     node._wait_for_target_floor(7, "/maps/floor2.yaml", 0.0)
 
     assert node._load_map.request is None
-    assert failures[0][2] == (
-        "target floor status not observed: expected floor2, got floor1"
-    )
+    assert rollbacks == [(
+        7, "target floor status not observed: expected floor2, got floor1"
+    )]
