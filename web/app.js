@@ -3718,6 +3718,42 @@ function bagReplaySegmentAt(time) {
   return segments[found] || null;
 }
 
+function bagReplayRecordedMapAt(time) {
+  const timeline = bagReplayState.data && bagReplayState.data.timeline;
+  const rows = timeline && Array.isArray(timeline.maps) ? timeline.maps : [];
+  let low = 0;
+  let high = rows.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Number(rows[middle].t) <= time) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found >= 0 ? String(rows[found].current_map || "") : "";
+}
+
+function bagReplaySegmentsCompatible(sample, activeSegment, time) {
+  if (!activeSegment || !sample || sample.segment_index == null) return true;
+  const sampleIndex = Number(sample.segment_index);
+  const segments = bagReplayState.data && bagReplayState.data.segments;
+  const sampleSegment = Array.isArray(segments)
+    ? segments.find((segment) => Number(segment.index) === sampleIndex)
+    : null;
+  if (!sampleSegment) return false;
+  const sampleRobot = String(sampleSegment.robot_name || "");
+  const activeRobot = String(activeSegment.robot_name || "");
+  if (sampleRobot && activeRobot && sampleRobot !== activeRobot) return false;
+  const sampleMap = bagReplayRecordedMapAt(Number(sample.t)) ||
+    String(sampleSegment.map_name || sampleSegment.initial_map_name || "");
+  const activeMap = bagReplayRecordedMapAt(Number(time)) ||
+    String(activeSegment.initial_map_name || activeSegment.map_name || "");
+  return !sampleMap || !activeMap || sampleMap === activeMap;
+}
+
 function latestBagReplaySample(rows, time) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   let low = 0;
@@ -3735,11 +3771,7 @@ function latestBagReplaySample(rows, time) {
   if (found < 0) return null;
   const sample = rows[found];
   const segment = bagReplaySegmentAt(time);
-  if (
-    segment &&
-    sample.segment_index != null &&
-    Number(sample.segment_index) !== Number(segment.index)
-  ) return null;
+  if (!bagReplaySegmentsCompatible(sample, segment, time)) return null;
   return sample;
 }
 
@@ -3768,9 +3800,6 @@ function bagReplayPathAt(time) {
     }
   }
   const segment = bagReplaySegmentAt(time);
-  const segmentStart = segment ? Number(segment.start) : 0;
-  const matchesSegment = (row) => !segment || row.segment_index == null ||
-    Number(row.segment_index) === Number(segment.index);
   const isMapFrame = (row) => {
     const frame = String(row.frame_id || "").replace(/^\/+|\/+$/g, "");
     return frame === "map" || frame.endsWith("/map");
@@ -3778,8 +3807,7 @@ function bagReplayPathAt(time) {
   for (const preferReceivedGlobal of [true, false]) {
     for (let index = found; index >= 0; index -= 1) {
       const row = rows[index];
-      if (Number(row.t) < segmentStart) break;
-      if (!matchesSegment(row) || !isMapFrame(row)) continue;
+      if (!bagReplaySegmentsCompatible(row, segment, time) || !isMapFrame(row)) continue;
       if (preferReceivedGlobal && !String(row.topic || "").endsWith("/received_global_plan")) {
         continue;
       }
@@ -3790,9 +3818,8 @@ function bagReplayPathAt(time) {
 }
 
 function bagReplayMapAt(time) {
-  const change = latestBagReplaySample(bagReplayTimeline("maps"), time);
   const segment = bagReplaySegmentAt(time);
-  return (change && change.current_map) ||
+  return bagReplayRecordedMapAt(time) ||
     (segment && (segment.initial_map_name || segment.map_name)) || "";
 }
 
@@ -3808,7 +3835,6 @@ function syncBagReplayMapToCurrentTime() {
 function bagReplayCameraAt(camera, time) {
   const rows = bagReplayTimeline("images");
   const segment = bagReplaySegmentAt(time);
-  const segmentStart = segment ? Number(segment.start) : 0;
   let low = 0;
   let high = rows.length - 1;
   let found = -1;
@@ -3823,13 +3849,8 @@ function bagReplayCameraAt(camera, time) {
   }
   for (let index = found; index >= 0; index -= 1) {
     const row = rows[index];
-    if (Number(row.t) < segmentStart) break;
     if (row.camera !== camera) continue;
-    if (
-      segment &&
-      row.segment_index != null &&
-      Number(row.segment_index) !== Number(segment.index)
-    ) continue;
+    if (!bagReplaySegmentsCompatible(row, segment, time)) continue;
     return row;
   }
   return null;
@@ -4039,21 +4060,14 @@ function drawBagReplayTrail(time) {
   bagReplayCtx.lineWidth = 1.6;
   bagReplayCtx.beginPath();
   let started = false;
-  let currentSegment = null;
   const indexes = [];
   for (let index = 0; index < end; index += stride) indexes.push(index);
   if (end > 0 && indexes[indexes.length - 1] !== end - 1) indexes.push(end - 1);
   for (const index of indexes) {
     const pose = poses[index];
-    const segmentIndex = pose.segment_index;
-    if (segmentIndex !== currentSegment) {
-      currentSegment = segmentIndex;
-      started = false;
-    }
-    const sameSegment = !activeSegment || segmentIndex == null ||
-      Number(segmentIndex) === Number(activeSegment.index);
+    const compatibleSegment = bagReplaySegmentsCompatible(pose, activeSegment, time);
     const poseMap = String(bagReplayMapAt(Number(pose.t)) || "");
-    if (!sameSegment || (activeMap && poseMap && poseMap !== activeMap)) {
+    if (!compatibleSegment || (activeMap && poseMap && poseMap !== activeMap)) {
       started = false;
       continue;
     }
