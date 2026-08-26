@@ -3297,6 +3297,7 @@ function formatLogBagReason(reason) {
     size_limit: "达到分包阈值",
     shutdown: "录制停止",
     recorder_exit: "录制器退出",
+    missing_robot_status: "录制异常：缺少 robot_status",
     startup_recovery: "启动恢复",
     startup_recovery_unrepaired: "恢复未完成",
     task_started: "旧版任务开始切包",

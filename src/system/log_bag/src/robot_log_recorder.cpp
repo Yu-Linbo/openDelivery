@@ -42,6 +42,7 @@ namespace {
 
 constexpr std::uintmax_t kDefaultMaxBagBytes = 10U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
+constexpr auto kCriticalTopicGrace = std::chrono::seconds(10);
 
 std::atomic_bool g_stop_requested{false};
 
@@ -407,6 +408,73 @@ std::uintmax_t sqlite_logical_bag_size(const std::string & path) {
     total += page_count * page_size;
   }
   return total;
+}
+
+bool sqlite_topic_message_count(
+  const std::string & path, const std::string & topic, std::uintmax_t * total)
+{
+  if (!total) {
+    return false;
+  }
+  *total = 0;
+  bool found_database = false;
+  for (const auto & name : list_dir_basenames(path)) {
+    if (!has_suffix(name, ".db3")) {
+      continue;
+    }
+    found_database = true;
+    sqlite3 * db = nullptr;
+    const std::string database = join_path(path, name);
+    if (sqlite3_open_v2(
+        database.c_str(), &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK)
+    {
+      if (db) {
+        sqlite3_close(db);
+      }
+      return false;
+    }
+    sqlite3_busy_timeout(db, 100);
+    sqlite3_stmt * query = nullptr;
+    constexpr const char * statement =
+      "SELECT COUNT(m.id) FROM topics t LEFT JOIN messages m ON m.topic_id=t.id "
+      "WHERE t.name=?";
+    if (sqlite3_prepare_v2(db, statement, -1, &query, nullptr) != SQLITE_OK) {
+      sqlite3_close(db);
+      return false;
+    }
+    sqlite3_bind_text(query, 1, topic.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(query) != SQLITE_ROW) {
+      sqlite3_finalize(query);
+      sqlite3_close(db);
+      return false;
+    }
+    *total += static_cast<std::uintmax_t>(sqlite3_column_int64(query, 0));
+    sqlite3_finalize(query);
+    sqlite3_close(db);
+  }
+  return found_database;
+}
+
+std::string find_custom_msgs_prefix(const std::string & workspace_root) {
+  const std::string resource =
+    "share/ament_index/resource_index/packages/custom_msgs_srvs";
+  const char * raw_prefixes = std::getenv("AMENT_PREFIX_PATH");
+  std::stringstream prefixes(raw_prefixes ? raw_prefixes : "");
+  std::string prefix;
+  while (std::getline(prefixes, prefix, ':')) {
+    if (!prefix.empty() && path_exists(join_path(prefix, resource))) {
+      return prefix;
+    }
+  }
+  for (const auto & candidate : {
+      join_path(join_path(workspace_root, "install"), "custom_msgs_srvs"),
+      join_path(workspace_root, "install")})
+  {
+    if (path_exists(join_path(candidate, resource))) {
+      return candidate;
+    }
+  }
+  return {};
 }
 
 std::string file_prefix_before_terminal(const std::string & name) {
@@ -1159,6 +1227,16 @@ private:
         critical_status_topic);
       return;
     }
+    const char * configured_root = std::getenv("OPEN_DELIVERY_ROOT");
+    const std::string workspace_root = configured_root && *configured_root
+      ? configured_root : dirname_of(cfg_.root);
+    const std::string custom_msgs_prefix = find_custom_msgs_prefix(workspace_root);
+    if (custom_msgs_prefix.empty()) {
+      write_line(
+        "custom_msgs_srvs ament prefix unavailable; bag recorder waits instead of "
+        "creating a rosout-only bag");
+      return;
+    }
     current_bag_topics_ = topics;
     current_tags_ = active_task_ids_;
     current_bag_started_at_ = now_iso8601();
@@ -1168,8 +1246,14 @@ private:
       latest_robot_status_.timestamp_ns = system_now_ns();
       current_status_samples_.push_back(latest_robot_status_);
     }
+    current_bag_started_steady_ = std::chrono::steady_clock::now();
+    current_bag_health_verified_ = false;
     std::ostringstream cmd;
-    cmd << "ros2 bag record -o " << shell_quote(current_bag_path_);
+    cmd << "export AMENT_PREFIX_PATH=" << shell_quote(custom_msgs_prefix)
+        << "${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}; "
+        << "export LD_LIBRARY_PATH=" << shell_quote(join_path(custom_msgs_prefix, "lib"))
+        << "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; "
+        << "exec ros2 bag record -o " << shell_quote(current_bag_path_);
     for (const auto & topic : topics) {
       cmd << " " << shell_quote(topic);
     }
@@ -1187,6 +1271,32 @@ private:
       bag_pid_ = -1;
       archive_current_bag("recorder_exit");
       return;
+    }
+    const auto recording_age =
+      std::chrono::steady_clock::now() - current_bag_started_steady_;
+    if (!current_bag_health_verified_ && has_latest_robot_status_ &&
+      recording_age >= kCriticalTopicGrace)
+    {
+      const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
+      std::uintmax_t status_messages = 0;
+      const bool count_ready = sqlite_topic_message_count(
+        current_bag_path_, critical_status_topic, &status_messages);
+      if (count_ready && status_messages > 0) {
+        current_bag_health_verified_ = true;
+      } else if (count_ready) {
+        write_line(
+          "bag unhealthy: recorder receives robot_status but bag has zero messages; restarting");
+        stop_process_group(bag_pid_, SIGINT);
+        wait_process(bag_pid_);
+        bag_pid_ = -1;
+        const auto failed_bytes = directory_size(current_bag_path_);
+        if (current_tags_.empty()) {
+          discard_current_bag("missing_robot_status", failed_bytes);
+        } else {
+          archive_current_bag("missing_robot_status");
+        }
+        return;
+      }
     }
     const auto logical_bytes = sqlite_logical_bag_size(current_bag_path_);
     const auto bytes = logical_bytes ? logical_bytes : directory_size(current_bag_path_);
@@ -1309,6 +1419,8 @@ private:
   std::string current_bag_started_at_;
   std::vector<std::string> current_bag_topics_;
   std::vector<std::string> current_tags_;
+  std::chrono::steady_clock::time_point current_bag_started_steady_{};
+  bool current_bag_health_verified_{false};
 };
 
 }  // namespace
