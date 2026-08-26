@@ -46,6 +46,7 @@ constexpr std::uintmax_t kDefaultMaxRobotBytes = 1024U * 1024U * 1024U;
 constexpr std::uintmax_t kDefaultPruneTargetBytes = 500U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
 constexpr auto kCriticalTopicGrace = std::chrono::seconds(10);
+constexpr auto kStorageCheckInterval = std::chrono::seconds(5);
 
 std::atomic_bool g_stop_requested{false};
 
@@ -885,6 +886,7 @@ public:
     ensure_dir(backup_bags_dir_);
     recover_leftover_artifacts();
     prune_untagged_backups();
+    prune_storage_limit();
     open_text_log();
     ensure_ros();
   }
@@ -907,6 +909,18 @@ public:
       rotate_bag_if_needed();
       if (bag_pid_ <= 0) {
         start_next_bag_if_needed();
+      }
+      // Start the next recorder before any potentially slow deletion. The
+      // rosbag child keeps writing while old backups and index rows are pruned.
+      if (bag_pid_ > 0 && current_bag_health_verified_ && prune_pending_) {
+        prune_untagged_backups();
+        prune_storage_limit();
+        prune_pending_ = false;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (bag_pid_ > 0 && current_bag_health_verified_ && now >= next_storage_check_) {
+        prune_storage_limit();
+        next_storage_check_ = now + kStorageCheckInterval;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(
         static_cast<int>(cfg_.poll_seconds * 1000.0)));
@@ -1160,7 +1174,6 @@ private:
       }
     }
     match_.remove_bags(remove_from_index);
-    prune_storage_limit();
   }
 
   void prune_storage_limit() {
@@ -1181,15 +1194,18 @@ private:
       sizes.push_back(bytes);
       archived_bytes += bytes;
     }
-    const auto reserved_active_bytes = std::min(cfg_.max_bag_bytes, cfg_.max_robot_bytes);
-    if (archived_bytes <= cfg_.max_robot_bytes - reserved_active_bytes) {
+    const auto active_bytes = current_bag_path_.empty()
+      ? 0U : directory_size(current_bag_path_);
+    if (archived_bytes <= cfg_.max_robot_bytes &&
+      active_bytes <= cfg_.max_robot_bytes - archived_bytes)
+    {
       return;
     }
 
     if (log_fd_ >= 0) {
       write_line(
         "storage cap triggered archived_bytes=" + std::to_string(archived_bytes) +
-        " reserved_active_bytes=" + std::to_string(reserved_active_bytes) +
+        " active_bytes=" + std::to_string(active_bytes) +
         " max_robot_bytes=" + std::to_string(cfg_.max_robot_bytes) +
         " prune_target_bytes=" + std::to_string(cfg_.prune_target_bytes));
     } else {
@@ -1204,7 +1220,9 @@ private:
         index_paths_by_name[basename_of(entry.path)].insert(entry.path);
       }
     }
-    const auto keep = log_bag::storage_keep_mask(sizes, cfg_.prune_target_bytes);
+    const auto archived_target = active_bytes < cfg_.prune_target_bytes
+      ? cfg_.prune_target_bytes - active_bytes : 0U;
+    const auto keep = log_bag::storage_keep_mask(sizes, archived_target);
     std::set<std::string> remove_from_index;
     for (std::size_t i = 0; i < names.size(); ++i) {
       if (keep[i]) {
@@ -1441,7 +1459,7 @@ private:
     current_tags_.clear();
 
     current_status_samples_.clear();
-    prune_untagged_backups();
+    prune_pending_ = true;
   }
 
   void archive_text_log() {
@@ -1491,7 +1509,9 @@ private:
   std::vector<std::string> current_bag_topics_;
   std::vector<std::string> current_tags_;
   std::chrono::steady_clock::time_point current_bag_started_steady_{};
+  std::chrono::steady_clock::time_point next_storage_check_{};
   bool current_bag_health_verified_{false};
+  bool prune_pending_{false};
 };
 
 }  // namespace

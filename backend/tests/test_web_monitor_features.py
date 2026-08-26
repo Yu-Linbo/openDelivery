@@ -262,6 +262,9 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("1024U * 1024U * 1024U", recorder_cpp)
         self.assertIn("500U * 1024U * 1024U", recorder_cpp)
         self.assertIn("storage cap removed oldest bag", recorder_cpp)
+        self.assertIn("bag_pid_ > 0 && current_bag_health_verified_ && prune_pending_", recorder_cpp)
+        self.assertIn("kStorageCheckInterval", recorder_cpp)
+        self.assertIn("active_bytes", recorder_cpp)
         for launcher in (log_bag_launch, startup_launch):
             self.assertIn('default_value="52428800"', launcher)
             self.assertIn('default_value="1073741824"', launcher)
