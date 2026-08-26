@@ -6,6 +6,7 @@
 
 #include "log_bag/local_time.hpp"
 #include "log_bag/match_index_utils.hpp"
+#include "log_bag/recording_topics.hpp"
 #include "log_bag/retention_policy.hpp"
 
 #include <sys/stat.h>
@@ -40,7 +41,9 @@
 
 namespace {
 
-constexpr std::uintmax_t kDefaultMaxBagBytes = 10U * 1024U * 1024U;
+constexpr std::uintmax_t kDefaultMaxBagBytes = 50U * 1024U * 1024U;
+constexpr std::uintmax_t kDefaultMaxRobotBytes = 1024U * 1024U * 1024U;
+constexpr std::uintmax_t kDefaultPruneTargetBytes = 500U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
 constexpr auto kCriticalTopicGrace = std::chrono::seconds(10);
 
@@ -628,13 +631,16 @@ struct Config {
   std::string robot_name;
   std::string root = default_root();
   std::uintmax_t max_bag_bytes = kDefaultMaxBagBytes;
+  std::uintmax_t max_robot_bytes = kDefaultMaxRobotBytes;
+  std::uintmax_t prune_target_bytes = kDefaultPruneTargetBytes;
   double poll_seconds = 0.5;
 };
 
 void print_usage() {
   std::cerr
     << "Usage: robot_log_recorder --robot-name <name> [--root <log_bag>] "
-       "[--max-bag-bytes <bytes>] [--poll-sec <seconds>]\n";
+       "[--max-bag-bytes <bytes>] [--max-robot-bytes <bytes>] "
+       "[--prune-target-bytes <bytes>] [--poll-sec <seconds>]\n";
 }
 
 Config parse_args(int argc, char ** argv) {
@@ -647,6 +653,10 @@ Config parse_args(int argc, char ** argv) {
       cfg.root = argv[++i];
     } else if (arg == "--max-bag-bytes" && i + 1 < argc) {
       cfg.max_bag_bytes = static_cast<std::uintmax_t>(std::stoull(argv[++i]));
+    } else if (arg == "--max-robot-bytes" && i + 1 < argc) {
+      cfg.max_robot_bytes = static_cast<std::uintmax_t>(std::stoull(argv[++i]));
+    } else if (arg == "--prune-target-bytes" && i + 1 < argc) {
+      cfg.prune_target_bytes = static_cast<std::uintmax_t>(std::stoull(argv[++i]));
     } else if (arg == "--poll-sec" && i + 1 < argc) {
       cfg.poll_seconds = std::max(0.5, std::stod(argv[++i]));
     } else if (arg == "--help" || arg == "-h") {
@@ -661,6 +671,12 @@ Config parse_args(int argc, char ** argv) {
   cfg.robot_name = trim(cfg.robot_name);
   if (cfg.robot_name.empty()) {
     throw std::runtime_error("--robot-name is required");
+  }
+  if (cfg.max_bag_bytes == 0 || cfg.max_robot_bytes == 0 ||
+    cfg.prune_target_bytes >= cfg.max_robot_bytes)
+  {
+    throw std::runtime_error(
+      "bag sizes must be positive and prune target must be below robot limit");
   }
   return cfg;
 }
@@ -880,7 +896,11 @@ public:
   }
 
   int run() {
-    write_line("robot_log_recorder starting for robot=" + cfg_.robot_name);
+    write_line(
+      "robot_log_recorder starting for robot=" + cfg_.robot_name +
+      " max_bag_bytes=" + std::to_string(cfg_.max_bag_bytes) +
+      " max_robot_bytes=" + std::to_string(cfg_.max_robot_bytes) +
+      " prune_target_bytes=" + std::to_string(cfg_.prune_target_bytes));
     while (!g_stop_requested.load()) {
       rclcpp::spin_some(node_);
       write_bag_tags_marker(current_bag_path_, current_tags_);
@@ -1140,6 +1160,78 @@ private:
       }
     }
     match_.remove_bags(remove_from_index);
+    prune_storage_limit();
+  }
+
+  void prune_storage_limit() {
+    std::vector<std::string> names;
+    std::vector<std::uintmax_t> sizes;
+    for (const auto & name : list_dir_basenames(backup_bags_dir_)) {
+      const std::string target = join_path(backup_bags_dir_, name);
+      if (name.find('/') == std::string::npos && has_suffix(name, "_terminal_bag") &&
+        is_directory(target))
+      {
+        names.push_back(name);
+      }
+    }
+    std::sort(names.begin(), names.end());
+    std::uintmax_t archived_bytes = 0;
+    for (const auto & name : names) {
+      const auto bytes = directory_size(join_path(backup_bags_dir_, name));
+      sizes.push_back(bytes);
+      archived_bytes += bytes;
+    }
+    const auto reserved_active_bytes = std::min(cfg_.max_bag_bytes, cfg_.max_robot_bytes);
+    if (archived_bytes <= cfg_.max_robot_bytes - reserved_active_bytes) {
+      return;
+    }
+
+    if (log_fd_ >= 0) {
+      write_line(
+        "storage cap triggered archived_bytes=" + std::to_string(archived_bytes) +
+        " reserved_active_bytes=" + std::to_string(reserved_active_bytes) +
+        " max_robot_bytes=" + std::to_string(cfg_.max_robot_bytes) +
+        " prune_target_bytes=" + std::to_string(cfg_.prune_target_bytes));
+    } else {
+      log_recovery(
+        "storage cap triggered archived_bytes=" + std::to_string(archived_bytes));
+    }
+
+    const auto indexed = match_.bag_entries();
+    std::map<std::string, std::set<std::string>> index_paths_by_name;
+    for (const auto & entry : indexed) {
+      if (entry.path.find("/backup/bags/") != std::string::npos) {
+        index_paths_by_name[basename_of(entry.path)].insert(entry.path);
+      }
+    }
+    const auto keep = log_bag::storage_keep_mask(sizes, cfg_.prune_target_bytes);
+    std::set<std::string> remove_from_index;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (keep[i]) {
+        continue;
+      }
+      const std::string & name = names[i];
+      const std::string target = join_path(backup_bags_dir_, name);
+      if (basename_of(target) != name || !has_suffix(name, "_terminal_bag") ||
+        !same_existing_path(dirname_of(target), backup_bags_dir_) || !is_directory(target))
+      {
+        continue;
+      }
+      if (remove_path_recursive(target)) {
+        const auto found = index_paths_by_name.find(name);
+        if (found != index_paths_by_name.end()) {
+          remove_from_index.insert(found->second.begin(), found->second.end());
+        }
+        if (log_fd_ >= 0) {
+          write_line(
+            "storage cap removed oldest bag path=" + target +
+            " bytes=" + std::to_string(sizes[i]));
+        } else {
+          log_recovery("storage cap removed oldest bag: " + target);
+        }
+      }
+    }
+    match_.remove_bags(remove_from_index);
   }
 
   void open_text_log() {
@@ -1177,28 +1269,7 @@ private:
   }
 
   std::vector<std::string> robot_topics() {
-    std::vector<std::string> topics;
-    // Keep camera subscriptions even when the publishers appear after recording starts.
-    topics.push_back("/" + cfg_.robot_name + "/front_camera/image_raw");
-    topics.push_back("/" + cfg_.robot_name + "/front_down_camera/image_raw");
-    try {
-      const auto graph = node_->get_topic_names_and_types();
-      const std::string ns_prefix = "/" + cfg_.robot_name + "/";
-      for (const auto & item : graph) {
-        const std::string & topic = item.first;
-        if (topic == "/rosout" || topic == "/tf" || topic == "/tf_static" ||
-          topic == "/clock" || topic == "/gazebo/model_states" ||
-          topic.find(ns_prefix) == 0 || topic.find(ns_prefix) != std::string::npos)
-        {
-          topics.push_back(topic);
-        }
-      }
-    } catch (const std::exception & e) {
-      write_line(std::string("topic discovery failed: ") + e.what());
-    }
-    std::sort(topics.begin(), topics.end());
-    topics.erase(std::unique(topics.begin(), topics.end()), topics.end());
-    return topics;
+    return log_bag::recording_topics(cfg_.robot_name);
   }
 
   std::string next_bag_path() const {
@@ -1222,8 +1293,8 @@ private:
   void start_next_bag_if_needed() {
     const auto topics = robot_topics();
     const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
-    if (std::find(topics.begin(), topics.end(), critical_status_topic) == topics.end()) {
-      write_line("critical topic not discovered yet; bag recorder waits topic=" +
+    if (!has_latest_robot_status_) {
+      write_line("critical topic has no heartbeat yet; bag recorder waits topic=" +
         critical_status_topic);
       return;
     }

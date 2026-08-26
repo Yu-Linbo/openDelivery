@@ -1,8 +1,10 @@
 #include "log_bag/local_time.hpp"
 #include "log_bag/match_index_utils.hpp"
+#include "log_bag/recording_topics.hpp"
 #include "log_bag/retention_policy.hpp"
 
 #include <cassert>
+#include <algorithm>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -10,6 +12,7 @@
 
 int main() {
   using log_bag::retention_keep_mask;
+  using log_bag::storage_keep_mask;
 
   assert((retention_keep_mask({}) == std::vector<bool>{}));
   assert((retention_keep_mask({false, false, false}) ==
@@ -20,6 +23,31 @@ int main() {
     std::vector<bool>{true, true, true, true}));
   assert((retention_keep_mask({false, true, false, false, false}) ==
     std::vector<bool>{true, true, true, false, false}));
+  assert((storage_keep_mask({200, 200, 200}, 500) ==
+    std::vector<bool>{false, true, true}));
+  assert((storage_keep_mask({600, 100, 100}, 500) ==
+    std::vector<bool>{false, true, true}));
+  assert((storage_keep_mask({100, 200}, 500) ==
+    std::vector<bool>{true, true}));
+
+  const auto topics = log_bag::recording_topics("robot1");
+  const auto has_topic = [&topics](const std::string & topic) {
+      return std::find(topics.begin(), topics.end(), topic) != topics.end();
+    };
+  assert(has_topic("/tf"));
+  assert(has_topic("/tf_static"));
+  assert(has_topic("/robot1/scan_2d"));
+  assert(has_topic("/robot1/front_camera/image_raw"));
+  assert(has_topic("/robot1/robot_status"));
+  assert(has_topic("/robot1/task_status"));
+  assert(has_topic("/robot1/navigation/received_global_plan"));
+  assert(!has_topic("/rosout"));
+  assert(!has_topic("/gazebo/model_states"));
+  assert(!has_topic("/robot1/navigation/local_costmap/costmap"));
+  for (const auto & topic : topics) {
+    assert(topic == "/clock" || topic == "/tf" || topic == "/tf_static" ||
+      topic.find("/robot1/") == 0);
+  }
 
   const std::string members =
     "\"/bags/001_terminal_bag\": {\"tags\": [], \"topics\": [\"/a\", \"/b\"]},"

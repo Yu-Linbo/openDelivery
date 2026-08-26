@@ -23,7 +23,9 @@ def generate_launch_description():
             DeclareLaunchArgument("control_status", default_value="AUTO"),
             DeclareLaunchArgument("localization_method", default_value="slam_toolbox"),
             DeclareLaunchArgument("log_root", default_value="log_bag"),
-            DeclareLaunchArgument("max_bag_bytes", default_value="10485760"),
+            DeclareLaunchArgument("max_bag_bytes", default_value="52428800"),
+            DeclareLaunchArgument("max_robot_bytes", default_value="1073741824"),
+            DeclareLaunchArgument("prune_target_bytes", default_value="524288000"),
             DeclareLaunchArgument("enable_fake_pub", default_value="true"),
             Node(
                 package="log_bag",
@@ -38,6 +40,10 @@ def generate_launch_description():
                     LaunchConfiguration("log_root"),
                     "--max-bag-bytes",
                     LaunchConfiguration("max_bag_bytes"),
+                    "--max-robot-bytes",
+                    LaunchConfiguration("max_robot_bytes"),
+                    "--prune-target-bytes",
+                    LaunchConfiguration("prune_target_bytes"),
                 ],
             ),
             IncludeLaunchDescription(

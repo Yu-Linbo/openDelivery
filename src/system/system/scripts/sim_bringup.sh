@@ -23,7 +23,9 @@
 #   SIM_BRINGUP_MANAGER_ONLY=1     仅起 simulate + heartbeat + manager（health_monitor/task_manager），跳过 slam/nav（测 manager 用）
 #   SIM_BRINGUP_MANAGER_WAIT=2   heartbeat 就绪后等待秒数再拉 manager（默认 2）
 #   SIM_BRINGUP_MANAGER_POSE_TOPIC=amcl_pose   传给 health_monitor；置空则关闭位姿判定 ready
-#   SIM_BRINGUP_MAX_BAG_BYTES=10485760         rosbag 单包上限（默认 10MiB）
+#   SIM_BRINGUP_MAX_BAG_BYTES=52428800         rosbag 单包上限（默认 50MiB）
+#   SIM_BRINGUP_MAX_ROBOT_BYTES=1073741824     单机器人触发清理上限（默认 1GiB）
+#   SIM_BRINGUP_PRUNE_TARGET_BYTES=524288000   触发后清理目标（默认 500MiB）
 #
 # 勿用 set -u：/opt/ros/*/setup.bash 与 install/setup.bash 会引用未设置的变量（如 AMENT_TRACE_SETUP_FILES），
 # 与 backend RosNodeManager._bash_prefix 一致，仅用 -e 与 pipefail。
@@ -166,8 +168,12 @@ if [[ "${AUTO_MAPPING}" == "1" ]]; then
 fi
 log "NAV_GRID_MODE=${NAV_GRID_MODE}"
 
-MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-10485760}"
+MAX_BAG_BYTES="${SIM_BRINGUP_MAX_BAG_BYTES:-52428800}"
+MAX_ROBOT_BYTES="${SIM_BRINGUP_MAX_ROBOT_BYTES:-1073741824}"
+PRUNE_TARGET_BYTES="${SIM_BRINGUP_PRUNE_TARGET_BYTES:-524288000}"
 log "MAX_BAG_BYTES=${MAX_BAG_BYTES}"
+log "MAX_ROBOT_BYTES=${MAX_ROBOT_BYTES}"
+log "PRUNE_TARGET_BYTES=${PRUNE_TARGET_BYTES}"
 
 HB_CURRENT_MAP="${RID}_mapping"
 MAP_FILE=""
@@ -199,6 +205,8 @@ ros2 launch system startup.launch.py \
   "publish_rate:=2.0" \
   "log_root:=${ROOT}/log_bag" \
   "max_bag_bytes:=${MAX_BAG_BYTES}" \
+  "max_robot_bytes:=${MAX_ROBOT_BYTES}" \
+  "prune_target_bytes:=${PRUNE_TARGET_BYTES}" \
   "enable_fake_pub:=false" &
 log "started system startup.launch.py (log_bag+heartbeat, pid $!)"
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace log_bag {
@@ -26,6 +27,24 @@ inline std::vector<bool> retention_keep_mask(const std::vector<bool> & tagged) {
   }
   if (!has_tagged && !tagged.empty()) {
     keep.back() = true;
+  }
+  return keep;
+}
+
+// Sizes must be ordered oldest to newest. A hard storage cleanup deliberately
+// overrides task tags and removes the oldest bags until the hysteresis target
+// is reached, so recording does not immediately retrigger cleanup.
+inline std::vector<bool> storage_keep_mask(
+  const std::vector<std::uintmax_t> & sizes, std::uintmax_t target_bytes)
+{
+  std::vector<bool> keep(sizes.size(), true);
+  std::uintmax_t total = 0;
+  for (const auto size : sizes) {
+    total += size;
+  }
+  for (std::size_t i = 0; i < sizes.size() && total > target_bytes; ++i) {
+    keep[i] = false;
+    total -= sizes[i];
   }
   return keep;
 }

@@ -47,7 +47,7 @@ SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_p
 |------|------|----------|
 | **heartbeat** | `system/heartbeat/` | **Lifecycle 心跳节点**：周期发布 `/<R>/robot_status`（`RobotStatus`）；服务 `/<R>/set_heartbeat_params` 供 Web / manager 修改地图名、`robot_status`、`task_status` 等。 |
 | **manager** | `system/manager/` | **`health_monitor`**、**`task_manager`**、**`stack_lifecycle_manager`**（含 SLAM 参数 `config/*.yaml`）：SLAM 模式切换、Lifecycle 代理、**`/<R>/stack_lifecycle`**。 |
-| **log_bag** | `system/log_bag/` | 按机器人 **`robot_log_recorder`**：终端日志 + 默认 5 MiB **rosbag2** 轮转录制（`log_bag/<R>/`），固定订阅 `/<R>/front_camera/image_raw` 与 `/<R>/front_down_camera/image_raw`；时间固定采用 CST（UTC+8，ISO `+08:00`、文件名 `+0800`），任务期间按 task ID 打多 tag，并只保留任务段前后各一个无 tag backup bag。 |
+| **log_bag** | `system/log_bag/` | 按机器人 **`robot_log_recorder`**：终端日志 + 核心传感器/TF/状态白名单 **rosbag2** 录制（`log_bag/<R>/`），默认 50 MiB 分包；单机器人达到 1 GiB 时从最旧 bag 开始清理到 500 MiB；时间固定采用 CST（UTC+8），任务期间按 task ID 打多 tag。 |
 | **system** | `system/system/` | **元包 / 集成层**：安装仓库 `params/` launch、`sim_bringup.sh`（Web 仿真上线唯一入口）、`startup.launch.py`（log_bag + heartbeat）；可选安装 `fake_pub` 演示节点。 |
 
 ### 1.6 演示与其它（非独立 ament 包）

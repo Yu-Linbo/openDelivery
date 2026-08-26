@@ -173,6 +173,16 @@ class WebMonitorFeatureTest(unittest.TestCase):
         server_py = (ROOT / "backend" / "server.py").read_text(encoding="utf-8")
         replay_py = (ROOT / "backend" / "bag_replay.py").read_text(encoding="utf-8")
         recorder_cpp = (ROOT / "src" / "system" / "log_bag" / "src" / "robot_log_recorder.cpp").read_text(encoding="utf-8")
+        recording_topics_h = (
+            ROOT / "src" / "system" / "log_bag" / "include" / "log_bag" / "recording_topics.hpp"
+        ).read_text(encoding="utf-8")
+        log_bag_launch = (
+            ROOT / "src" / "system" / "log_bag" / "launch" / "log_bag.launch.py"
+        ).read_text(encoding="utf-8")
+        startup_launch = (ROOT / "params" / "startup.launch.py").read_text(encoding="utf-8")
+        sim_bringup = (
+            ROOT / "src" / "system" / "system" / "scripts" / "sim_bringup.sh"
+        ).read_text(encoding="utf-8")
 
         for element_id in (
             "btn-play-log-bag",
@@ -212,8 +222,12 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("PRAGMA query_only=ON", replay_py)
         self.assertNotIn("import rclpy", replay_py)
         self.assertNotIn("subprocess", replay_py)
-        self.assertIn("/front_camera/image_raw", recorder_cpp)
-        self.assertIn("/front_down_camera/image_raw", recorder_cpp)
+        self.assertIn("/front_camera/image_raw", recording_topics_h)
+        self.assertIn("/front_down_camera/image_raw", recording_topics_h)
+        self.assertIn('"/tf"', recording_topics_h)
+        self.assertIn('"/scan_2d"', recording_topics_h)
+        self.assertNotIn('"/rosout"', recording_topics_h)
+        self.assertNotIn("local_costmap", recording_topics_h)
         self.assertIn('"sensor_msgs/msg/Image": 90', replay_py)
         self.assertNotIn('id="bag-replay-map-select"', html)
         self.assertIn("formatLogBagTimestamp", js)
@@ -244,7 +258,19 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("find_custom_msgs_prefix", recorder_cpp)
         self.assertIn("sqlite_topic_message_count", recorder_cpp)
         self.assertIn("bag unhealthy: recorder receives robot_status", recorder_cpp)
-        self.assertIn("10U * 1024U * 1024U", recorder_cpp)
+        self.assertIn("50U * 1024U * 1024U", recorder_cpp)
+        self.assertIn("1024U * 1024U * 1024U", recorder_cpp)
+        self.assertIn("500U * 1024U * 1024U", recorder_cpp)
+        self.assertIn("storage cap removed oldest bag", recorder_cpp)
+        for launcher in (log_bag_launch, startup_launch):
+            self.assertIn('default_value="52428800"', launcher)
+            self.assertIn('default_value="1073741824"', launcher)
+            self.assertIn('default_value="524288000"', launcher)
+            self.assertIn('"--max-robot-bytes"', launcher)
+            self.assertIn('"--prune-target-bytes"', launcher)
+        self.assertIn('SIM_BRINGUP_MAX_BAG_BYTES:-52428800', sim_bringup)
+        self.assertIn('SIM_BRINGUP_MAX_ROBOT_BYTES:-1073741824', sim_bringup)
+        self.assertIn('SIM_BRINGUP_PRUNE_TARGET_BYTES:-524288000', sim_bringup)
         self.assertIn("write_robot_status_sidecar", recorder_cpp)
         self.assertIn("critical_status_topic", recorder_cpp)
 
