@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "Fixed semantic color legend for image2gazebo",
+  "labels": [
+    {"id": "background", "color": "#ffffff", "name": "背景/未标注", "description": "Unlabeled area"},
+    {"id": "obstacle", "color": "#000000", "name": "障碍/墙体", "description": "Wall or obstacle (matches occupancy)"},
+    {"id": "room_living", "color": "#e74c3c", "name": "客厅", "description": "Living room"},
+    {"id": "room_bedroom", "color": "#3498db", "name": "卧室", "description": "Bedroom"},
+    {"id": "room_kitchen", "color": "#2ecc71", "name": "厨房", "description": "Kitchen"},
+    {"id": "room_bathroom", "color": "#9b59b6", "name": "卫生间", "description": "Bathroom"},
+    {"id": "corridor", "color": "#f39c12", "name": "走廊", "description": "Corridor / hallway"},
+    {"id": "elevator", "color": "#6c5ce7", "name": "电梯区域", "description": "Elevator / lift zone"},
+    {"id": "door", "color": "#1abc9c", "name": "门", "description": "Doorway"},
+    {"id": "furniture", "color": "#95a5a6", "name": "家具区", "description": "Furniture zone"},
+    {"id": "restricted", "color": "#c0392b", "name": "禁行区", "description": "Restricted / no-go zone"}
+  ]
+}
