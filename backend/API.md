@@ -97,7 +97,11 @@ These endpoints are used by `web/app.js`.
   - Purpose: topdown image availability and freshness.
 
 - `GET /api/gazebo/top_camera`
-  - Purpose: topdown image frame.
+  - Purpose: compatibility endpoint returning the latest raw RGB frame as Base64 JSON.
+
+- `GET /api/gazebo/top_camera.jpg`
+  - Purpose: low-latency JPEG frame for the web monitor; includes `X-Frame-Seq`
+    and `X-Frame-Age-Sec` response headers.
 
 - `POST /api/gazebo/set_model_state`
   - Purpose: move Gazebo model/camera through backend.

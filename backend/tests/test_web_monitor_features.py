@@ -308,6 +308,37 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn('function undoScope(scope)', editor)
         self.assertIn('undoScope(s.activePanel==="points"?"points":"layers")', editor)
 
+    def test_topdown_camera_uses_latest_pose_and_jpeg_frames(self):
+        js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        server_py = (ROOT / "backend" / "server.py").read_text(encoding="utf-8")
+        bridge_py = (ROOT / "backend" / "ros_tf_bridge.py").read_text(encoding="utf-8")
+        world = (
+            ROOT / "src" / "simulate" / "simulate" / "worlds" / "drawn_model.world"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("CAMERA_DRIVE_SEND_INTERVAL_MS = 66", js)
+        self.assertIn("cameraDriveRequestInFlight", js)
+        self.assertIn("pendingCameraDriveBody", js)
+        self.assertIn("cameraScreenDriveVector(screenRight, screenUp)", js)
+        self.assertIn(
+            "rotateVectorByQuaternion({ x: 0, y: -1, z: 0 }, orientation)", js
+        )
+        self.assertIn(
+            "rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation)", js
+        )
+        self.assertIn("revisionAtStart !== cameraPoseRevision", js)
+        self.assertIn(
+            "camDriveKey.up = false;\n    postTopdownCameraPoseQuiet(true);", js
+        )
+        self.assertEqual(js.count("postTopdownCameraPoseQuiet(true);"), 9)
+        self.assertIn("/api/gazebo/top_camera.jpg?frame_seq=", js)
+        self.assertIn("frameSeq !== lastRenderedTopCameraFrameSeq", js)
+        self.assertNotIn("topCameraImageSkip", js)
+        self.assertIn('path == "/api/gazebo/top_camera.jpg"', server_py)
+        self.assertIn("get_topdown_image_status()", server_py)
+        self.assertIn("depth=1", bridge_py)
+        self.assertIn('format="JPEG", quality=82', bridge_py)
+        self.assertIn("<update_rate>15</update_rate>", world)
 
 if __name__ == "__main__":
     unittest.main()

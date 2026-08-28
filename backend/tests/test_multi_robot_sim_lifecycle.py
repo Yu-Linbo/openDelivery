@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 import sys
@@ -36,6 +37,13 @@ class FakeRosNodeManager:
 
 
 class MultiRobotSimulationLifecycleTest(unittest.TestCase):
+    def test_gazebo_fallback_preserves_topdown_heading_at_gimbal_lock(self):
+        roll, pitch, yaw = server._rpy_from_quaternion(-1.0, 1.0, 1.0, 1.0)
+
+        self.assertAlmostEqual(roll, 0.0, places=7)
+        self.assertAlmostEqual(pitch, math.pi / 2.0, places=7)
+        self.assertAlmostEqual(yaw, math.pi / 2.0, places=7)
+
     def _orchestrator(self, root=None):
         return robot_lifecycle.RobotLifecycleOrchestrator(
             Path(root or PROJECT_ROOT), FakeRosNodeManager()

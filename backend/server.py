@@ -28,6 +28,7 @@ from ros_sensor_store import (
     get_scans,
     augment_topdown_for_api,
     get_topdown_image,
+    get_topdown_jpeg,
     get_topdown_image_status,
 )
 from robot_lifecycle import RobotLifecycleOrchestrator
@@ -48,14 +49,31 @@ _LOG_BAG_DELETE_LOCK = threading.Lock()
 
 def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
     """Roll, pitch, yaw (rad) for ``gz model -R -P -Y`` fallback; same convention as common ROS utilities."""
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 1e-12:
+        return 0.0, 0.0, 0.0
+    qx /= norm
+    qy /= norm
+    qz /= norm
+    qw /= norm
+
     sinr_cosp = 2.0 * (qw * qx + qy * qz)
     cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
     sinp = 2.0 * (qw * qy - qz * qx)
-    if abs(sinp) >= 1.0:
+
+    # At pitch +/-90 degrees the usual roll/yaw formula becomes atan2(0, 0).
+    # Choosing roll=0 and deriving the equivalent heading from the rotation
+    # matrix preserves the topdown camera's world yaw instead of dropping it.
+    if abs(sinp) >= 1.0 - 1e-9:
+        roll = 0.0
         pitch = math.copysign(math.pi / 2.0, sinp)
-    else:
-        pitch = math.asin(sinp)
+        matrix_01 = 2.0 * (qx * qy - qz * qw)
+        matrix_11 = 1.0 - 2.0 * (qx * qx + qz * qz)
+        yaw = math.atan2(-matrix_01, matrix_11)
+        return roll, pitch, yaw
+
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    pitch = math.asin(sinp)
     siny_cosp = 2.0 * (qw * qz + qx * qy)
     cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
     yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -2066,6 +2084,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             # Client disconnected (browser aborted request). Ignore to avoid log spam.
             return
 
+    def _send_bytes(self, payload: bytes, content_type: str, headers=None):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if headers:
+            for name, value in headers.items():
+                self.send_header(str(name), str(value))
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def _not_found(self, message):
         self._send_json({"error": message}, status=404)
 
@@ -3287,6 +3320,22 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._send_json(get_topdown_image_status(), 200)
             return
 
+        if path == "/api/gazebo/top_camera.jpg":
+            snap = get_topdown_jpeg()
+            if not snap:
+                self._send_json(
+                    {"available": False, "reason": "no topdown JPEG frame yet"},
+                    404,
+                )
+                return
+            jpeg, meta = snap
+            headers = {
+                "X-Frame-Seq": meta.get("frame_seq", ""),
+                "X-Frame-Age-Sec": meta.get("age_received_sec", ""),
+            }
+            self._send_bytes(jpeg, "image/jpeg", headers)
+            return
+
         if path == "/api/gazebo/top_camera":
             frame = get_topdown_image()
             if not frame:
@@ -3295,6 +3344,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                     200,
                 )
                 return
+            rgb = frame.pop("rgb_bytes", b"")
+            frame.pop("jpeg_bytes", None)
+            if not rgb:
+                self._send_json(
+                    {"available": False, "reason": "no raw RGB frame yet"}, 200
+                )
+                return
+            frame["encoding"] = "rgb8"
+            frame["data_b64"] = base64.b64encode(rgb).decode("ascii")
             self._send_json(augment_topdown_for_api(frame), 200)
             return
 

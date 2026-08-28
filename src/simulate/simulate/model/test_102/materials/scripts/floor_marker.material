@@ -1,0 +1,19 @@
+material OpenDelivery/Floor/test_102
+{
+  receive_shadows on
+  technique
+  {
+    pass
+    {
+      ambient 1 1 1 1
+      diffuse 1 1 1 1
+      specular 0 0 0 1
+      texture_unit
+      {
+        texture floor_marker_test102.png
+        filtering bilinear
+        scale 0.2 0.2
+      }
+    }
+  }
+}

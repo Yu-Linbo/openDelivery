@@ -5076,17 +5076,20 @@ function initGazeboPage() {
   }
   loadLocations();
   // World-frame position; orientation matches drawn_model.world topdown_camera
-  // (look down, then rotate counterclockwise 90 deg in the ground plane).
-  const cameraDefaultPose = {
-    x: 0.0,
-    y: 0.0,
-    z: 32.0,
-    hfov: 1.3962634,
+  // exactly: RPY=(0, 90deg, 90deg). Reuse it for home/reset/zone actions.
+  const cameraDefaultOrientation = Object.freeze({
     qx: -0.5,
     qy: 0.5,
     qz: 0.5,
     qw: 0.5,
-  };
+  });
+  const cameraDefaultPose = Object.freeze({
+    x: 0.0,
+    y: 0.0,
+    z: 32.0,
+    hfov: 1.3962634,
+    ...cameraDefaultOrientation,
+  });
   const cameraModel = { ...cameraDefaultPose };
   const cameraFrame = {
     width: 0,
@@ -5096,11 +5099,16 @@ function initGazeboPage() {
   const cameraDriveSpeedEl = document.getElementById("camera-drive-speed");
   const camDriveKey = { up: false, down: false, left: false, right: false };
   let lastCameraDriveSendMs = 0;
+  let lastCameraDriveTickMs = 0;
+  let cameraDriveRequestInFlight = false;
+  let pendingCameraDriveBody = null;
+  let cameraPoseRevision = 0;
+  let cameraPoseLoadSeq = 0;
   let cameraDriveTimer = null;
   let topCameraPollTimer = null;
   let topCameraTelemetryTimer = null;
   let topCameraRefreshInFlight = false;
-  let topCameraImageSkip = 0;
+  let lastRenderedTopCameraFrameSeq = -1;
   let camZoomDir = 0;
   /** @type {Record<string, unknown> | null} */
   let lastTopCameraStatusSnap = null;
@@ -5159,6 +5167,7 @@ function initGazeboPage() {
   }
 
   function setTopCameraPose(pose, message, useQuiet = false) {
+    cameraPoseRevision += 1;
     cameraModel.x = Number.isFinite(pose.x) ? pose.x : cameraModel.x;
     cameraModel.y = Number.isFinite(pose.y) ? pose.y : cameraModel.y;
     cameraModel.z = Math.min(
@@ -5204,67 +5213,99 @@ function initGazeboPage() {
     return Number.isFinite(v) && v > 0 ? v : 4;
   }
 
-  function postTopdownCameraPoseQuiet() {
-    const now = performance.now();
-    if (now - lastCameraDriveSendMs < 26) {
+  const CAMERA_DRIVE_SEND_INTERVAL_MS = 66;
+
+  function postTopdownCameraPoseQuiet(force = false) {
+    pendingCameraDriveBody = buildTopdownCameraSetStateBody();
+    if (cameraDriveRequestInFlight) {
       return;
     }
+
+    const now = performance.now();
+    if (!force && now - lastCameraDriveSendMs < CAMERA_DRIVE_SEND_INTERVAL_MS) {
+      return;
+    }
+
+    const body = pendingCameraDriveBody;
+    pendingCameraDriveBody = null;
     lastCameraDriveSendMs = now;
+    cameraDriveRequestInFlight = true;
     fetch(`${API_BASE_URL}/api/gazebo/set_model_state`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildTopdownCameraSetStateBody()),
-      keepalive: true,
-    }).catch(() => {});
+      body: JSON.stringify(body),
+    })
+      .catch(() => {})
+      .finally(() => {
+        cameraDriveRequestInFlight = false;
+        if (pendingCameraDriveBody) {
+          postTopdownCameraPoseQuiet(true);
+        }
+      });
   }
 
   function setCamDriveKey(code, down) {
     if (code === "KeyW" || code === "ArrowUp") {
+      if (down && !camDriveKey.up) cameraPoseRevision += 1;
       camDriveKey.up = down;
     } else if (code === "KeyS" || code === "ArrowDown") {
+      if (down && !camDriveKey.down) cameraPoseRevision += 1;
       camDriveKey.down = down;
     } else if (code === "KeyA" || code === "ArrowLeft") {
+      if (down && !camDriveKey.left) cameraPoseRevision += 1;
       camDriveKey.left = down;
     } else if (code === "KeyD" || code === "ArrowRight") {
+      if (down && !camDriveKey.right) cameraPoseRevision += 1;
       camDriveKey.right = down;
     }
   }
 
   function clearCamDriveKeys() {
+    const wasActive =
+      camDriveKey.up || camDriveKey.down || camDriveKey.left || camDriveKey.right || camZoomDir;
     camDriveKey.up = false;
     camDriveKey.down = false;
     camDriveKey.left = false;
     camDriveKey.right = false;
     camZoomDir = 0;
+    if (wasActive) {
+      postTopdownCameraPoseQuiet(true);
+    }
+    lastCameraDriveTickMs = 0;
   }
 
   function tickTopdownCameraDrive() {
     if (!gazeboViewActive()) {
+      lastCameraDriveTickMs = 0;
       return;
     }
-    let ix = 0;
-    let iy = 0;
+    const now = performance.now();
+    const elapsedMs = lastCameraDriveTickMs ? now - lastCameraDriveTickMs : 1000 / 30;
+    lastCameraDriveTickMs = now;
+    const dt = Math.min(0.1, Math.max(0.001, elapsedMs / 1000));
+    let screenRight = 0;
+    let screenUp = 0;
     if (camDriveKey.up) {
-      ix += 1;
+      screenUp += 1;
     }
     if (camDriveKey.down) {
-      ix -= 1;
+      screenUp -= 1;
     }
     if (camDriveKey.left) {
-      iy += 1;
+      screenRight -= 1;
     }
     if (camDriveKey.right) {
-      iy -= 1;
+      screenRight += 1;
     }
-    if (ix === 0 && iy === 0) {
+    if (screenRight === 0 && screenUp === 0) {
       if (camZoomDir === 0) {
         return;
       }
     }
+    const drive = cameraScreenDriveVector(screenRight, screenUp);
     const sp = cameraDriveSpeedMps();
-    const dt = 1 / 30;
-    cameraModel.x += ix * sp * dt;
-    cameraModel.y += iy * sp * dt;
+    cameraModel.x += drive.x * sp * dt;
+    cameraModel.y += drive.y * sp * dt;
     if (camZoomDir !== 0) {
       const zoomSpeed = Math.max(6.0, cameraModel.z * 1.15);
       cameraModel.z = Math.min(
@@ -5307,6 +5348,7 @@ function initGazeboPage() {
     ) {
       return;
     }
+    postTopdownCameraPoseQuiet(true);
     setCamDriveKey(ev.code, false);
   });
   window.addEventListener("blur", () => {
@@ -5322,6 +5364,8 @@ function initGazeboPage() {
     if (!gazeboMessage) {
       return;
     }
+    const loadSeq = ++cameraPoseLoadSeq;
+    const revisionAtStart = cameraPoseRevision;
     gazeboMessage.textContent = "读取 topdown_camera 位姿中…";
     try {
       const data = await fetchJson(`${API_BASE_URL}/api/gazebo/topdown/state`);
@@ -5329,6 +5373,11 @@ function initGazeboPage() {
       const cam = models.find((m) => m && m.name === cameraModelName);
       if (!cam || !cam.pose) {
         gazeboMessage.textContent = "未找到 topdown_camera 模型，请确认 world 中模型名";
+        return;
+      }
+      // A state read can finish after the user starts driving the camera.
+      // Never let that older snapshot jump the local pose back underneath them.
+      if (loadSeq !== cameraPoseLoadSeq || revisionAtStart !== cameraPoseRevision) {
         return;
       }
       const px = Number(cam.pose.x);
@@ -5493,6 +5542,7 @@ function initGazeboPage() {
     topCameraCtx.fillText("无图像（桥未收到 topdown 相机 topic）", 14, 28);
     cameraFrame.width = 0;
     cameraFrame.height = 0;
+    lastRenderedTopCameraFrameSeq = -1;
     updateTopCameraOverlayFromStatus({ available: false });
   }
 
@@ -5524,6 +5574,26 @@ function initGazeboPage() {
         2 * (yz + wx) * vec.y +
         (1 - 2 * (xx + yy)) * vec.z,
     };
+  }
+
+  function cameraScreenDriveVector(screenRight, screenUp) {
+    const orientation = cameraOrientationPayload();
+    // Gazebo camera image-right is local -Y; image-up is local +Z.
+    // Project those axes onto the world ground plane so the controls continue
+    // to follow the rendered image even if the camera heading changes.
+    const rightWorld = rotateVectorByQuaternion({ x: 0, y: -1, z: 0 }, orientation);
+    const upWorld = rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation);
+    let x = rightWorld.x * screenRight + upWorld.x * screenUp;
+    let y = rightWorld.y * screenRight + upWorld.y * screenUp;
+    const magnitude = Math.hypot(x, y);
+    if (magnitude > 1e-9) {
+      x /= magnitude;
+      y /= magnitude;
+    } else {
+      x = 0;
+      y = 0;
+    }
+    return { x, y };
   }
 
   function cameraPixelToWorld(px, py) {
@@ -5610,8 +5680,15 @@ function initGazeboPage() {
     fillGazeboTargetFromWorld(world);
   }
 
-  async function refreshTopCameraFrame() {
+  async function refreshTopCameraFrame(status) {
     if (!topCameraCanvas || !topCameraCtx) {
+      return;
+    }
+    const frameSeq = Number(status && status.frame_seq);
+    if (
+      Number.isFinite(frameSeq) &&
+      frameSeq === lastRenderedTopCameraFrameSeq
+    ) {
       return;
     }
     if (topCameraRefreshInFlight) {
@@ -5619,52 +5696,33 @@ function initGazeboPage() {
     }
     topCameraRefreshInFlight = true;
     try {
-      const data = await fetchJson(`${API_BASE_URL}/api/gazebo/top_camera`);
-      if (data && data.available && data.data_b64) {
-        const width = Number(data.width || 0);
-        const height = Number(data.height || 0);
-        if (!width || !height) {
-          return;
-        }
-        cameraFrame.width = width;
-        cameraFrame.height = height;
-        const raw = atob(data.data_b64);
-        const rgb = new Uint8ClampedArray(raw.length);
-        for (let i = 0; i < raw.length; i += 1) {
-          rgb[i] = raw.charCodeAt(i);
-        }
-        const rgba = new Uint8ClampedArray(width * height * 4);
-        for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
-          rgba[j] = rgb[i];
-          rgba[j + 1] = rgb[i + 1];
-          rgba[j + 2] = rgb[i + 2];
-          rgba[j + 3] = 255;
-        }
-        fitTopCameraCanvas();
-        const vw = topCameraCanvas.clientWidth || width;
-        const vh = topCameraCanvas.clientHeight || height;
-        const off = document.createElement("canvas");
-        off.width = width;
-        off.height = height;
-        const offCtx = off.getContext("2d");
-        offCtx.putImageData(new ImageData(rgba, width, height), 0, 0);
-        topCameraCtx.clearRect(0, 0, vw, vh);
-        topCameraCtx.drawImage(off, 0, 0, vw, vh);
-        lastTopCameraStatusSnap = {
-          available: true,
-          received_at: data.received_at,
-          age_received_sec: data.age_received_sec,
-          stale_tier: data.stale_tier,
-          stamp_sec: data.stamp_sec,
-          stamp_nanosec: data.stamp_nanosec,
-          width: data.width,
-          height: data.height,
-          frame_id: data.frame_id,
-        };
-        tickTopCameraOverlayClock();
-      } else if (!data || data.available === false) {
-        clearTopCameraNoSignal();
+      const response = await fetch(
+        `${API_BASE_URL}/api/gazebo/top_camera.jpg?frame_seq=${frameSeq}`,
+        { cache: "no-store" }
+      );
+      if (!response.ok) {
+        throw new Error(`top camera JPEG request failed: ${response.status}`);
       }
+      const blob = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+      const width = Number((status && status.width) || bitmap.width || 0);
+      const height = Number((status && status.height) || bitmap.height || 0);
+      if (!width || !height) {
+        bitmap.close?.();
+        return;
+      }
+      cameraFrame.width = width;
+      cameraFrame.height = height;
+      fitTopCameraCanvas();
+      const vw = topCameraCanvas.clientWidth || width;
+      const vh = topCameraCanvas.clientHeight || height;
+      topCameraCtx.clearRect(0, 0, vw, vh);
+      topCameraCtx.drawImage(bitmap, 0, 0, vw, vh);
+      bitmap.close?.();
+      if (Number.isFinite(frameSeq)) {
+        lastRenderedTopCameraFrameSeq = frameSeq;
+      }
+      tickTopCameraOverlayClock();
     } catch {
       /* ignore */
     } finally {
@@ -5691,28 +5749,26 @@ function initGazeboPage() {
       if (!st || st.available === false) {
         applyGazeboCameraWrapTier(-1);
         clearTopCameraNoSignal();
-        topCameraImageSkip = 0;
+        lastRenderedTopCameraFrameSeq = -1;
         nextMs = 5000;
       } else {
         const tier = Number(st.stale_tier || 0);
         const age = Number(st.age_received_sec ?? 0);
+        const frameSeq = Number(st.frame_seq);
+        const hasNewFrame =
+          Number.isFinite(frameSeq) && frameSeq !== lastRenderedTopCameraFrameSeq;
         applyGazeboCameraWrapTier(tier);
-        let fetchImg = false;
         if (tier === 0 && age < 2.5) {
-          fetchImg = true;
           nextMs = 100;
         } else if (tier === 0) {
-          fetchImg = topCameraImageSkip++ % 2 === 0;
           nextMs = 400;
         } else if (tier === 1) {
-          fetchImg = topCameraImageSkip++ % 3 === 0;
           nextMs = 900;
         } else {
-          fetchImg = topCameraImageSkip++ % 5 === 0;
           nextMs = 2200;
         }
-        if (fetchImg) {
-          await refreshTopCameraFrame();
+        if (hasNewFrame) {
+          await refreshTopCameraFrame(st);
         }
       }
     } catch {
@@ -5783,34 +5839,46 @@ function initGazeboPage() {
   }
 
   bindHoldButton(btnGazeboCamUp, () => {
+    if (!camDriveKey.up) cameraPoseRevision += 1;
     camDriveKey.up = true;
   }, () => {
     camDriveKey.up = false;
+    postTopdownCameraPoseQuiet(true);
   });
   bindHoldButton(btnGazeboCamDown, () => {
+    if (!camDriveKey.down) cameraPoseRevision += 1;
     camDriveKey.down = true;
   }, () => {
     camDriveKey.down = false;
+    postTopdownCameraPoseQuiet(true);
   });
   bindHoldButton(btnGazeboCamLeft, () => {
+    if (!camDriveKey.left) cameraPoseRevision += 1;
     camDriveKey.left = true;
   }, () => {
     camDriveKey.left = false;
+    postTopdownCameraPoseQuiet(true);
   });
   bindHoldButton(btnGazeboCamRight, () => {
+    if (!camDriveKey.right) cameraPoseRevision += 1;
     camDriveKey.right = true;
   }, () => {
     camDriveKey.right = false;
+    postTopdownCameraPoseQuiet(true);
   });
   bindHoldButton(btnGazeboCamZoomIn, () => {
+    if (camZoomDir !== -1) cameraPoseRevision += 1;
     camZoomDir = -1;
   }, () => {
     camZoomDir = 0;
+    postTopdownCameraPoseQuiet(true);
   });
   bindHoldButton(btnGazeboCamZoomOut, () => {
+    if (camZoomDir !== 1) cameraPoseRevision += 1;
     camZoomDir = 1;
   }, () => {
     camZoomDir = 0;
+    postTopdownCameraPoseQuiet(true);
   });
 
   if (btnGazeboCamHome) {
@@ -5866,7 +5934,8 @@ function initGazeboPage() {
         return;
       }
       gazeboCameraLoopsActive = true;
-      topCameraImageSkip = 0;
+      lastRenderedTopCameraFrameSeq = -1;
+      lastCameraDriveTickMs = performance.now();
       fillTopdownCameraPoseFromGazebo().catch(() => {});
       fitTopCameraCanvas();
       stopTopCameraAdaptiveLoop();

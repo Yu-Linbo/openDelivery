@@ -76,8 +76,11 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.85 0.25 0.25 0.35</ambient>
-            <diffuse>0.85 0.25 0.25 0.35</diffuse>
+            <script>
+              <uri>model://test_101/materials/scripts</uri>
+              <uri>model://test_101/materials/textures</uri>
+              <name>OpenDelivery/Floor/test_101</name>
+            </script>
           </material>
         </visual>
         <visual name="zone_2_fill">
@@ -88,8 +91,11 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.2 0.55 0.95 0.35</ambient>
-            <diffuse>0.2 0.55 0.95 0.35</diffuse>
+            <script>
+              <uri>model://test_102/materials/scripts</uri>
+              <uri>model://test_102/materials/textures</uri>
+              <name>OpenDelivery/Floor/test_102</name>
+            </script>
           </material>
         </visual>
         <visual name="zone_3_fill">
@@ -100,8 +106,11 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.2 0.75 0.45 0.35</ambient>
-            <diffuse>0.2 0.75 0.45 0.35</diffuse>
+            <script>
+              <uri>model://test_103/materials/scripts</uri>
+              <uri>model://test_103/materials/textures</uri>
+              <name>OpenDelivery/Floor/test_103</name>
+            </script>
           </material>
         </visual>
         <visual name="zone_4_fill">
@@ -112,8 +121,11 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.95 0.75 0.18 0.35</ambient>
-            <diffuse>0.95 0.75 0.18 0.35</diffuse>
+            <script>
+              <uri>model://test_104/materials/scripts</uri>
+              <uri>model://test_104/materials/textures</uri>
+              <name>OpenDelivery/Floor/test_104</name>
+            </script>
           </material>
         </visual>
 
@@ -461,7 +473,7 @@
       <link name="topdown_camera_link">
         <sensor name="topdown_rgb_sensor" type="camera">
           <always_on>true</always_on>
-          <update_rate>30</update_rate>
+          <update_rate>15</update_rate>
           <visualize>false</visualize>
           <camera>
             <horizontal_fov>1.3962634</horizontal_fov>

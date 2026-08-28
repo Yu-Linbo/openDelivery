@@ -53,9 +53,10 @@ import os
 import re
 import threading
 import time
-import base64
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional
 
+from PIL import Image as PILImage
 import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
@@ -318,11 +319,17 @@ class OpenDeliveryTfBridgeNode(Node):
             "ROS_TOPDOWN_CAMERA_TOPIC", "/drawn_model/topdown_camera/image_raw"
         ).strip()
         if self._topdown_camera_topic:
+            image_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
             self.create_subscription(
                 Image,
                 self._topdown_camera_topic,
                 self._on_topdown_image,
-                sensor_qos,
+                image_qos,
             )
             self.get_logger().info(f"subscribing topdown image on {self._topdown_camera_topic}")
 
@@ -1141,26 +1148,32 @@ class OpenDeliveryTfBridgeNode(Node):
             raw = bytes(msg.data or b"")
             if not raw:
                 return
-            if enc == "rgb8":
-                rgb = raw
-            elif enc == "bgr8":
-                rgb = bytearray(len(raw))
-                for i in range(0, len(raw), 3):
-                    if i + 2 >= len(raw):
-                        break
-                    rgb[i] = raw[i + 2]
-                    rgb[i + 1] = raw[i + 1]
-                    rgb[i + 2] = raw[i]
-                rgb = bytes(rgb)
-            else:
+            if enc not in ("rgb8", "bgr8"):
                 return
+            step = max(width * 3, int(msg.step or 0))
+            raw_mode = "RGB" if enc == "rgb8" else "BGR"
+            image = PILImage.frombytes(
+                "RGB",
+                (width, height),
+                raw,
+                "raw",
+                raw_mode,
+                step,
+                1,
+            )
+            rgb = image.tobytes()
+            jpeg_out = BytesIO()
+            image.save(jpeg_out, format="JPEG", quality=82)
+            jpeg = jpeg_out.getvalue()
             ros_sensor_store.set_topdown_image(
                 {
                     "available": True,
                     "width": width,
                     "height": height,
-                    "encoding": "rgb8",
-                    "data_b64": base64.b64encode(rgb).decode("ascii"),
+                    "encoding": "jpeg",
+                    "rgb_bytes": rgb,
+                    "jpeg_bytes": jpeg,
+                    "jpeg_size": len(jpeg),
                     "frame_id": str(msg.header.frame_id or ""),
                     "stamp_sec": int(msg.header.stamp.sec),
                     "stamp_nanosec": int(msg.header.stamp.nanosec),

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import queue
+from collections import OrderedDict
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -14,7 +14,10 @@ _worker_lock = threading.Lock()
 class _GazeboSetStateWorker(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
-        self._q: "queue.Queue[Optional[Tuple[Any, Dict[str, Any], threading.Event]]]" = queue.Queue()
+        self._pending: "OrderedDict[str, Tuple[Any, Dict[str, Any], threading.Event]]" = (
+            OrderedDict()
+        )
+        self._pending_cv = threading.Condition()
         self._ready = threading.Event()
         self._init_error: str = ""
         self._shutdown = False
@@ -45,13 +48,17 @@ class _GazeboSetStateWorker(threading.Thread):
         self._ready.set()
 
         while rclpy.ok() and not self._shutdown:
-            try:
-                work = self._q.get(timeout=0.05)
-            except queue.Empty:
+            work = None
+            with self._pending_cv:
+                if not self._pending and not self._shutdown:
+                    self._pending_cv.wait(timeout=0.05)
+                if self._shutdown:
+                    break
+                if self._pending:
+                    _, work = self._pending.popitem(last=False)
+            if work is None:
                 executor.spin_once(timeout_sec=0.05)
                 continue
-            if work is None:
-                break
             req, result_box, evt = work
             try:
                 if not client.wait_for_service(timeout_sec=1.5):
@@ -85,6 +92,21 @@ class _GazeboSetStateWorker(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
 
+    def _enqueue_latest(
+        self, request: Any, result_box: Dict[str, Any], evt: threading.Event
+    ) -> None:
+        model_state = getattr(request, "model_state", None)
+        key = str(getattr(model_state, "model_name", "") or "__default__")
+        with self._pending_cv:
+            superseded = self._pending.pop(key, None)
+            if superseded is not None:
+                _, old_result, old_evt = superseded
+                old_result["ok"] = True
+                old_result["err"] = "superseded by newer request"
+                old_evt.set()
+            self._pending[key] = (request, result_box, evt)
+            self._pending_cv.notify()
+
     def submit(self, request: Any, timeout_sec: float = 4.0) -> Tuple[bool, str]:
         if not self._ready.wait(timeout=5.0):
             return False, "gazebo client worker not ready"
@@ -92,14 +114,20 @@ class _GazeboSetStateWorker(threading.Thread):
             return False, self._init_error
         result_box: Dict[str, Any] = {}
         evt = threading.Event()
-        self._q.put((request, result_box, evt))
+        self._enqueue_latest(request, result_box, evt)
         if not evt.wait(timeout=timeout_sec):
             return False, "set_model_state wait timeout"
         return bool(result_box.get("ok")), str(result_box.get("err") or "")
 
     def stop(self) -> None:
-        self._shutdown = True
-        self._q.put(None)
+        with self._pending_cv:
+            self._shutdown = True
+            for _, result_box, evt in self._pending.values():
+                result_box["ok"] = False
+                result_box["err"] = "gazebo client worker stopped"
+                evt.set()
+            self._pending.clear()
+            self._pending_cv.notify_all()
 
 
 def _get_worker() -> Optional[_GazeboSetStateWorker]:
@@ -159,14 +187,14 @@ def try_set_model_state_fast(
         return {"ok": True, "output": "rclpy_client"}
     low = (err or "").lower()
     if any(
+        # Timeouts may still complete in the worker. Retrying them through the
+        # subprocess fallback would apply an old pose twice.
         s in low
         for s in (
             "unavailable",
             "not ready",
             "import",
             "init",
-            "wait timeout",
-            "call timeout",
             "worker not ready",
             "gazebo client worker not ready",
         )
