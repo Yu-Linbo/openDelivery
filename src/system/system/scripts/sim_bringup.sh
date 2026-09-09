@@ -59,17 +59,21 @@ if [[ -z "${ROOT}" ]]; then
   ROOT="$(cd "${_here}/../../../../" && pwd)"
 fi
 
-# Foxy FastRTPS may ignore FASTDDS_BUILTIN_TRANSPORTS and attempt stale SHM
-# segments. Apply the XML profile before any ROS process is created so manager,
-# map_server, SLAM, Nav2 and Gazebo all use the same UDP-only transport.
-: "${FASTDDS_BUILTIN_TRANSPORTS:=UDPv4}"
+# Apply one compatible profile before any ROS process is created so manager,
+# map_server, SLAM, Nav2 and Gazebo all use the same built-in transports. A
+# custom UDP-only transport breaks ROS service request/reply on Foxy FastRTPS.
+: "${FASTDDS_BUILTIN_TRANSPORTS:=DEFAULT}"
 : "${FASTRTPS_DEFAULT_PROFILES_FILE:=${ROOT}/backend/fastdds_udp_only.xml}"
-export FASTDDS_BUILTIN_TRANSPORTS FASTRTPS_DEFAULT_PROFILES_FILE
+# Avoid a stale ros2 daemon retaining an older DDS transport configuration.
+: "${ROS2CLI_DISABLE_DAEMON:=1}"
+export FASTDDS_BUILTIN_TRANSPORTS FASTRTPS_DEFAULT_PROFILES_FILE ROS2CLI_DISABLE_DAEMON
 
 log "robot_id=${RID} SIM_MODE=${SIM_MODE} OPEN_DELIVERY_ROOT=${ROOT}"
 log "FastRTPS profile=${FASTRTPS_DEFAULT_PROFILES_FILE}"
 
 ROS_DISTRO="${ROS_DISTRO:-foxy}"
+: "${ROS_LOCALHOST_ONLY:=1}"
+export ROS_LOCALHOST_ONLY
 if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
   log "ERROR: missing /opt/ros/${ROS_DISTRO}/setup.bash"
   exit 1
@@ -99,7 +103,7 @@ log "simulate: shared Gazebo start_gazebo=${START_GZ} spawn_robot=true pose=(${S
 STORE="${OPEN_DELIVERY_STATUS_DB_PATH:-${ROOT}/backend/data/robot_status_last.json}"
 AUTO_MAPPING=0
 PERSISTED_MAP=""
-LOCALIZATION_METHOD="slam_toolbox"
+LOCALIZATION_METHOD="gazebo_ground_truth"
 if [[ -f "${STORE}" ]]; then
   # Prints pipe-separated: <auto_mapping 0|1>|<current_map>|<localization_method>
   _persist="$(python3 -c "
@@ -111,12 +115,12 @@ try:
     e = d.get(rid) or {}
     s = str(e.get('task_status') or '').strip().lower()
     cm = str(e.get('current_map') or '').strip()
-    lm = str(e.get('localization_method') or 'slam_toolbox').strip().lower()
+    lm = str(e.get('localization_method') or 'gazebo_ground_truth').strip().lower()
     if lm not in ('slam_toolbox', 'gazebo_ground_truth', 'amcl'):
-        lm = 'slam_toolbox'
+        lm = 'gazebo_ground_truth'
     print(('1' if s == 'mapping' else '0') + '|' + cm + '|' + lm)
 except Exception:
-    print('0||slam_toolbox')
+    print('0||gazebo_ground_truth')
 " "${RID}" "${STORE}")"
   IFS='|' read -r AUTO_MAPPING PERSISTED_MAP LOCALIZATION_METHOD <<< "${_persist}"
 fi
@@ -228,7 +232,15 @@ sleep "${SIM_WAIT}"
 
 entity_ready=0
 for _ in $(seq 1 "${SIM_ENTITY_WAIT}"); do
-  if ros2 node list 2>/dev/null | grep -q "^/${RID}/diff_drive_controller$"; then
+  # Gazebo Classic may host every plugin under the /gazebo graph node even
+  # though plugin loggers use /<robot>/diff_drive_controller. In that case
+  # waiting for a standalone node can never succeed. The plugin's live output
+  # topics are the portable readiness contract across Gazebo/ROS patch levels.
+  _sim_topics="$(ros2 topic list 2>/dev/null || true)"
+  if ros2 node list 2>/dev/null | grep -q "^/${RID}/diff_drive_controller$" || {
+    grep -qx "/${RID}/odom" <<< "${_sim_topics}" &&
+    grep -qx "/${RID}/scan_2d" <<< "${_sim_topics}"
+  }; then
     entity_ready=1
     break
   fi
@@ -245,19 +257,22 @@ HB="/${RID}/heartbeat"
 # heartbeat_node is still a LifecycleNode; wait briefly for service visibility then best-effort activate.
 hb_ready=0
 for _ in $(seq 1 "${HB_WAIT}"); do
-  if ros2 lifecycle get "${HB}" >/dev/null 2>&1; then
+  if timeout --signal=TERM --kill-after=1s 4s \
+      ros2 lifecycle get "${HB}" >/dev/null 2>&1; then
     hb_ready=1
     break
   fi
   sleep 1
 done
 if [[ "${hb_ready}" == "1" ]]; then
-  if ros2 lifecycle set "${HB}" configure >/dev/null 2>&1; then
+  if timeout --signal=TERM --kill-after=1s 6s \
+      ros2 lifecycle set "${HB}" configure >/dev/null 2>&1; then
     log "heartbeat configure requested: ${HB}"
   else
     log "heartbeat configure skipped/failed (may already be configured): ${HB}"
   fi
-  if ros2 lifecycle set "${HB}" activate >/dev/null 2>&1; then
+  if timeout --signal=TERM --kill-after=1s 6s \
+      ros2 lifecycle set "${HB}" activate >/dev/null 2>&1; then
     log "heartbeat activate requested: ${HB}"
   else
     log "heartbeat activate skipped/failed (may already be active): ${HB}"

@@ -18,7 +18,7 @@ def _slam_params(context, *args, **kwargs):
     ).perform(context)
     localization_method = (
         LaunchConfiguration("localization_method").perform(context).strip().lower()
-        or "slam_toolbox"
+        or "gazebo_ground_truth"
     )
     initial = LaunchConfiguration("initial_slam_mode").perform(context).strip() or "inactive"
     map_file = LaunchConfiguration("map_file").perform(context).strip()
@@ -177,7 +177,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "localization_method",
-                default_value="slam_toolbox",
+                default_value="gazebo_ground_truth",
                 description="slam_toolbox|gazebo_ground_truth|amcl (legacy maps)",
             ),
             DeclareLaunchArgument(

@@ -37,6 +37,53 @@ class FakeRosNodeManager:
 
 
 class MultiRobotSimulationLifecycleTest(unittest.TestCase):
+    def test_direct_backend_start_defaults_to_compatible_fastdds(self):
+        env = {}
+
+        server._configure_ros_transport(PROJECT_ROOT, env)
+
+        self.assertEqual(env["FASTDDS_BUILTIN_TRANSPORTS"], "DEFAULT")
+        self.assertEqual(env["ROS_LOCALHOST_ONLY"], "1")
+        self.assertEqual(
+            env["FASTRTPS_DEFAULT_PROFILES_FILE"],
+            str(PROJECT_ROOT / "backend" / "fastdds_udp_only.xml"),
+        )
+
+    def test_backend_preserves_explicit_remote_ros_communication(self):
+        env = {"ROS_LOCALHOST_ONLY": "0"}
+        server._configure_ros_transport(PROJECT_ROOT, env)
+        self.assertEqual(env["ROS_LOCALHOST_ONLY"], "0")
+
+    def test_backend_normalizes_legacy_repo_udp_only_environment(self):
+        profile = str(PROJECT_ROOT / "backend" / "fastdds_udp_only.xml")
+        env = {
+            "FASTDDS_BUILTIN_TRANSPORTS": "UDPv4",
+            "FASTRTPS_DEFAULT_PROFILES_FILE": profile,
+        }
+
+        server._configure_ros_transport(PROJECT_ROOT, env)
+
+        self.assertEqual(env["FASTDDS_BUILTIN_TRANSPORTS"], "DEFAULT")
+
+    def test_ros_shell_prefixes_export_matching_fastdds_profile(self):
+        expected_profile = str(PROJECT_ROOT / "backend" / "fastdds_udp_only.xml")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FASTDDS_BUILTIN_TRANSPORTS": "DEFAULT",
+                "FASTRTPS_DEFAULT_PROFILES_FILE": expected_profile,
+            },
+        ):
+            manager_prefix = server.RosNodeManager(PROJECT_ROOT)._bash_prefix()
+            lifecycle_prefix = self._orchestrator()._bash_prefix()
+
+        for prefix in (manager_prefix, lifecycle_prefix):
+            self.assertIn("export FASTDDS_BUILTIN_TRANSPORTS=DEFAULT;", prefix)
+            self.assertIn(
+                f"export FASTRTPS_DEFAULT_PROFILES_FILE={expected_profile};",
+                prefix,
+            )
+
     def test_gazebo_fallback_preserves_topdown_heading_at_gimbal_lock(self):
         roll, pitch, yaw = server._rpy_from_quaternion(-1.0, 1.0, 1.0, 1.0)
 
@@ -209,6 +256,46 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
             ["gz", "model", "-m", "ground_plane", "-p"],
         )
 
+    def test_gazebo_ros_api_probe_requires_a_completed_service_call(self):
+        orchestrator = self._orchestrator()
+        completed = subprocess.CompletedProcess(
+            ["ros2"], 0, stdout="success=True\n", stderr=""
+        )
+        with mock.patch.object(orchestrator, "_run_shell", return_value=completed) as run:
+            self.assertTrue(orchestrator._gazebo_ros_api_ready())
+        self.assertIn("/get_model_list", run.call_args.args[0])
+
+        timed_out = subprocess.CompletedProcess(
+            ["ros2"], 124, stdout="", stderr=""
+        )
+        with mock.patch.object(orchestrator, "_run_shell", return_value=timed_out):
+            self.assertFalse(orchestrator._gazebo_ros_api_ready())
+
+    def test_gazebo_data_plane_probe_requires_a_live_sample(self):
+        orchestrator = self._orchestrator()
+        sample = subprocess.CompletedProcess(
+            ["ros2"], 124, stdout="name: [ground_plane]\n", stderr=""
+        )
+        with mock.patch.object(orchestrator, "_run_shell", return_value=sample) as run:
+            self.assertTrue(orchestrator._gazebo_data_plane_ready())
+        self.assertIn("/gazebo/model_states", run.call_args.args[0])
+
+        empty = subprocess.CompletedProcess(["ros2"], 124, stdout="", stderr="")
+        with mock.patch.object(orchestrator, "_run_shell", return_value=empty):
+            self.assertFalse(orchestrator._gazebo_data_plane_ready())
+
+    def test_fastdds_cleanup_uses_official_zombie_cleaner(self):
+        orchestrator = self._orchestrator()
+        with mock.patch.object(Path, "is_file", return_value=True), mock.patch.object(
+            robot_lifecycle.subprocess, "run"
+        ) as run:
+            orchestrator._clean_fastdds_shm_zombies()
+
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/opt/ros/foxy/bin/fastdds", "shm", "clean"],
+        )
+
     def test_shared_world_is_started_once_for_concurrent_requests(self):
         orchestrator = self._orchestrator()
         state_lock = threading.Lock()
@@ -229,7 +316,10 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", side_effect=ready))
             stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", side_effect=ready))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_ros_api_ready", side_effect=ready))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_data_plane_ready", side_effect=ready))
             stack.enter_context(mock.patch.object(orchestrator, "_terminate_stale_world_processes"))
+            stack.enter_context(mock.patch.object(orchestrator, "_clean_fastdds_shm_zombies"))
             stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed", side_effect=start_if_needed))
             stack.enter_context(mock.patch.object(orchestrator, "_wait_for_gazebo"))
             threads = [
@@ -253,12 +343,16 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
             terminate = stack.enter_context(
                 mock.patch.object(orchestrator, "_terminate_stale_world_processes")
             )
+            clean = stack.enter_context(
+                mock.patch.object(orchestrator, "_clean_fastdds_shm_zombies")
+            )
             start = stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed"))
             stack.enter_context(mock.patch.object(orchestrator, "_wait_for_gazebo"))
 
             orchestrator._ensure_simulation_world()
 
         terminate.assert_called_once_with()
+        clean.assert_called_once_with()
         self.assertTrue(start.call_args.kwargs["autostart"])
         self.assertTrue(start.call_args.kwargs["force"])
 

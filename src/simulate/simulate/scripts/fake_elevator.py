@@ -578,10 +578,10 @@ class FakeElevator(Node):
             self._finish(generation, ElevatorStatus.STATUS_FAILED, "relocalize service unavailable")
             return
         request = Relocalize.Request()
-        request.mode = (
-            Relocalize.Request.MODE_POSE_FIRST
-            if info.use_pose_first else Relocalize.Request.MODE_HISTORY
-        )
+        # The elevator has already selected and loaded target_floor.  A ride
+        # must only refine the pose on that map; cross-map history search is a
+        # startup-online operation and may otherwise revert the floor here.
+        request.mode = Relocalize.Request.MODE_POSE_FIRST
         request.pose = info.relocalization_pose
         request.pose.header.frame_id = self._map_frame
         self._relocalize.call_async(request).add_done_callback(
@@ -613,7 +613,7 @@ class FakeElevator(Node):
                 return
             message = f"map switched and relocalized score={score:.3f}"
             if self._post_relocalize_settle <= 0.0:
-                self._finish(generation, ElevatorStatus.STATUS_FINISHED, message)
+                self._finish_relocalized(generation, message)
                 return
             self._message = (
                 f"{message}; waiting {self._post_relocalize_settle:.1f}s "
@@ -628,7 +628,19 @@ class FakeElevator(Node):
 
     def _finish_relocalized(self, generation, message):
         with self._lock:
+            if generation != self._generation or not self._info:
+                return
             self._cancel_timer()
+            target = str(self._info.target_floor).strip()
+            observed = self._observed_floor
+        if observed != target:
+            self._finish(
+                generation,
+                ElevatorStatus.STATUS_FAILED,
+                f"target floor lost after model move: expected {target}, "
+                f"got {observed or 'empty'}",
+            )
+            return
         self._finish(generation, ElevatorStatus.STATUS_FINISHED, message)
 
     @staticmethod

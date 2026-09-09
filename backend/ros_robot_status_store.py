@@ -19,11 +19,12 @@ _lock = threading.Lock()
 _cache: Dict[str, Dict[str, Any]] = {}
 _loaded = False
 _LOCALIZATION_METHODS = {"slam_toolbox", "gazebo_ground_truth", "amcl"}
+_DEFAULT_LOCALIZATION_METHOD = "gazebo_ground_truth"
 
 
 def _normalize_localization_method(value: Any) -> str:
     method = str(value or "").strip().lower()
-    return method if method in _LOCALIZATION_METHODS else "slam_toolbox"
+    return method if method in _LOCALIZATION_METHODS else _DEFAULT_LOCALIZATION_METHOD
 
 
 

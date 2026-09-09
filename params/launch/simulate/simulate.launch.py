@@ -1,7 +1,10 @@
 """Gazebo 无头仿真（installed to bringup_launch/simulate/simulate.launch.py；源码镜像见 src/simulate/simulate/launch/simulate.launch.py）。"""
 
+import atexit
 import os
+import re
 import subprocess
+import tempfile
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -54,6 +57,29 @@ def _run_xacro_robot_description(namespace: str, collision_bit: int) -> str:
         stderr=subprocess.STDOUT,
     )
     return out.decode("utf-8")
+
+
+def _write_robot_description_file(robot_desc: str, entity_name: str) -> str:
+    """Give Gazebo a per-launch URDF file instead of relying on ROS discovery."""
+    safe_entity = re.sub(r"[^A-Za-z0-9_.-]+", "_", entity_name) or "robot"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f"open_delivery_{safe_entity}_",
+        suffix=".urdf",
+        delete=False,
+    ) as urdf_file:
+        urdf_file.write(robot_desc)
+        path = urdf_file.name
+
+    def remove_file():
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    atexit.register(remove_file)
+    return path
 
 
 def _spawn_pose_from_slot(slot_text: str):
@@ -223,6 +249,7 @@ def launch_setup(context, *_args, **_kwargs):
             robot_desc = _run_xacro_robot_description(ns, collision_bit)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
+        robot_desc_file = _write_robot_description_file(robot_desc, entity_name)
 
         sim_ns = f"{ns}/simulate" if ns else "simulate"
         js_topic = f"/{ns}/joint_states" if ns else "/joint_states"
@@ -245,8 +272,8 @@ def launch_setup(context, *_args, **_kwargs):
             arguments=[
                 "-entity",
                 entity_name,
-                "-topic",
-                "robot_description",
+                "-file",
+                robot_desc_file,
                 "-timeout",
                 "180",
                 "-spawn_service_timeout",

@@ -31,7 +31,7 @@ from ros_sensor_store import (
     get_topdown_jpeg,
     get_topdown_image_status,
 )
-from robot_lifecycle import RobotLifecycleOrchestrator
+from robot_lifecycle import RobotLifecycleOrchestrator, run_shell_process_group
 import map_assets
 import bag_replay
 import ros_task_store
@@ -45,6 +45,31 @@ MAP_DIR = ROOT_DIR / "map"
 LOG_BAG_DIR = ROOT_DIR / "log_bag"
 MAX_LOG_BAG_REPLAY_SELECTION = 24
 _LOG_BAG_DELETE_LOCK = threading.Lock()
+
+
+def _configure_ros_transport(root_dir: Path, env=None):
+    """Make direct backend starts use the same compatible Fast DDS profile."""
+    target = os.environ if env is None else env
+    target.setdefault("ROS_LOCALHOST_ONLY", "1")
+    repo_profile = str(Path(root_dir) / "backend" / "fastdds_udp_only.xml")
+    target.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE", repo_profile)
+    # A long-running start_web_stack.sh may still carry the repository's old
+    # UDPv4 value after a backend-only supervisor restart. Normalize that known
+    # legacy combination while preserving unrelated user-supplied profiles.
+    if (
+        target.get("FASTRTPS_DEFAULT_PROFILES_FILE") == repo_profile
+        and str(target.get("FASTDDS_BUILTIN_TRANSPORTS") or "").upper() == "UDPV4"
+    ):
+        target["FASTDDS_BUILTIN_TRANSPORTS"] = "DEFAULT"
+    else:
+        target.setdefault("FASTDDS_BUILTIN_TRANSPORTS", "DEFAULT")
+    return target
+
+
+# ``start_web_stack.sh`` exports these values, but developers also commonly run
+# ``python3 backend/server.py`` directly. Configure them before ros_tf_bridge
+# imports rclpy so the bridge, Gazebo world and robot stacks stay consistent.
+_configure_ros_transport(ROOT_DIR)
 
 
 def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[float, float, float]:
@@ -366,9 +391,15 @@ class RosNodeManager:
         ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
         install_setup = self._root_dir / "install" / "setup.bash"
         install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
+        fastdds_transport = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS") or "DEFAULT"
+        fastdds_profile = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE") or str(
+            self._root_dir / "backend" / "fastdds_udp_only.xml"
+        )
         return (
             # Don't use `set -u` because ROS setup.bash may reference
             # optional env vars (e.g. AMENT_TRACE_SETUP_FILES) that aren't set.
+            f"export FASTDDS_BUILTIN_TRANSPORTS={shlex.quote(fastdds_transport)}; "
+            f"export FASTRTPS_DEFAULT_PROFILES_FILE={shlex.quote(fastdds_profile)}; "
             f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
             f'cd "{self._root_dir}" && {install_src}; '
         )
@@ -434,10 +465,8 @@ class RosNodeManager:
         if not cmd:
             raise ValueError("empty command")
         full_cmd = self._bash_prefix() + cmd
-        return subprocess.run(
-            ["bash", "-lc", full_cmd],
-            capture_output=True,
-            text=True,
+        return run_shell_process_group(
+            full_cmd,
             timeout=15.0,
             env=os.environ.copy(),
         )

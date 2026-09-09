@@ -16,11 +16,19 @@ The node follows `/<robot>/robot_status.current_map` and reloads the matching
 `<map-root>/<map>/<map>.yaml` transform. This keeps its Gazebo truth aligned
 with dynamic floor switches without restarting the localization process.
 
+If Gazebo's differential-drive plugin does not provide a fresh
+`odom -> base_footprint` transform, this simulation-only backend takes over the
+robot odometry topic and publishes both odometry and TF from `model_states`.
+The fallback is activated only after the external odometry has been missing or
+stale for `external_odom_timeout` seconds.
+
 Optional node parameters control the convergence rates. Existing launch files
 need no changes:
 
 - `linear_correction_speed` (default `0.10` m/s)
 - `angular_correction_speed` (default `0.0872665` rad/s, approximately 5 deg/s)
+- `external_odom_timeout` (default `1.0` s)
+- `odom_topic` (default `/<robot_model>/odom`)
 
 Select it with `localization_method:=gazebo_ground_truth`. It is intended only
 for simulation and must never be used as a production localization source.

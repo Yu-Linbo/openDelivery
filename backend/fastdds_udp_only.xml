@@ -1,17 +1,14 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
-  <transport_descriptors>
-    <transport_descriptor>
-      <transport_id>open_delivery_udp</transport_id>
-      <type>UDPv4</type>
-    </transport_descriptor>
-  </transport_descriptors>
-  <participant profile_name="open_delivery_udp_only" is_default_profile="true">
+  <!--
+    Keep the historical filename because deployed launch environments reference
+    it. Foxy's FastRTPS 2.1 can discover topics with a custom UDP-only transport
+    while service request/reply calls time out on the same host. Built-in
+    transports preserve working ROS 2 services and still include UDP fallback.
+  -->
+  <participant profile_name="open_delivery_compatible_transport" is_default_profile="true">
     <rtps>
-      <userTransports>
-        <transport_id>open_delivery_udp</transport_id>
-      </userTransports>
-      <useBuiltinTransports>false</useBuiltinTransports>
+      <useBuiltinTransports>true</useBuiltinTransports>
     </rtps>
   </participant>
 </profiles>

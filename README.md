@@ -101,7 +101,8 @@ Nav2 使用系统 ROS 安装提供的包，不需要把 Navigation2 源码复制
 ## 定位后端配置
 
 `backend/data/robot_status_last.json` 的每个机器人对象可配置
-`localization_method`，仿真上线时由 `sim_bringup.sh` 读取：
+`localization_method`，仿真上线时由 `sim_bringup.sh` 读取。未配置或配置值无效时，
+默认使用 `gazebo_ground_truth`（虚假定位）：
 
 - `slam_toolbox`：真实激光/里程计定位；要求同名地图目录同时存在
   `<map>.yaml`、`<map>.pgm`、`<map>.posegraph`、`<map>.data`。
@@ -140,6 +141,11 @@ cd /home/ubuntu/project_openclaw/openDelivery
 ```
 
 默认前端 `http://localhost:8000`，后端 `http://localhost:8001`。前端与 API 分别见 `web/`、`backend/`；接口契约见 **`backend/API.md`**。
+
+本机仿真默认设置 `ROS_LOCALHOST_ONLY=1`，避免 VPN、代理虚拟网卡影响 ROS 服务发现。
+连接跨机 ROS 节点时，启动前显式设置 `ROS_LOCALHOST_ONLY=0`；所有相关进程应使用一致的设置。
+此设置不影响通过局域网或 Tailscale 访问 Web 控制台。若终端已 source ROS 并带入了
+`ROS_LOCALHOST_ONLY=0`，本机仿真请显式运行 `ROS_LOCALHOST_ONLY=1 ./start_web_stack.sh`。
 
 ### 监控页当前能力
 

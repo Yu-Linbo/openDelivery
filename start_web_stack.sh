@@ -33,6 +33,11 @@ source_setup_safely() {
 }
 
 ROS_DISTRO_NAME="${ROS_DISTRO:-foxy}"
+# Set this before ROS setup, which otherwise supplies a default of 0. Local
+# simulation must not depend on discovery through VPN/proxy network adapters.
+# Set ROS_LOCALHOST_ONLY=0 explicitly when connecting physical/remote robots.
+: "${ROS_LOCALHOST_ONLY:=1}"
+export ROS_LOCALHOST_ONLY
 source_setup_safely "/opt/ros/${ROS_DISTRO_NAME}/setup.bash"
 
 CUSTOM_MSG_SOURCE="${ROOT_DIR}/src/common/custom_msgs_srvs"
@@ -65,6 +70,7 @@ if [ "${NEEDS_INTERFACE_BUILD}" -eq 1 ]; then
     colcon build \
       --packages-above-and-dependencies custom_msgs_srvs \
       --symlink-install \
+      --cmake-args -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       --event-handlers console_direct+
   )
   mkdir -p "${ROOT_DIR}/build"
@@ -162,14 +168,21 @@ while [[ "${BACKEND_PORT}" -eq "${FRONTEND_PORT}" ]] || port_is_busy "${BACKEND_
   BACKEND_PORT=$((BACKEND_PORT + 1))
 done
 
-# Avoid FastRTPS shared-memory errors after hard kills (stale /dev/shm segments).
-# UDP-only transport is more reliable for the web backend joining an existing ROS graph.
-: "${FASTDDS_BUILTIN_TRANSPORTS:=UDPv4}"
+# Keep every process on FastRTPS built-in transports. Foxy's custom UDP-only
+# profile can discover topics while all ROS service calls still time out.
+: "${FASTDDS_BUILTIN_TRANSPORTS:=DEFAULT}"
 export FASTDDS_BUILTIN_TRANSPORTS
-# ROS 2 Foxy uses FastRTPS versions that may ignore FASTDDS_BUILTIN_TRANSPORTS.
-# An XML participant profile is the compatible way to disable shared memory.
+# ROS 2 Foxy may ignore FASTDDS_BUILTIN_TRANSPORTS, so retain the compatible
+# XML participant profile as the authoritative setting.
 : "${FASTRTPS_DEFAULT_PROFILES_FILE:=${ROOT_DIR}/backend/fastdds_udp_only.xml}"
 export FASTRTPS_DEFAULT_PROFILES_FILE
+
+# Fast DDS built-in transports are required for reliable Foxy service calls,
+# but hard-killed participants can leave SHM port locks behind.  The official
+# cleaner removes zombie segments only and preserves active participants.
+if command -v fastdds >/dev/null 2>&1; then
+  fastdds shm clean >/dev/null 2>&1 || true
+fi
 
 # 默认 ROBOT_POSE_MODE=ros2_tf（真 TF）；无 ROS 时位姿列表为空。仅演示轨迹请: export ROBOT_POSE_MODE=mock
 : "${ROBOT_POSE_MODE:=ros2_tf}"

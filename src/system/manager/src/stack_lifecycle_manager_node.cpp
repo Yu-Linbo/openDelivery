@@ -119,7 +119,7 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
   declare_parameter<std::string>("localization_params_file", "");
   declare_parameter<std::string>("slam_toolbox_mapper_params_file", "");
   declare_parameter<std::string>("slam_toolbox_localization_params_file", "");
-  declare_parameter<std::string>("localization_method", "slam_toolbox");
+  declare_parameter<std::string>("localization_method", "gazebo_ground_truth");
   declare_parameter<std::string>("pose_graph_file", "");
   declare_parameter<std::string>("map_file", "");
   declare_parameter<std::string>("gazebo_world_file", "");
@@ -163,9 +163,9 @@ StackLifecycleManagerNode::StackLifecycleManagerNode()
     localization_method_ != "amcl")
   {
     RCLCPP_WARN(
-      get_logger(), "unknown localization_method=%s; using slam_toolbox",
+      get_logger(), "unknown localization_method=%s; using gazebo_ground_truth",
       localization_method_.c_str());
-    localization_method_ = "slam_toolbox";
+    localization_method_ = "gazebo_ground_truth";
   }
   if (odom_frame_.empty()) {
     odom_frame_ = rid + "/odom";
@@ -333,7 +333,10 @@ std::string StackLifecycleManagerNode::wait_for_stable_lifecycle_state(
 bool StackLifecycleManagerNode::ensure_lifecycle_active(
   const std::string & node_fqn,
   std::string * err) {
-  std::string state = wait_for_stable_lifecycle_state(node_fqn, std::chrono::seconds(5));
+  // Fresh lifecycle children can take several seconds to join the ROS graph on
+  // slower simulation hosts. Give them enough time before deciding the service
+  // is missing; the transition calls themselves still retain bounded timeouts.
+  std::string state = wait_for_stable_lifecycle_state(node_fqn, std::chrono::seconds(15));
   if (state == "unconfigured") {
     if (!call_lifecycle_transition(node_fqn, "configure", err)) {
       return false;
@@ -516,15 +519,9 @@ bool StackLifecycleManagerNode::start_map_server(std::string * err) {
 
   const std::string fqn = resolve_lifecycle_node_fqn("map_server");
   std::string local_err;
-  if (!call_lifecycle_transition(fqn, "configure", &local_err)) {
+  if (!ensure_lifecycle_active(fqn, &local_err)) {
     if (err) {
-      *err = "map_server configure failed: " + local_err;
-    }
-    return false;
-  }
-  if (!call_lifecycle_transition(fqn, "activate", &local_err)) {
-    if (err) {
-      *err = "map_server activate failed: " + local_err;
+      *err = "map_server activation failed: " + local_err;
     }
     return false;
   }

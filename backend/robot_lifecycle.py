@@ -35,9 +35,50 @@ LIFECYCLE_STATE_RE = re.compile(r"state:\s*\[\s*(\d+)\s*\]\s*([^\r\n]+)")
 LOCALIZATION_METHODS = {"slam_toolbox", "gazebo_ground_truth", "amcl"}
 
 
+def run_shell_process_group(
+    full_cmd: str,
+    *,
+    timeout: float,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+):
+    """Run a shell command and never leave ROS CLI descendants after timeout."""
+    proc = subprocess.Popen(
+        ["bash", "-lc", full_cmd],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(
+            proc.args,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        )
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
 def _persisted_localization_method(last: Optional[Dict[str, Any]]) -> str:
     method = str((last or {}).get("localization_method") or "").strip().lower()
-    return method if method in LOCALIZATION_METHODS else "slam_toolbox"
+    return method if method in LOCALIZATION_METHODS else "gazebo_ground_truth"
 
 
 def _persisted_auto_mapping(last: Optional[Dict[str, Any]]) -> bool:
@@ -65,7 +106,13 @@ class RobotLifecycleOrchestrator:
         ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
         install_setup = self._root_dir / "install" / "setup.bash"
         install_src = f'source "{install_setup}"' if install_setup.is_file() else "true"
+        fastdds_transport = os.environ.get("FASTDDS_BUILTIN_TRANSPORTS") or "DEFAULT"
+        fastdds_profile = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE") or str(
+            self._root_dir / "backend" / "fastdds_udp_only.xml"
+        )
         return (
+            f"export FASTDDS_BUILTIN_TRANSPORTS={shlex.quote(fastdds_transport)}; "
+            f"export FASTRTPS_DEFAULT_PROFILES_FILE={shlex.quote(fastdds_profile)}; "
             f'set -eo pipefail; source "/opt/ros/{ros_distro}/setup.bash"; '
             f'cd "{self._root_dir}" && {install_src}; '
         )
@@ -152,10 +199,8 @@ class RobotLifecycleOrchestrator:
 
     def _run_shell(self, cmd: str, timeout: float = 10.0):
         full_cmd = self._bash_prefix() + cmd
-        return subprocess.run(
-            ["bash", "-lc", full_cmd],
-            capture_output=True,
-            text=True,
+        return run_shell_process_group(
+            full_cmd,
             timeout=timeout,
             env=os.environ.copy(),
         )
@@ -192,6 +237,55 @@ class RobotLifecycleOrchestrator:
             return False
         return len(values) == 6
 
+    def _gazebo_ros_api_ready(self) -> bool:
+        """Return whether Gazebo's ROS service server completes a read-only call."""
+        try:
+            proc = self._run_shell(
+                "timeout 5s ros2 service call /get_model_list "
+                "gazebo_msgs/srv/GetModelList '{}'",
+                timeout=7.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    def _gazebo_data_plane_ready(self) -> bool:
+        """Require one live Gazebo ROS sample, not graph visibility alone."""
+        try:
+            proc = self._run_shell(
+                "timeout 4s ros2 topic echo /gazebo/model_states",
+                timeout=6.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        # Topic echo is continuous and normally exits through GNU timeout with
+        # code 124. Any output proves that DDS user data is actually flowing.
+        return bool((proc.stdout or "").strip())
+
+    def _clean_fastdds_shm_zombies(self) -> None:
+        """Best-effort cleanup of abandoned Fast DDS SHM segments.
+
+        The Fast DDS utility checks segment ownership and removes zombie files
+        only; active participants are left untouched.  Run it before creating a
+        fresh shared Gazebo world so stale port locks cannot produce a graph
+        whose endpoints are visible but carry no data.
+        """
+        ros_distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
+        executable = Path("/opt/ros") / ros_distro / "bin" / "fastdds"
+        if not executable.is_file():
+            return
+        try:
+            subprocess.run(
+                [str(executable), "shm", "clean"],
+                cwd=str(self._root_dir),
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                env=os.environ.copy(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def _wait_for_gazebo(self, timeout_sec: float = 60.0) -> None:
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
@@ -201,9 +295,10 @@ class RobotLifecycleOrchestrator:
                 proc = None
             services = set((proc.stdout or "").split()) if proc and proc.returncode == 0 else set()
             if "/spawn_entity" in services and "/delete_entity" in services:
-                return
+                if self._gazebo_ros_api_ready() and self._gazebo_data_plane_ready():
+                    return
             time.sleep(0.5)
-        raise RuntimeError("Gazebo infrastructure did not expose spawn/delete services")
+        raise RuntimeError("Gazebo infrastructure did not expose a responsive ROS service API")
 
     def _ensure_simulation_world(self) -> None:
         # ThreadingHTTPServer may receive two sim-up requests concurrently. Keep the
@@ -214,9 +309,18 @@ class RobotLifecycleOrchestrator:
                     "robot_name:=simulation_world namespace:=simulation_world "
                     "start_gazebo:=true spawn_robot:=false use_sim_time:=true"
                 )
-            world_running = self._gazebo_services_ready() and self._gazebo_transport_ready()
+            # DDS graphs can retain a visible /spawn_entity endpoint even when
+            # Gazebo's ROS executor no longer answers requests. Reusing that
+            # half-alive world makes spawn_entity.py wait until bringup aborts.
+            world_running = (
+                self._gazebo_services_ready()
+                and self._gazebo_transport_ready()
+                and self._gazebo_ros_api_ready()
+                and self._gazebo_data_plane_ready()
+            )
             if not world_running:
                 self._terminate_stale_world_processes()
+                self._clean_fastdds_shm_zombies()
             self._start_if_needed(
                 "simulation_world", world_cmd,
                     stop_cmd=(
@@ -241,6 +345,7 @@ class RobotLifecycleOrchestrator:
                 pass
             self._terminate_stale_world_processes()
             time.sleep(1.0)
+            self._clean_fastdds_shm_zombies()
             world_cmd = (
                 "ros2 launch simulate simulate.launch.py "
                 "robot_name:=simulation_world namespace:=simulation_world "
@@ -321,10 +426,15 @@ class RobotLifecycleOrchestrator:
                 arg == namespace_token or arg.startswith(namespace_token + "/")
                 for arg in argv
             )
+            is_ros_cli = any(Path(arg).name == "ros2" for arg in argv[:2])
+            stale_robot_cli = is_ros_cli and (
+                f"/{rid}/" in joined or f"name: {rid}" in joined
+            )
             if (
                 namespaced
                 or robot_arg in argv
                 or bringup_pattern.search(joined)
+                or stale_robot_cli
             ):
                 targets.append(int(entry.name))
         for sig in (signal.SIGTERM, signal.SIGKILL):

@@ -549,7 +549,8 @@ class OpenDeliveryTfBridgeNode(Node):
                 task_status = _task_status_label(getattr(msg, "task_status", 0))
                 control_status = str(getattr(msg, "control_status", "AUTO") or "AUTO").upper()
                 localization_method = str(
-                    getattr(msg, "localization_method", "slam_toolbox") or "slam_toolbox"
+                    getattr(msg, "localization_method", "gazebo_ground_truth")
+                    or "gazebo_ground_truth"
                 ).strip().lower()
                 is_simulation = bool(getattr(msg, "is_simulation", False))
                 raw_progress = float(getattr(msg, "task_progress", -1.0))
@@ -636,7 +637,7 @@ class OpenDeliveryTfBridgeNode(Node):
                     "task_status": str(last.get("task_status") or ""),
                     "control_status": str(last.get("control_status") or "AUTO"),
                     "localization_method": str(
-                        last.get("localization_method") or "slam_toolbox"
+                        last.get("localization_method") or "gazebo_ground_truth"
                     ),
                     "is_simulation": bool(last.get("is_simulation", False)),
                     "task_progress": float(last.get("task_progress", -1.0)),
@@ -902,7 +903,7 @@ class OpenDeliveryTfBridgeNode(Node):
         )
         st.control_status = str(payload.get("control_status") or "AUTO").upper()
         st.localization_method = str(
-            payload.get("localization_method") or "slam_toolbox"
+            payload.get("localization_method") or "gazebo_ground_truth"
         ).strip().lower()
         st.is_simulation = bool(payload.get("is_simulation", False))
         st.task_progress = float(payload.get("task_progress", -1.0))

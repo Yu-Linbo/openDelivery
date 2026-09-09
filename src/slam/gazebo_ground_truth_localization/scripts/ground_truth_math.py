@@ -44,6 +44,13 @@ def yaw_quaternion(yaw):
     return (0.0, 0.0, math.sin(0.5 * yaw), math.cos(0.5 * yaw))
 
 
+def world_velocity_to_body(vx, vy, yaw):
+    """Rotate a planar velocity from the world axes into the robot axes."""
+    c = math.cos(yaw)
+    s = math.sin(yaw)
+    return (c * vx + s * vy, -s * vx + c * vy)
+
+
 def pose_error(true_pose, requested_pose):
     """Return the map-coordinate bias that makes ``true_pose`` look requested."""
     return (

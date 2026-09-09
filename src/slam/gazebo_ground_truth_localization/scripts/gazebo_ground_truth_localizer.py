@@ -8,6 +8,7 @@ import rclpy
 from custom_msgs_srvs.msg import RobotStatus
 from gazebo_msgs.msg import ModelStates
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
@@ -21,6 +22,7 @@ from ground_truth_math import (
     map_to_world_from_files,
     map_yaml_for_name,
     pose_error,
+    world_velocity_to_body,
     yaw_from_quaternion,
     yaw_quaternion,
 )
@@ -56,6 +58,9 @@ class GazeboGroundTruthLocalizer(Node):
                 ).value
             ),
         )
+        self.external_odom_timeout = max(
+            0.1, float(self.declare_parameter("external_odom_timeout", 1.0).value)
+        )
         if not self.robot_model:
             namespace = self.get_namespace().strip("/")
             self.robot_model = namespace.split("/")[0] if namespace else ""
@@ -63,6 +68,10 @@ class GazeboGroundTruthLocalizer(Node):
             raise RuntimeError("robot_model parameter is required")
         if not self.map_file or not self.world_file:
             raise RuntimeError("map_file and world_file parameters are required")
+        configured_odom_topic = str(
+            self.declare_parameter("odom_topic", "").value
+        ).strip()
+        self.odom_topic = configured_odom_topic or "/%s/odom" % self.robot_model
 
         self._initial_map_file = self.map_file
         self._active_map_name = Path(self.map_file).stem
@@ -74,6 +83,9 @@ class GazeboGroundTruthLocalizer(Node):
         self._last_initial_wall_time = None
         self._correction_error = (0.0, 0.0, 0.0)
         self._last_correction_time_ns = None
+        self._odom_missing_since = None
+        self._owns_fallback_odom = False
+        self._fallback_world_to_odom = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -81,6 +93,7 @@ class GazeboGroundTruthLocalizer(Node):
         self.pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, self.pose_topic, 10
         )
+        self.odom_publisher = self.create_publisher(Odometry, self.odom_topic, 10)
         self.create_subscription(ModelStates, "model_states", self._on_model_states, 10)
         self.create_subscription(
             PoseWithCovarianceStamped, "initialpose", self._on_initial_pose, 10
@@ -103,6 +116,59 @@ class GazeboGroundTruthLocalizer(Node):
                 self.angular_correction_speed,
             )
         )
+
+    @staticmethod
+    def _stamp_nanoseconds(stamp):
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _activate_fallback_odom(self, world_to_base, seed_odom_to_base=None):
+        if seed_odom_to_base is None:
+            seed_odom_to_base = (0.0, 0.0, 0.0)
+        self._fallback_world_to_odom = compose(
+            world_to_base, inverse(seed_odom_to_base)
+        )
+        self._owns_fallback_odom = True
+        self.get_logger().warning(
+            "external odom is missing or stale; publishing Gazebo truth odom on %s"
+            % self.odom_topic
+        )
+
+    def _publish_fallback_odom(self, message, index, world_to_base, stamp):
+        odom_to_base = compose(inverse(self._fallback_world_to_odom), world_to_base)
+        qx, qy, qz, qw = yaw_quaternion(odom_to_base[2])
+
+        tf_message = TransformStamped()
+        tf_message.header.stamp = stamp
+        tf_message.header.frame_id = self.odom_frame
+        tf_message.child_frame_id = self.base_frame
+        tf_message.transform.translation.x = odom_to_base[0]
+        tf_message.transform.translation.y = odom_to_base[1]
+        tf_message.transform.rotation.x = qx
+        tf_message.transform.rotation.y = qy
+        tf_message.transform.rotation.z = qz
+        tf_message.transform.rotation.w = qw
+        self.tf_broadcaster.sendTransform(tf_message)
+
+        odom_message = Odometry()
+        odom_message.header.stamp = stamp
+        odom_message.header.frame_id = self.odom_frame
+        odom_message.child_frame_id = self.base_frame
+        odom_message.pose.pose.position.x = odom_to_base[0]
+        odom_message.pose.pose.position.y = odom_to_base[1]
+        odom_message.pose.pose.orientation.x = qx
+        odom_message.pose.pose.orientation.y = qy
+        odom_message.pose.pose.orientation.z = qz
+        odom_message.pose.pose.orientation.w = qw
+        if index < len(message.twist):
+            twist = message.twist[index]
+            body_vx, body_vy = world_velocity_to_body(
+                twist.linear.x, twist.linear.y, world_to_base[2]
+            )
+            odom_message.twist.twist.linear.x = body_vx
+            odom_message.twist.twist.linear.y = body_vy
+            odom_message.twist.twist.angular.z = twist.angular.z
+        self.odom_publisher.publish(odom_message)
+        return odom_to_base
 
     @staticmethod
     def _pose2d(pose):
@@ -223,19 +289,51 @@ class GazeboGroundTruthLocalizer(Node):
             self._set_initial_error(true_map_to_base, self._pending_initial)
             self._pending_initial = None
 
-        try:
-            odom_to_base_msg = self.tf_buffer.lookup_transform(
-                self.odom_frame, self.base_frame, Time()
-            )
-        except Exception as exc:
-            self.get_logger().warning(
-                "waiting for odom->base before publishing truth: %s" % exc,
-                throttle_duration_sec=2.0,
-            )
-            return
-
         now = self.get_clock().now()
         now_ns = now.nanoseconds
+        stamp = now.to_msg()
+        if self._owns_fallback_odom:
+            odom_to_base = self._publish_fallback_odom(
+                message, index, world_to_base, stamp
+            )
+        else:
+            odom_to_base_msg = None
+            odom_error = None
+            try:
+                odom_to_base_msg = self.tf_buffer.lookup_transform(
+                    self.odom_frame, self.base_frame, Time()
+                )
+                odom_stamp_ns = self._stamp_nanoseconds(
+                    odom_to_base_msg.header.stamp
+                )
+                age_seconds = (now_ns - odom_stamp_ns) / 1.0e9
+                if odom_stamp_ns <= 0 or age_seconds > self.external_odom_timeout:
+                    odom_error = "latest transform is %.3f seconds old" % age_seconds
+            except Exception as exc:
+                odom_error = str(exc)
+
+            if odom_error is not None:
+                missing_now = time.monotonic()
+                if self._odom_missing_since is None:
+                    self._odom_missing_since = missing_now
+                if missing_now - self._odom_missing_since < self.external_odom_timeout:
+                    self.get_logger().warning(
+                        "waiting for fresh odom->base before publishing truth: %s"
+                        % odom_error,
+                        throttle_duration_sec=2.0,
+                    )
+                    return
+                seed = None
+                if odom_to_base_msg is not None:
+                    seed = self._transform2d(odom_to_base_msg.transform)
+                self._activate_fallback_odom(world_to_base, seed)
+                odom_to_base = self._publish_fallback_odom(
+                    message, index, world_to_base, stamp
+                )
+            else:
+                self._odom_missing_since = None
+                odom_to_base = self._transform2d(odom_to_base_msg.transform)
+
         dt = bounded_time_step(
             self._last_correction_time_ns, now_ns, self._MAX_CORRECTION_DT
         )
@@ -247,9 +345,7 @@ class GazeboGroundTruthLocalizer(Node):
             dt,
         )
         map_to_base = apply_pose_error(true_map_to_base, self._correction_error)
-        odom_to_base = self._transform2d(odom_to_base_msg.transform)
         map_to_odom = compose(map_to_base, inverse(odom_to_base))
-        stamp = now.to_msg()
 
         tf_message = TransformStamped()
         tf_message.header.stamp = stamp

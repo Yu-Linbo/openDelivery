@@ -227,11 +227,13 @@ def test_target_inside_point_requires_exactly_one_match(tmp_path):
         node._target_inside_pose("floor2")
 
 
-def test_ride_relocalization_uses_mode_one_and_previous_floor_pose():
+@pytest.mark.parametrize("legacy_use_pose_first", [False, True])
+def test_ride_relocalization_always_uses_pose_first_and_previous_floor_pose(
+        legacy_use_pose_first):
     node = bare_elevator()
     info = MODULE.ElevatorInfo()
     info.operation = MODULE.ElevatorInfo.OPERATION_RIDE
-    info.use_pose_first = True
+    info.use_pose_first = legacy_use_pose_first
     info.relocalization_pose.pose.pose.position.x = 1.25
     node._info = info
     node._map_frame = "map"
@@ -255,6 +257,7 @@ def test_only_transient_map_or_scan_readiness_errors_are_retried():
 
 def test_successful_relocalization_waits_for_tf_and_costmap_propagation():
     node = bare_elevator()
+    node._observed_floor = "floor2"
     node._post_relocalize_settle = 1.5
     node._status = MODULE.ElevatorStatus.STATUS_RELOCALIZING
     node._publish = lambda: None
@@ -334,6 +337,47 @@ def test_model_moves_after_target_map_loaded_then_relocalizes():
         ("move", pose),
         ("relocalize", (7, 1, "waiting for moved model scan/TF propagation")),
     ]
+
+
+def test_elevator_never_finishes_if_floor_reverted_after_model_move():
+    node = bare_elevator()
+    node._info.target_floor = "floor2"
+    node._observed_floor = "floor1"
+    node._cancel_timer = lambda: None
+    finished = []
+    node._finish = lambda *args: finished.append(args)
+
+    node._finish_relocalized(7, "map switched")
+
+    assert finished == [(
+        7,
+        MODULE.ElevatorStatus.STATUS_FAILED,
+        "target floor lost after model move: expected floor2, got floor1",
+    )]
+
+
+def test_zero_settle_delay_still_checks_target_floor():
+    node = bare_elevator()
+    node._post_relocalize_settle = 0.0
+    node._observed_floor = "floor1"
+    node._cancel_timer = lambda: None
+    finished = []
+    node._finish = lambda *args: finished.append(args)
+
+    node._schedule_relocalized_finish(7, 0.9)
+
+    assert finished[0][1] == MODULE.ElevatorStatus.STATUS_FAILED
+    assert "expected floor2" in finished[0][2]
+
+
+def test_stale_finish_callback_preserves_current_operation_timer():
+    node = bare_elevator()
+    cancelled = []
+    node._cancel_timer = lambda: cancelled.append(True)
+
+    node._finish_relocalized(6, "old operation")
+
+    assert cancelled == []
 
 
 def test_model_move_failure_requests_original_map_reload():

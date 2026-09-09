@@ -14,6 +14,7 @@ from ground_truth_math import (
     map_yaml_for_name,
     normalize_angle,
     pose_error,
+    world_velocity_to_body,
     yaw_from_quaternion,
     yaw_quaternion,
 )
@@ -181,3 +182,9 @@ def test_switching_truth_map_removes_floor_sized_offset(tmp_path):
 def test_yaw_quaternion_round_trip():
     yaw = -2.4
     assert math.isclose(yaw_from_quaternion(*yaw_quaternion(yaw)), yaw, abs_tol=1.0e-12)
+
+
+def test_world_velocity_is_rotated_into_robot_axes():
+    vx, vy = world_velocity_to_body(0.0, 2.0, math.pi / 2.0)
+    assert math.isclose(vx, 2.0, abs_tol=1.0e-12)
+    assert math.isclose(vy, 0.0, abs_tol=1.0e-12)

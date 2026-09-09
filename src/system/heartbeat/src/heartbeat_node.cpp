@@ -135,7 +135,7 @@ HeartbeatNode::HeartbeatNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::string>("robot_status", "initializing");
   declare_parameter<std::string>("task_status", "idle");
   declare_parameter<std::string>("control_status", "AUTO");
-  declare_parameter<std::string>("localization_method", "slam_toolbox");
+  declare_parameter<std::string>("localization_method", "gazebo_ground_truth");
   declare_parameter<bool>("mapping_mode", false);
   declare_parameter<bool>("auto_mapping_status", true);
   declare_parameter<std::string>("sim_mode", "sim");
@@ -224,7 +224,7 @@ std::string HeartbeatNode::normalize_control_status(const std::string & v) {
 
 std::string HeartbeatNode::normalize_localization_method(const std::string & v) {
   const std::string s = to_lower(strip_spaces(v));
-  return localization_method_set().count(s) ? s : "slam_toolbox";
+  return localization_method_set().count(s) ? s : "gazebo_ground_truth";
 }
 
 std::string HeartbeatNode::resolved_robot_status_value() {

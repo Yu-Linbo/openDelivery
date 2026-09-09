@@ -43,7 +43,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "localization_method",
-                default_value="slam_toolbox",
+                default_value="gazebo_ground_truth",
                 description="RobotStatus.localization_method: slam_toolbox|gazebo_ground_truth|amcl.",
             ),
             DeclareLaunchArgument("sim_mode", default_value="sim"),

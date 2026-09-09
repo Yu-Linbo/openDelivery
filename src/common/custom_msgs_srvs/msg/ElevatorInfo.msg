@@ -11,6 +11,7 @@ string target_floor
 
 # Pre-switch map pose used for Relocalize MODE_POSE_FIRST after loading target_floor.
 geometry_msgs/PoseWithCovarianceStamped relocalization_pose
+# Legacy compatibility field. Elevator rides always use MODE_POSE_FIRST.
 bool use_pose_first
 
 # Gazebo destination in the target map/world coordinate convention.

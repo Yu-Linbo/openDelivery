@@ -121,7 +121,14 @@ private:
     const std::string next_map = message->current_map;
     const std::string next_status = message->robot_status;
     if (auto_relocalize_on_startup_ && !auto_relocalize_done_) {
-      if (next_status == "localizing") {
+      if (next_status == "ready") {
+        // Reaching READY completes startup localization.  Do not leave the
+        // startup trigger armed: an elevator map switch intentionally emits
+        // localization_lost later and must not launch an all-map history
+        // search that can switch the robot back to its previous floor.
+        auto_relocalize_pending_ = false;
+        auto_relocalize_done_ = true;
+      } else if (next_status == "localizing") {
         startup_localizing_seen_ = true;
       } else if (next_status == "localization_lost" &&
         (startup_localizing_seen_ || robot_status_.empty()) && !auto_relocalize_pending_)
@@ -510,6 +517,12 @@ private:
 
     if (!best.result.valid) {
       response->message = "scan matching produced no candidate";
+      return;
+    }
+    if (request->mode == custom_msgs_srvs::srv::Relocalize::Request::MODE_POSE_FIRST &&
+      best.map_name != map_name)
+    {
+      response->message = "pose-first relocalization cannot switch maps";
       return;
     }
     if (!publish_localization(map_name, best, response.get())) return;

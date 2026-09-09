@@ -20,6 +20,23 @@ def load_store(db_path: Path):
 
 
 class RobotStatusStoreTest(unittest.TestCase):
+    def test_defaults_missing_or_invalid_localization_to_gazebo_ground_truth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "status.json"
+            db_path.write_text(
+                '{"robot1": {}, "robot2": {"localization_method": "invalid"}}',
+                encoding="utf-8",
+            )
+            store = load_store(db_path)
+            self.assertEqual(
+                store.get_last_status("robot1")["localization_method"],
+                "gazebo_ground_truth",
+            )
+            self.assertEqual(
+                store.get_last_status("robot2")["localization_method"],
+                "gazebo_ground_truth",
+            )
+
     def test_persists_status_atomically_and_reloads_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "nested" / "status.json"
