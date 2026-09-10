@@ -41,6 +41,9 @@ def bare_elevator():
     node._service_wait = 10.0
     node._observed_floor = ""
     node._pending_target_pose = None
+    node._awaiting_model_pose = False
+    node._model_arrived_stamp = None
+    node._localization_method = "amcl"
     return node
 
 
@@ -228,7 +231,7 @@ def test_target_inside_point_requires_exactly_one_match(tmp_path):
 
 
 @pytest.mark.parametrize("legacy_use_pose_first", [False, True])
-def test_ride_relocalization_always_uses_pose_first_and_previous_floor_pose(
+def test_ride_relocalization_uses_target_floor_pose_and_scan_boundary(
         legacy_use_pose_first):
     node = bare_elevator()
     info = MODULE.ElevatorInfo()
@@ -236,6 +239,8 @@ def test_ride_relocalization_always_uses_pose_first_and_previous_floor_pose(
     info.use_pose_first = legacy_use_pose_first
     info.relocalization_pose.pose.pose.position.x = 1.25
     node._info = info
+    node._model_arrived_stamp = info.header.stamp
+    node._model_arrived_stamp.sec = 123
     node._map_frame = "map"
     node._relocalize = RecordingClient()
     node._publish = lambda: None
@@ -245,6 +250,8 @@ def test_ride_relocalization_always_uses_pose_first_and_previous_floor_pose(
     request = node._relocalize.request
     assert request.mode == MODULE.Relocalize.Request.MODE_POSE_FIRST
     assert request.pose.pose.pose.position.x == 1.25
+    assert request.pose.header.stamp.sec == 123
+    assert info.relocalization_pose.header.stamp.sec == 0
 
 
 def test_only_transient_map_or_scan_readiness_errors_are_retried():
@@ -480,3 +487,57 @@ def test_floor_status_wait_times_out_without_loading_map(monkeypatch):
     assert rollbacks == [(
         7, "target floor status not observed: expected floor2, got floor1"
     )]
+
+
+def test_relocalization_waits_until_model_arrives():
+    node = bare_elevator()
+    retries = []
+    node._retry_count = 10
+    node._schedule_relocalize_retry = lambda *args: retries.append(args)
+    node._begin_relocalize(7, 1)
+    assert retries == [(7, 2, "waiting for target model pose")]
+
+
+def test_model_arrival_rejects_old_floor_and_wrong_heading():
+    node = bare_elevator()
+    node._robot = "robot1"
+    node._awaiting_model_pose = True
+    target = MODULE.Pose()
+    target.position.x = 7.675
+    target.position.y = 6.997
+    target.orientation.w = 1.0
+    node._pending_target_pose = target
+    stamp = object()
+    node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: stamp))
+    pose = MODULE.Pose()
+    message = SimpleNamespace(name=["robot1"], pose=[pose])
+    node._on_model_states(message)
+    assert node._model_arrived_stamp is None
+    pose.position = target.position
+    pose.orientation.z = 1.0
+    node._on_model_states(message)
+    assert node._model_arrived_stamp is None
+    pose.orientation = target.orientation
+    node._on_model_states(message)
+    assert node._model_arrived_stamp is stamp
+    assert not node._awaiting_model_pose
+
+
+def test_truth_elevator_uses_exact_target_without_scan_matching():
+    node = bare_elevator()
+    info = MODULE.ElevatorInfo()
+    info.relocalization_pose.pose.pose.position.x = 3.675
+    info.relocalization_pose.pose.pose.position.y = 1.997
+    node._info = info
+    node._localization_method = "gazebo_ground_truth"
+    node._map_frame = "map"
+    node._model_arrived_stamp = info.header.stamp
+    node._publish = lambda: None
+    sent = []
+    finished = []
+    node._initial_pub = SimpleNamespace(publish=sent.append)
+    node._schedule_relocalized_finish = lambda *args: finished.append(args)
+    node._begin_relocalize(7, 1)
+    assert sent[0].pose.pose.position.x == 3.675
+    assert sent[0].pose.pose.position.y == 1.997
+    assert finished == [(7, None)]

@@ -211,7 +211,7 @@ Web 地图选点
   点位缺失或重复时任务会在移动前返回 Failed；显式 `floor_ids` 必须全部非空且与 poses 等长。
 - 乘梯阶段先用 `/gazebo/set_model_state` 把机器人模型移动到目标层梯内点，再把 heartbeat 的
   `current_map` 更新为目标楼层并标记 `localization_lost`，随后调用 `map_server/load_map` 加载地图，
-  最后固定使用上一楼层梯内点作为模式 1 的输入调用 `/<robot>/relocalize`。
+  确认模型到达目标电梯内点后，仿真真值定位直接使用该点发布初始位姿；其他定位后端等待移动后的雷达帧，再使用目标楼层梯内点作为模式 1 的输入调用 `/<robot>/relocalize`。
 - 假电梯状态包括 `Calling`、`Riding`、`MovingModel`、`SwitchingMap`、`Relocalizing` 和最终状态，
   均汇总到根 `TaskStatus`；Pause、Resume、Terminate 会转发到当前工作模块。
 - 当前 `fake_elevator` 仅模拟乘梯延时和地图切换，不包含真实电梯的呼梯、进梯、门控及安全联锁；

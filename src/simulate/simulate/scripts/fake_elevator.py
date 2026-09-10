@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Temporary elevator/map-switch executor for simulation task orchestration."""
 
+import copy
 import os
 import math
 import json
@@ -13,7 +14,8 @@ from urllib import request as urlrequest
 
 from custom_msgs_srvs.msg import ElevatorCommand, ElevatorInfo, ElevatorStatus, RobotStatus
 from custom_msgs_srvs.srv import Relocalize, SetHeartbeatParams
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
+from gazebo_msgs.msg import ModelStates
 from nav2_msgs.srv import LoadMap
 import rclpy
 from rclpy.node import Node
@@ -94,11 +96,40 @@ class FakeElevator(Node):
         self._timer = None
         self._observed_floor = ""
         self._pending_target_pose = None
+        self._awaiting_model_pose = False
+        self._model_arrived_stamp = None
+        self._localization_method = ""
+        self._initial_pub = self.create_publisher(
+            PoseWithCovarianceStamped, f"/{self._robot}/initial", 10
+        )
+        self.create_subscription(
+            ModelStates, "/gazebo/model_states", self._on_model_states, 1
+        )
         self._publish()
+
+    def _on_model_states(self, message):
+        with self._lock:
+            if not self._awaiting_model_pose or self._pending_target_pose is None:
+                return
+            try:
+                pose = message.pose[message.name.index(self._robot)]
+            except (ValueError, IndexError):
+                return
+            target = self._pending_target_pose
+            distance = math.hypot(
+                pose.position.x - target.position.x,
+                pose.position.y - target.position.y,
+            )
+            angle = self._yaw(pose) - self._yaw(target)
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            if distance <= 0.10 and abs(angle) <= 0.10:
+                self._model_arrived_stamp = self.get_clock().now().to_msg()
+                self._awaiting_model_pose = False
 
     def _on_robot_status(self, msg):
         with self._lock:
             self._observed_floor = str(msg.current_map).strip()
+            self._localization_method = str(msg.localization_method).strip().lower()
 
     @staticmethod
     def _yaw(pose):
@@ -309,6 +340,8 @@ class FakeElevator(Node):
             self._cancel_timer()
             self._info = msg
             self._pending_target_pose = None
+            self._awaiting_model_pose = False
+            self._model_arrived_stamp = None
             self._generation += 1
             generation = self._generation
             self._schedule_operation(generation)
@@ -418,6 +451,9 @@ class FakeElevator(Node):
             if generation != self._generation or not self._info:
                 return
             self._pending_target_pose = target_pose
+            # Read the same saved point for both model movement and localization,
+            # including when a task was queued by an older manager.
+            self._info.relocalization_pose.pose.pose = copy.deepcopy(target_inside_pose)
         self._switch_map(generation)
 
     def _switch_map(self, generation):
@@ -490,6 +526,11 @@ class FakeElevator(Node):
             f"x={float(response.get('x', target_pose.position.x)):.3f} "
             f"y={float(response.get('y', target_pose.position.y)):.3f}"
         )
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._awaiting_model_pose = True
+            self._model_arrived_stamp = None
         self._schedule_relocalize_retry(
             generation, 1, "waiting for moved model scan/TF propagation"
         )
@@ -570,10 +611,33 @@ class FakeElevator(Node):
         with self._lock:
             if generation != self._generation or not self._info:
                 return
+            if self._model_arrived_stamp is None:
+                if attempt < self._retry_count:
+                    self._schedule_relocalize_retry(
+                        generation, attempt + 1, "waiting for target model pose"
+                    )
+                else:
+                    self._finish(generation, ElevatorStatus.STATUS_FAILED,
+                                 "target model pose not confirmed")
+                return
             self._status = ElevatorStatus.STATUS_RELOCALIZING
-            self._message = "running scan relocalization"
+            self._message = (
+                "applying target elevator localization"
+                if self._localization_method == "gazebo_ground_truth"
+                else "running scan relocalization"
+            )
             self._publish()
             info = self._info
+            if self._localization_method == "gazebo_ground_truth":
+                # The model's destination is known and confirmed. Scan matching
+                # can pick a different elevator corner or require saved scans;
+                # neither should alter an exact simulation teleport anchor.
+                pose = copy.deepcopy(info.relocalization_pose)
+                pose.header.frame_id = self._map_frame
+                pose.header.stamp = self._model_arrived_stamp
+                self._initial_pub.publish(pose)
+                self._schedule_relocalized_finish(generation, None)
+                return
         if not self._relocalize.wait_for_service(timeout_sec=self._service_wait):
             self._finish(generation, ElevatorStatus.STATUS_FAILED, "relocalize service unavailable")
             return
@@ -582,8 +646,11 @@ class FakeElevator(Node):
         # must only refine the pose on that map; cross-map history search is a
         # startup-online operation and may otherwise revert the floor here.
         request.mode = Relocalize.Request.MODE_POSE_FIRST
-        request.pose = info.relocalization_pose
+        request.pose = copy.deepcopy(info.relocalization_pose)
         request.pose.header.frame_id = self._map_frame
+        # The server must reject scans captured before model arrival, even if
+        # their receipt time is recent (DDS can deliver queued sensor samples).
+        request.pose.header.stamp = self._model_arrived_stamp
         self._relocalize.call_async(request).add_done_callback(
             lambda future: self._relocalized(future, generation, attempt)
         )
@@ -611,7 +678,9 @@ class FakeElevator(Node):
         with self._lock:
             if generation != self._generation:
                 return
-            message = f"map switched and relocalized score={score:.3f}"
+            message = ("map switched and localized at target elevator point"
+                       if score is None else
+                       f"map switched and relocalized score={score:.3f}")
             if self._post_relocalize_settle <= 0.0:
                 self._finish_relocalized(generation, message)
                 return
@@ -648,6 +717,7 @@ class FakeElevator(Node):
         text = str(message).lower()
         return any(token in text for token in (
             "occupancygrid is not ready", "no fresh scan_2d frame",
+            "scan predates requested pose",
         ))
 
     def _schedule_relocalize_retry(self, generation, attempt, detail):
@@ -775,6 +845,8 @@ class FakeElevator(Node):
             self._status = status
             self._message = message
             self._pending_target_pose = None
+            self._awaiting_model_pose = False
+            self._model_arrived_stamp = None
             self._publish()
 
     def _publish(self):

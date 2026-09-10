@@ -350,7 +350,7 @@ void TaskManagerNode::on_task_info(
           if (operation == "ride") {
             item.elevator.relocalization_pose.header = active_task_.header;
             item.elevator.relocalization_pose.header.frame_id = "map";
-            item.elevator.relocalization_pose.pose.pose = source.inside;
+            item.elevator.relocalization_pose.pose.pose = target.inside;
             item.elevator.use_pose_first = true;
             item.elevator.target_inside_pose = target.inside;
           }

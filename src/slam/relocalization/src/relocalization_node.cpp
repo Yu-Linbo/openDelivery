@@ -474,6 +474,13 @@ private:
       response->message = "relocalization unavailable while robot_status=shutdown";
       return;
     }
+    if (request->mode == custom_msgs_srvs::srv::Relocalize::Request::MODE_POSE_FIRST &&
+      rclcpp::Time(scan_message.header.stamp).nanoseconds() <
+      rclcpp::Time(request->pose.header.stamp).nanoseconds())
+    {
+      response->message = "scan predates requested pose; waiting for post-move scan";
+      return;
+    }
     ScanData scan;
     if (!scan_data_from_message(scan_message, &scan, &error)) {
       response->message = error;

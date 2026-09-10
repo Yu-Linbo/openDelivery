@@ -131,8 +131,8 @@ TEST_F(ElevatorPlanTest, ExpandsCrossFloorGoalIntoCompleteElevatorSequence) {
   const auto ride = manager::TaskManagerElevatorPlanTestPeer::elevator(*node, 3);
   EXPECT_EQ(ride.operation, "ride");
   EXPECT_TRUE(ride.use_pose_first);
-  EXPECT_DOUBLE_EQ(ride.relocalization_pose.pose.pose.position.x, 1.0);
-  EXPECT_DOUBLE_EQ(ride.relocalization_pose.pose.pose.position.y, 2.0);
+  EXPECT_DOUBLE_EQ(ride.relocalization_pose.pose.pose.position.x, 11.0);
+  EXPECT_DOUBLE_EQ(ride.relocalization_pose.pose.pose.position.y, 12.0);
   EXPECT_DOUBLE_EQ(ride.target_inside_pose.position.x, 11.0);
   EXPECT_DOUBLE_EQ(ride.target_inside_pose.position.y, 12.0);
 

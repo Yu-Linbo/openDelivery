@@ -94,7 +94,7 @@ class GazeboGroundTruthLocalizer(Node):
             PoseWithCovarianceStamped, self.pose_topic, 10
         )
         self.odom_publisher = self.create_publisher(Odometry, self.odom_topic, 10)
-        self.create_subscription(ModelStates, "model_states", self._on_model_states, 10)
+        self.create_subscription(ModelStates, "model_states", self._on_model_states, 1)
         self.create_subscription(
             PoseWithCovarianceStamped, "initialpose", self._on_initial_pose, 10
         )
@@ -236,13 +236,9 @@ class GazeboGroundTruthLocalizer(Node):
         self._last_correction_time_ns = None
         self._pending_initial = None
         if recent_initial is not None:
-            if self._last_world_to_base is None:
-                self._pending_initial = recent_initial
-            else:
-                true_map_to_base = compose(
-                    self._true_map_to_world, self._last_world_to_base
-                )
-                self._set_initial_error(true_map_to_base, recent_initial)
+            # Apply against a newly received model sample, never a cached pose
+            # from before a map switch or Gazebo teleport.
+            self._pending_initial = recent_initial
             self._last_initial_request = None
             self._last_initial_wall_time = None
 
@@ -261,15 +257,9 @@ class GazeboGroundTruthLocalizer(Node):
         requested = self._pose2d(message.pose.pose)
         self._last_initial_request = requested
         self._last_initial_wall_time = time.monotonic()
-        if self._last_world_to_base is None:
-            self._pending_initial = requested
-            self.get_logger().info("queued initial pose until first Gazebo model state")
-            return
-        true_map_to_base = compose(
-            self._true_map_to_world, self._last_world_to_base
-        )
-        self._set_initial_error(true_map_to_base, requested)
-        self._pending_initial = None
+        # ModelStates has no header. Use a depth-one queue and defer the bias
+        # calculation until its next callback rather than using the cached pose.
+        self._pending_initial = requested
 
     def _on_model_states(self, message):
         try:
