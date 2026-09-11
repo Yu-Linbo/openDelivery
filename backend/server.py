@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import json
+import gzip
 import math
 import os
 import queue
@@ -1734,8 +1735,8 @@ def _txt_is_live_recorder_target(path: Path, robot_name: str) -> bool:
 def _delete_log_bags(raw_bags: list) -> dict:
     if not isinstance(raw_bags, list) or not raw_bags:
         raise ValueError("bags must be a non-empty array")
-    if len(raw_bags) > 100:
-        raise ValueError("at most 100 bags can be deleted together")
+    if len(raw_bags) > 10000:
+        raise ValueError("at most 10000 bags can be deleted together")
 
     targets = []
     seen = set()
@@ -2099,8 +2100,14 @@ def _zip_log_bag_files(raw_files: list) -> Tuple[bytes, str]:
 class ApiHandler(BaseHTTPRequestHandler):
     def _send_json(self, payload, status=200, *, content_length=True):
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        use_gzip = len(raw) >= 16 * 1024 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        if use_gzip:
+            raw = gzip.compress(raw, compresslevel=5)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         if content_length:
             self.send_header("Content-Length", str(len(raw)))
         self.send_header("Access-Control-Allow-Origin", "*")

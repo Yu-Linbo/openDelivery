@@ -1373,18 +1373,16 @@ private:
       if (count_ready && status_messages > 0) {
         current_bag_health_verified_ = true;
       } else if (count_ready) {
+        // This process has already received RobotStatus and persists it in the
+        // sidecar.  Some rosbag2/RMW combinations create all subscriptions but
+        // do not make messages visible in SQLite during this short grace window.
+        // Killing the recorder every ten seconds turns a transient/transport
+        // problem into an endless stream of empty bags.  Keep recording and let
+        // the sidecar provide the critical status during offline replay.
         write_line(
-          "bag unhealthy: recorder receives robot_status but bag has zero messages; restarting");
-        stop_process_group(bag_pid_, SIGINT);
-        wait_process(bag_pid_);
-        bag_pid_ = -1;
-        const auto failed_bytes = directory_size(current_bag_path_);
-        if (current_tags_.empty()) {
-          discard_current_bag("missing_robot_status", failed_bytes);
-        } else {
-          archive_current_bag("missing_robot_status");
-        }
-        return;
+          "bag warning: robot_status is not visible in SQLite after grace period; "
+          "continuing with recorder sidecar fallback");
+        current_bag_health_verified_ = true;
       }
     }
     const auto logical_bytes = sqlite_logical_bag_size(current_bag_path_);

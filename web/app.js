@@ -90,10 +90,13 @@ const logBagFileHint = document.getElementById("log-bag-file-hint");
 const logBagStatus = document.getElementById("log-bag-status");
 const logBagSelectionSummary = document.getElementById("log-bag-selection-summary");
 const logBagRobotSelect = document.getElementById("log-bag-robot-select");
+const logBagSelectAll = document.getElementById("log-bag-select-all");
 const btnRefreshLogBags = document.getElementById("btn-refresh-log-bags");
 const btnDownloadLogBag = document.getElementById("btn-download-log-bag");
 const btnPlayLogBag = document.getElementById("btn-play-log-bag");
 const btnDeleteLogBag = document.getElementById("btn-delete-log-bag");
+const MAX_RENDERED_LOG_BAGS = 300;
+const MAX_RENDERED_LOG_FILES = 300;
 const bagReplayBackdrop = document.getElementById("bag-replay-backdrop");
 const bagReplayDialog = document.getElementById("bag-replay-dialog");
 const bagReplaySubtitle = document.getElementById("bag-replay-subtitle");
@@ -3344,9 +3347,31 @@ function toggleLogBagSelection(idx, checked) {
   renderLogBagFiles();
 }
 
+function updateLogBagSelectAllState() {
+  if (!logBagSelectAll) return;
+  const deletableIndices = logBagEntries
+    .map((entry, index) => entry && entry.deletable !== false ? index : -1)
+    .filter((index) => index >= 0);
+  const selectedCount = deletableIndices.filter((index) => selectedLogBagIndices.has(index)).length;
+  logBagSelectAll.disabled = deletableIndices.length === 0;
+  logBagSelectAll.checked = deletableIndices.length > 0 && selectedCount === deletableIndices.length;
+  logBagSelectAll.indeterminate = selectedCount > 0 && selectedCount < deletableIndices.length;
+}
+
+function toggleAllLogBags(checked) {
+  selectedLogBagIndices = checked
+    ? new Set(logBagEntries
+      .map((entry, index) => entry && entry.deletable !== false ? index : -1)
+      .filter((index) => index >= 0))
+    : new Set();
+  renderLogBagList();
+  renderLogBagFiles();
+}
+
 function renderLogBagList() {
   if (!logBagList) return;
   logBagList.innerHTML = "";
+  updateLogBagSelectAllState();
   if (logBagEntries.length === 0) {
     const li = document.createElement("li");
     li.className = "log-bag-empty";
@@ -3357,7 +3382,7 @@ function renderLogBagList() {
     renderLogBagFiles();
     return;
   }
-  logBagEntries.forEach((entry, idx) => {
+  logBagEntries.slice(0, MAX_RENDERED_LOG_BAGS).forEach((entry, idx) => {
     const li = document.createElement("li");
     const selected = selectedLogBagIndices.has(idx);
     li.className = `log-bag-item${selected ? " log-bag-item--selected" : ""}`;
@@ -3413,6 +3438,13 @@ function renderLogBagList() {
     li.appendChild(body);
     logBagList.appendChild(li);
   });
+  if (logBagEntries.length > MAX_RENDERED_LOG_BAGS) {
+    const notice = document.createElement("li");
+    notice.className = "log-bag-empty";
+    notice.textContent = `共 ${logBagEntries.length} 个 bag；为保证页面流畅，仅展示最新 ${MAX_RENDERED_LOG_BAGS} 个。“全选”仍会选择全部可删除 bag。`;
+    logBagList.appendChild(notice);
+  }
+  updateLogBagSelectAllState();
 }
 
 function selectedLogBagFiles() {
@@ -3510,7 +3542,7 @@ function renderLogBagFiles() {
   logBagFileHint.hidden = true;
 
   let groupTitle = "";
-  files.forEach((file, idx) => {
+  files.slice(0, MAX_RENDERED_LOG_FILES).forEach((file, idx) => {
     if (file.bagTitle !== groupTitle) {
       groupTitle = file.bagTitle;
       const heading = document.createElement("div");
@@ -3555,6 +3587,12 @@ function renderLogBagFiles() {
     row.appendChild(body);
     logBagFileList.appendChild(row);
   });
+  if (files.length > MAX_RENDERED_LOG_FILES) {
+    const notice = document.createElement("p");
+    notice.className = "log-bag-empty";
+    notice.textContent = `所选 bag 共关联 ${files.length} 个文件；当前仅展示前 ${MAX_RENDERED_LOG_FILES} 个。`;
+    logBagFileList.appendChild(notice);
+  }
   updateLogBagDownloadState();
 }
 
@@ -3643,7 +3681,9 @@ async function deleteSelectedLogBags() {
     .filter((entry) => entry && entry.bag);
   if (entries.length === 0) return;
   const names = entries.map((entry) => basenameOfLogPath(entry.bag));
-  if (!window.confirm(`确定删除所选 ${entries.length} 个 bag？\n\n${names.join("\n")}\n\n无其他 bag 引用的关联 txt 也会删除。`)) {
+  const preview = names.slice(0, 20).join("\n");
+  const remainder = names.length > 20 ? `\n……另有 ${names.length - 20} 个` : "";
+  if (!window.confirm(`确定删除所选 ${entries.length} 个 bag？\n\n${preview}${remainder}\n\n无其他 bag 引用的关联 txt 也会删除。`)) {
     return;
   }
   if (btnDeleteLogBag) btnDeleteLogBag.disabled = true;
@@ -4567,6 +4607,9 @@ function initLogs() {
   }
   if (btnRefreshLogBags) {
     btnRefreshLogBags.addEventListener("click", refreshLogBags);
+  }
+  if (logBagSelectAll) {
+    logBagSelectAll.addEventListener("change", () => toggleAllLogBags(logBagSelectAll.checked));
   }
   if (btnDownloadLogBag) {
     btnDownloadLogBag.addEventListener("click", downloadSelectedLogBagFiles);

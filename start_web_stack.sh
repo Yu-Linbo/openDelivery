@@ -83,9 +83,9 @@ if ! python3 -c "from custom_msgs_srvs.msg import RobotStatus" >/dev/null 2>&1; 
   exit 1
 fi
 
-# Stop stale copies of this project's web stack before choosing ports. The
-# frontend below is launched as `python3 -`, so its cwd is the reliable project
-# boundary. ROS/Gazebo/robot processes are deliberately not touched here.
+# A systemd restart represents a restart of the whole local OpenDelivery
+# runtime.  Clean up stale Web, ROS 2 and Gazebo processes before binding ports;
+# the same cleanup is also run from the TERM/EXIT trap below.
 is_current_or_ancestor_pid() {
   local candidate="$1"
   local cursor="$$"
@@ -142,6 +142,56 @@ stop_old_web_stack() {
 }
 
 stop_old_web_stack
+
+collect_ros_gazebo_pids() {
+  local proc_dir pid cmd exe base
+  for proc_dir in /proc/[0-9]*; do
+    pid="${proc_dir##*/}"
+    is_current_or_ancestor_pid "${pid}" && continue
+    cmd="$(tr '\0' ' ' <"${proc_dir}/cmdline" 2>/dev/null || true)"
+    [[ -z "${cmd}" ]] && continue
+    exe="$(readlink -f "${proc_dir}/exe" 2>/dev/null || true)"
+    base="${exe##*/}"
+    if [[ "${base}" == "gzserver" || "${base}" == "gzclient" || "${base}" == "gazebo" ]] \
+      || [[ "${base}" == "_ros2_daemon" ]] \
+      || [[ "${base}" == "robot_log_recorder" ]] \
+      || [[ "${exe}" == /opt/ros/*/lib/* ]] \
+      || [[ "${cmd}" =~ (^|[[:space:]/])ros2[[:space:]]+(launch|run|bag)([[:space:]]|$) ]] \
+      || { [[ "${cmd}" == *"${ROOT_DIR}/install/"* ]] && [[ "${cmd}" != *"${BACKEND_SCRIPT}"* ]]; }; then
+      echo "${pid}"
+    fi
+  done
+}
+
+stop_ros_gazebo_runtime() {
+  local pid alive
+  local -a runtime_pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && runtime_pids+=("${pid}")
+  done < <(collect_ros_gazebo_pids)
+  if [[ "${#runtime_pids[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  echo "[open-delivery] stopping ROS/Gazebo runtime PIDs: ${runtime_pids[*]}"
+  kill -TERM "${runtime_pids[@]}" >/dev/null 2>&1 || true
+  for _ in {1..30}; do
+    alive=0
+    for pid in "${runtime_pids[@]}"; do
+      if kill -0 "${pid}" >/dev/null 2>&1; then
+        alive=1
+        break
+      fi
+    done
+    [[ "${alive}" -eq 0 ]] && return
+    sleep 0.1
+  done
+  for pid in "${runtime_pids[@]}"; do
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  done
+}
+
+stop_ros_gazebo_runtime
 
 port_is_busy() {
   local port="$1"
@@ -232,6 +282,7 @@ cleanup() {
   STOP_ALL=1
   echo
   echo "[open-delivery] stopping services..."
+  stop_ros_gazebo_runtime
   pkill -f "${BACKEND_SCRIPT}" >/dev/null 2>&1 || true
   kill "${BACKEND_SUP_PID}" "${FRONTEND_PID}" >/dev/null 2>&1 || true
 }

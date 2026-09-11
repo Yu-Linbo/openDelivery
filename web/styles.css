@@ -912,6 +912,37 @@ button {
   font-size: 15px;
 }
 
+.log-bag-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.log-bag-panel-head h2 {
+  margin-bottom: 0;
+}
+
+.log-bag-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.log-bag-select-all input {
+  accent-color: var(--accent);
+}
+
+.log-bag-select-all:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .log-bag-list {
   list-style: none;
   margin: 0;
@@ -919,7 +950,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: calc(100% - 34px);
+  max-height: calc(100% - 39px);
   overflow: auto;
 }
 

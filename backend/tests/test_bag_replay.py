@@ -294,6 +294,26 @@ class BagReplayTest(unittest.TestCase):
         self.assertEqual(len(result["timeline"]["statuses"]), 1)
         self.assertEqual(result["timeline"]["statuses"][0]["source"], "recorder_sidecar")
 
+    def test_does_not_duplicate_bag_statuses_with_sidecar(self):
+        sidecar = {
+            "version": 1,
+            "statuses": [{
+                "timestamp_ns": 1200000000,
+                "robot_name": "robot2",
+                "robot_status": "ready",
+            }],
+        }
+        (self.bag / ".opendelivery_robot_status.json").write_text(
+            json.dumps(sidecar), encoding="utf-8"
+        )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        self.assertEqual(len(result["timeline"]["statuses"]), 2)
+        self.assertTrue(
+            all(row.get("source") != "recorder_sidecar" for row in result["timeline"]["statuses"])
+        )
+
     def test_transforms_laser_scan_from_sensor_frame_into_map(self):
         database = self.bag / "sample_0.db3"
         with sqlite3.connect(str(database)) as connection:

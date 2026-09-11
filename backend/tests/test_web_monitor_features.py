@@ -185,6 +185,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         for element_id in (
+            "log-bag-select-all",
             "btn-play-log-bag",
             "btn-delete-log-bag",
             "bag-replay-dialog",
@@ -205,6 +206,10 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("/api/log_bag/delete", js)
         self.assertIn('path == "/api/log_bag/delete"', server_py)
         self.assertIn("selectedLogBagsForReplay", js)
+        self.assertIn("toggleAllLogBags", js)
+        self.assertIn("updateLogBagSelectAllState", js)
+        self.assertIn("MAX_RENDERED_LOG_BAGS", js)
+        self.assertIn('self.send_header("Content-Encoding", "gzip")', server_py)
         self.assertIn("JSON.stringify({ bags:", js)
         self.assertIn("bagReplaySegmentAt", js)
         self.assertNotIn("selectedLogBagIndices.size !== 1", js)
@@ -257,7 +262,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("sqlite_logical_bag_size", recorder_cpp)
         self.assertIn("find_custom_msgs_prefix", recorder_cpp)
         self.assertIn("sqlite_topic_message_count", recorder_cpp)
-        self.assertIn("bag unhealthy: recorder receives robot_status", recorder_cpp)
+        self.assertIn("continuing with recorder sidecar fallback", recorder_cpp)
+        self.assertIn("stop_ros_gazebo_runtime", (ROOT / "start_web_stack.sh").read_text(encoding="utf-8"))
         self.assertIn("50U * 1024U * 1024U", recorder_cpp)
         self.assertIn("1024U * 1024U * 1024U", recorder_cpp)
         self.assertIn("500U * 1024U * 1024U", recorder_cpp)

@@ -386,7 +386,13 @@
           </div>
           <div class="log-bag-layout">
             <section class="log-bag-panel log-bag-panel--bags" aria-label="bag 列表">
-              <h2>.bag 与 tag</h2>
+              <div class="log-bag-panel-head">
+                <h2>.bag 与 tag</h2>
+                <label class="log-bag-select-all" title="选择全部可删除的已归档 bag">
+                  <input id="log-bag-select-all" type="checkbox" />
+                  全选
+                </label>
+              </div>
               <ul id="log-bag-list" class="log-bag-list"></ul>
             </section>
             <section class="log-bag-panel log-bag-panel--files" aria-label="相关文件">

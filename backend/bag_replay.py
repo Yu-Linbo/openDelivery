@@ -755,6 +755,11 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                 )
                 images.append(decoded)
             elif type_name == "tf2_msgs/msg/TFMessage":
+                # Static transforms were decoded in the seed pass above.  Replaying
+                # them here decodes the same (often latched and repeatedly recorded)
+                # payload twice and performs a graph search for every sample.
+                if topic_name.rstrip("/").endswith("tf_static"):
+                    continue
                 transforms = _decode_tf(payload)
                 for transform in transforms:
                     if transform["parent"] and transform["child"]:
@@ -784,14 +789,16 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
     poses.sort(key=lambda row: row["t"])
     scans.sort(key=lambda row: row["t"])
     paths.sort(key=lambda row: row["t"])
-    try:
-        statuses.extend(
-            _read_robot_status_sidecar(path, start_ns, end_ns, robot_name)
-        )
-    except (BagReplayError, OSError, TypeError, ValueError) as exc:
-        warning = f"RobotStatus sidecar: {exc}"
-        if warning not in warnings and len(warnings) < 12:
-            warnings.append(warning)
+    # The recorder sidecar is a recovery source, not a second status stream.
+    # Appending it to valid bag messages duplicated thousands of heartbeat rows,
+    # inflated the response, and slowed both parsing and browser initialization.
+    if not statuses:
+        try:
+            statuses = _read_robot_status_sidecar(path, start_ns, end_ns, robot_name)
+        except (BagReplayError, OSError, TypeError, ValueError) as exc:
+            warning = f"RobotStatus sidecar: {exc}"
+            if warning not in warnings and len(warnings) < 12:
+                warnings.append(warning)
 
     statuses.sort(key=lambda row: row["t"])
     tasks.sort(key=lambda row: row["t"])
