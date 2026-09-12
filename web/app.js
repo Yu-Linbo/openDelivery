@@ -6338,3 +6338,170 @@ function initRobotDetailUi() {
     appendLog(`${selectedDetailRobotId} 参数已更新 ${JSON.stringify(payload)}`);
   });
 }
+
+function initOpenClawChat() {
+  const trigger = document.getElementById("openclaw-chat-trigger");
+  const panel = document.getElementById("openclaw-chat-panel");
+  const close = document.getElementById("openclaw-chat-close");
+  const form = document.getElementById("openclaw-chat-form");
+  const input = document.getElementById("openclaw-chat-input");
+  const send = document.getElementById("openclaw-chat-send");
+  const messages = document.getElementById("openclaw-chat-messages");
+  const status = document.getElementById("openclaw-chat-status");
+  const adminLink = document.getElementById("openclaw-admin-link");
+  if (!trigger || !panel || !form || !input || !messages) return;
+
+  const sessionKey = "openDelivery_openclaw_session_v1";
+  const historyKey = "openDelivery_openclaw_history_v1";
+  const welcome = "你好，我可以查询机器人状态、地图、ROS 节点和日志，也能在确认后执行操作。";
+  let sessionId = localStorage.getItem(sessionKey) || sessionStorage.getItem(sessionKey);
+  if (!sessionId) {
+    sessionId = `opendelivery-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  localStorage.setItem(sessionKey, sessionId);
+  sessionStorage.removeItem(sessionKey);
+  if (adminLink) adminLink.href = "https://linbo.lol/openclaw/";
+  let history = [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
+    if (Array.isArray(saved)) history = saved.slice(-50);
+  } catch { history = []; }
+  if (!history.length) history = [{ role: "assistant", text: welcome }];
+  const setOpen = (open) => {
+    panel.hidden = !open;
+    trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) setTimeout(() => input.focus(), 0);
+  };
+  const append = (role, text) => {
+    const item = document.createElement("div");
+    item.className = `openclaw-chat-message ${role}`;
+    item.textContent = text;
+    messages.appendChild(item);
+    messages.scrollTop = messages.scrollHeight;
+  };
+  const saveMessage = (role, text) => {
+    history.push({ role, text: String(text).slice(0, 8000) });
+    history = history.slice(-50);
+    try { localStorage.setItem(historyKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
+  };
+  history.forEach((item) => append(item.role === "user" ? "user" : "assistant", item.text));
+  const pageContext = () => ({
+    view: document.querySelector(".menu-item.active")?.dataset.view || "monitor",
+    floor: floorSelect?.value || "",
+    robot_id: relocRobotId?.value || selectedDetailRobotId || "",
+    online_robots: Array.from(document.querySelectorAll("[data-robot-quick-id]")).map((el) => el.dataset.robotQuickId),
+    page_url: window.location.href,
+  });
+  trigger.addEventListener("click", () => setOpen(panel.hidden));
+  close?.addEventListener("click", () => setOpen(false));
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !panel.hidden) setOpen(false); });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = input.value.trim();
+    if (!message || send?.disabled) return;
+    append("user", message);
+    saveMessage("user", message);
+    input.value = "";
+    if (send) send.disabled = true;
+    status.classList.remove("error");
+    status.textContent = "OpenClaw 正在处理，涉及操作时可能需要一些时间…";
+    const robotMatch = message.match(/\b(robot[A-Za-z0-9_-]*)\b/i);
+    const trackedRobot = robotMatch ? robotMatch[1] : (relocRobotId?.value || selectedDetailRobotId || "");
+    const isStartup = /上线|启动仿真|bringup|start simulation/i.test(message);
+    const isTask = /前往|导航|发任务|到test_|取货|回来|返回|goto/i.test(message);
+    let progressTimer = null;
+    let lastProgress = "";
+    if ((isStartup || isTask) && trackedRobot) {
+      const accepted = "收到，正在执行中。";
+      append("assistant", accepted);
+      saveMessage("assistant", accepted);
+      const pollProgress = async () => {
+        try {
+          let progress = "";
+          if (isStartup) {
+            const payload = await fetchJson(`${API_BASE_URL}/api/robot/status/cache`, { cache: "no-store" });
+            const rows = Array.isArray(payload) ? payload : (Array.isArray(payload?.items) ? payload.items : []);
+            const row = rows.find((item) => String(item.robot_id || item.id || item.name) === trackedRobot);
+            if (row) progress = row.online ? `${trackedRobot} 已在线，状态 ${row.robot_status || row.live_robot_status || row.persisted_robot_status || row.status || "online"}` : `${trackedRobot} 上线中`;
+          } else {
+            const detail = await fetchJson(`${API_BASE_URL}/api/robot/${encodeURIComponent(trackedRobot)}/detail`, { cache: "no-store" });
+            const task = detail.task || {};
+            const taskStatus = task.task_status || detail.status?.live_task_status || detail.status?.persisted_task_status || "等待执行";
+            const value = Number(task.task_progress ?? detail.status?.task_progress);
+            progress = `${trackedRobot}：${taskStatus}${Number.isFinite(value) && value >= 0 ? ` ${Math.round(value * 100)}%` : ""}`;
+          }
+          if (progress && progress !== lastProgress) {
+            lastProgress = progress;
+            append("assistant", progress);
+            saveMessage("assistant", progress);
+          }
+        } catch { /* transient polling errors are covered by the final result */ }
+      };
+      pollProgress();
+      progressTimer = setInterval(pollProgress, 5000);
+    }
+    try {
+      const result = await fetchJson(`${API_BASE_URL}/api/assistant/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: sessionId, context: pageContext() }),
+      });
+      if (result.job_id) {
+        const accepted = result.reply || "收到，正在执行中。";
+        append("assistant", accepted);
+        saveMessage("assistant", accepted);
+        let lastJobUpdate = "";
+        for (let attempt = 0; attempt < 240; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          const job = await fetchJson(`${API_BASE_URL}/api/assistant/jobs/${encodeURIComponent(result.job_id)}`, { cache: "no-store" });
+          const rows = Array.isArray(job.results) ? job.results : [];
+          const update = rows.map((action) => {
+            if (action.confirmation_required) return action.summary || "请明确说明要执行的操作";
+            if (!action.ok) return `执行失败：${action.error || "未知错误"}`;
+            return action.summary || "操作已完成";
+          }).join("\n");
+          if (update && update !== lastJobUpdate) {
+            lastJobUpdate = update;
+            append("assistant", update);
+            saveMessage("assistant", update);
+          }
+          if (job.status === "completed" || job.status === "failed") break;
+        }
+        status.textContent = "";
+        return;
+      }
+      let reply = result.reply || "OpenClaw 未返回内容。";
+      if (Array.isArray(result.actions) && result.actions.length) {
+        const summaries = result.actions.map((action) => {
+          if (action.confirmation_required) return action.summary || "请明确说明要执行的操作";
+          if (!action.ok) return `执行失败：${action.error || "未知错误"}`;
+          if (Object.prototype.hasOwnProperty.call(action, "result")) {
+            const rawPayload = JSON.stringify(action.result, null, 2);
+            const payload = rawPayload.length > 5000 ? `${rawPayload.slice(0, 5000)}\n…结果已截断` : rawPayload;
+            return `${action.summary || `${action.name} 执行成功`}\n${payload}`;
+          }
+          return action.summary || `${action.name}：执行成功`;
+        });
+        reply = summaries.join("\n");
+      }
+      append("assistant", reply);
+      saveMessage("assistant", reply);
+      status.textContent = "";
+    } catch (error) {
+      const detail = error?.message || String(error);
+      const failure = `请求失败：${detail}`;
+      append("assistant", failure);
+      saveMessage("assistant", failure);
+      status.classList.add("error");
+      status.textContent = "请确认 OpenClaw Gateway 已启动并可用。";
+    } finally {
+      if (progressTimer) clearInterval(progressTimer);
+      if (send) send.disabled = false;
+      input.focus();
+    }
+  });
+}
+
+initOpenClawChat();

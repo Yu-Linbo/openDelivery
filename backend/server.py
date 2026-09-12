@@ -36,6 +36,7 @@ from robot_lifecycle import RobotLifecycleOrchestrator, run_shell_process_group
 import map_assets
 import bag_replay
 import ros_task_store
+import openclaw_chat
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -2180,6 +2181,27 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/assistant/chat":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                out = openclaw_chat.run_chat(
+                    data.get("message"), data.get("session_id"), data.get("context") or {},
+                    defer_mutations=True,
+                )
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+                return
+            except TimeoutError as err:
+                self._send_json({"error": str(err)}, 504)
+                return
+            except RuntimeError as err:
+                self._send_json({"error": str(err)}, 503)
+                return
+            self._send_json(out)
+            return
+
         if path == "/api/robot/relocalization/record":
             data = self._read_json_body()
             if data is None:
@@ -3189,6 +3211,14 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        m_assistant_job = re.match(r"^/api/assistant/jobs/([a-f0-9]{32})$", path)
+        if m_assistant_job:
+            job = openclaw_chat.get_action_job(m_assistant_job.group(1))
+            if job is None:
+                self._send_json({"error": "assistant job not found"}, 404)
+            else:
+                self._send_json(job)
+            return
         m_assets = re.match(r"^/api/maps/([^/]+)/assets$", path)
         if m_assets:
             floor = unquote(m_assets.group(1)).strip()

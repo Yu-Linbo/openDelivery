@@ -192,6 +192,13 @@ These endpoints are not primary Web user workflows. Keep them backend-only and u
 - `POST /api/ros/nodes/discovered/kill`
   - Kill discovered ROS node.
 
+- `POST /api/assistant/chat`
+  - Body: `{ "message": "...", "session_id": "opendelivery-...", "context": { ... } }`
+  - Proxies a stateful turn to the local OpenClaw Gateway. OpenClaw returns structured actions; the backend validates them against a fixed OpenDelivery API allowlist and executes confirmed operations.
+  - Mutating actions return a background `job_id` immediately so reverse proxies do not time out.
+- `GET /api/assistant/jobs/{job_id}`
+  - Returns concise progress and terminal results for a background assistant action sequence.
+
 - `GET /api/ros/threads/status`
   - Backend ROS bridge thread status.
 

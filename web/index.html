@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260825-cst-auto-map" />
+    <link rel="stylesheet" href="./styles.css?v=20260911-openclaw-chat-v4" />
   </head>
   <body>
     <div class="layout">
@@ -643,7 +643,24 @@
         </label>
       </footer>
     </section>
+    <button id="openclaw-chat-trigger" class="openclaw-chat-trigger" type="button" aria-label="打开 OpenClaw 助手" aria-expanded="false" aria-controls="openclaw-chat-panel">
+      <span aria-hidden="true">✦</span><span>OpenClaw</span>
+    </button>
+    <section id="openclaw-chat-panel" class="openclaw-chat-panel" role="dialog" aria-label="OpenClaw 页面助手" hidden>
+      <header class="openclaw-chat-head">
+        <div><strong>OpenClaw 助手</strong><small>通过 OpenDelivery API 操作当前页面</small></div>
+        <a id="openclaw-admin-link" class="openclaw-admin-link" href="https://linbo.lol/openclaw/" target="_blank" rel="noopener noreferrer">管理页 ↗</a>
+        <button id="openclaw-chat-close" type="button" aria-label="关闭对话框">×</button>
+      </header>
+      <div id="openclaw-chat-messages" class="openclaw-chat-messages" aria-live="polite">
+      </div>
+      <form id="openclaw-chat-form" class="openclaw-chat-form">
+        <textarea id="openclaw-chat-input" rows="2" maxlength="4000" placeholder="例如：robot1 当前状态怎么样？" aria-label="发送给 OpenClaw 的消息" required></textarea>
+        <button id="openclaw-chat-send" type="submit">发送</button>
+      </form>
+      <p id="openclaw-chat-status" class="openclaw-chat-status" role="status"></p>
+    </section>
     <script src="./map_editor.js?v=20260817-elevator-workflow"></script>
-    <script src="./app.js?v=20260825-cst-auto-map"></script>
+    <script src="./app.js?v=20260911-openclaw-chat-v4"></script>
   </body>
 </html>
