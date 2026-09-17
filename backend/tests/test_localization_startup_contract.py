@@ -51,16 +51,40 @@ def test_simulation_localization_defaults_to_gazebo_ground_truth():
         ROOT / "src" / "system" / "system" / "scripts" / "sim_bringup.sh"
     ).read_text(encoding="utf-8")
     manager_launch = (
-        ROOT / "src" / "system" / "manager" / "launch" / "manager.launch.py"
+        ROOT / "params" / "launch" / "manager" / "manager.launch.py"
     ).read_text(encoding="utf-8")
     heartbeat_launch = (
-        ROOT / "params" / "launch" / "system" / "heartbeat.launch.py"
+        ROOT / "params" / "launch" / "heartbeat" / "heartbeat.launch.py"
     ).read_text(encoding="utf-8")
 
     assert 'LOCALIZATION_METHOD="gazebo_ground_truth"' in sim_bringup
     assert 'or "gazebo_ground_truth"' in manager_launch
     assert 'default_value="gazebo_ground_truth"' in manager_launch
     assert 'default_value="gazebo_ground_truth"' in heartbeat_launch
+
+
+def test_production_launch_sources_are_centralized():
+    expected = {
+        "chassis_state_machine/chassis_state_machine.launch.py",
+        "fake/fake_pub.launch.py",
+        "heartbeat/heartbeat.launch.py",
+        "log_bag/log_bag.launch.py",
+        "manager/manager.launch.py",
+        "nav_bringup/navigation_namespaced.launch.py",
+        "nav_bringup/stack.launch.py",
+        "simulate/simulate.launch.py",
+        "slam_gmapping/slam_gmapping.launch.py",
+        "system/startup.launch.py",
+    }
+    launch_root = ROOT / "params" / "launch"
+    actual = {
+        str(path.relative_to(launch_root))
+        for path in launch_root.rglob("*.launch.py")
+    }
+    assert actual == expected
+
+    for path in (ROOT / "src").rglob("launch/*.launch.py"):
+        assert path.name.startswith(("test", "debug")), path
 
 
 def test_map_server_startup_waits_for_lifecycle_discovery():

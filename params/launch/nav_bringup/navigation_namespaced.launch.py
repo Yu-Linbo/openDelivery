@@ -1,3 +1,5 @@
+"""Namespaced Nav2 launch included by stack.launch.py."""
+
 # Copyright (c) 2018 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #

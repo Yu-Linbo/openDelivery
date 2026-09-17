@@ -1,4 +1,4 @@
-"""Top-level stack: includes bringup launches and always-on per-robot logging."""
+"""Top-level OpenDelivery stack and always-on per-robot logging."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -53,7 +53,7 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     PathJoinSubstitution(
-                        [pkg, "bringup_launch", "system", "heartbeat.launch.py"]
+                        [FindPackageShare("heartbeat"), "launch", "heartbeat.launch.py"]
                     )
                 ),
                 launch_arguments=[

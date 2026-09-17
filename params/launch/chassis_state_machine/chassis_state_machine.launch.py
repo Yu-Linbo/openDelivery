@@ -1,3 +1,5 @@
+"""Production chassis state-machine launch; installed by its ROS package."""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.substitutions import LaunchConfiguration

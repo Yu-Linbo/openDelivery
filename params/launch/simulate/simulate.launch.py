@@ -1,4 +1,8 @@
-"""Gazebo 无头仿真（installed to bringup_launch/simulate/simulate.launch.py；源码镜像见 src/simulate/simulate/launch/simulate.launch.py）。"""
+"""Gazebo 无头仿真主入口（生产 launch 的唯一源码）。
+
+Only the **odometry** TF tree is published here: ``robotN/odom`` → ``robotN/base_footprint`` → ``robotN/base_link``.
+The **map** frame and ``map``→``odom`` are owned by **SLAM** (or other localization); do not add ``map`` in this launch.
+"""
 
 import atexit
 import os
@@ -127,6 +131,7 @@ def launch_setup(context, *_args, **_kwargs):
     start_xvfb = _as_bool(LaunchConfiguration("start_xvfb").perform(context))
     spawn_robot = _as_bool(LaunchConfiguration("spawn_robot").perform(context))
     collision_bit = int(LaunchConfiguration("collision_bit").perform(context))
+    map_root = LaunchConfiguration("map_root").perform(context).strip()
     xvfb_display = LaunchConfiguration("xvfb_display").perform(context).strip() or ":99"
     world = LaunchConfiguration("world").perform(context)
     share = get_package_share_directory("simulate")
@@ -251,6 +256,7 @@ def launch_setup(context, *_args, **_kwargs):
             raise RuntimeError(e.output.decode("utf-8", errors="replace")) from e
         robot_desc_file = _write_robot_description_file(robot_desc, entity_name)
 
+        # Node FQN: /<ns>/simulate/<node> (simulate package); joint_states from Gazebo on /<ns>/joint_states.
         sim_ns = f"{ns}/simulate" if ns else "simulate"
         js_topic = f"/{ns}/joint_states" if ns else "/joint_states"
         robot_state_publisher = Node(
@@ -292,6 +298,24 @@ def launch_setup(context, *_args, **_kwargs):
         group_children = [PushRosNamespace(sim_ns), robot_state_publisher, spawn_robot_node]
         actions.append(GroupAction(actions=group_children))
         actions.append(
+            Node(
+                package="simulate",
+                executable="fake_elevator",
+                name="fake_elevator",
+                namespace=ns,
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": use_sim,
+                        "robot_name": ns or robot_name,
+                        "map_root": map_root,
+                        "world_path": world_path,
+                        "post_relocalize_settle_sec": 3.0,
+                    }
+                ],
+            )
+        )
+        actions.append(
             LogInfo(
                 msg=(
                     f"[simulate] spawn robot entity={entity_name} namespace={ns or '/'} "
@@ -331,6 +355,11 @@ def generate_launch_description():
                 "collision_bit",
                 default_value="4",
                 description="Unique power-of-two collision category used to hide only this robot shell from its own lidar.",
+            ),
+            DeclareLaunchArgument(
+                "map_root",
+                default_value=os.environ.get("OPEN_DELIVERY_MAP_ROOT", ""),
+                description="Root containing <floor>/<floor>.yaml for fake elevator map switching.",
             ),
             DeclareLaunchArgument(
                 "spawn_robot",

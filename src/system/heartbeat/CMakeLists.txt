@@ -22,6 +22,12 @@ ament_target_dependencies(heartbeat_node
 install(TARGETS heartbeat_node
   DESTINATION lib/${PROJECT_NAME})
 
+# Production launch source is centralized under params/launch/.
+set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
+install(FILES "${_PARAMS_ROOT}/launch/${PROJECT_NAME}/heartbeat.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch)
+
+# Package-local launch files are tests/debug helpers only.
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME})
 

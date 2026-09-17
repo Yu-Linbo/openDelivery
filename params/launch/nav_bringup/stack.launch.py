@@ -1,3 +1,5 @@
+"""Production Nav2 stack launch; installed by the nav_bringup package."""
+
 # Copyright (c) 2018 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #

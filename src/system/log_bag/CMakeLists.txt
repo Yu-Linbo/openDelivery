@@ -36,8 +36,9 @@ endif()
 install(TARGETS robot_log_recorder
   DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch
-  DESTINATION share/${PROJECT_NAME})
+set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
+install(FILES "${_PARAMS_ROOT}/launch/${PROJECT_NAME}/log_bag.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch)
 
 install(PROGRAMS scripts/repair_rosbag2.py
   DESTINATION share/${PROJECT_NAME}/scripts)

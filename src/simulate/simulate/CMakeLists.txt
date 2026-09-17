@@ -24,6 +24,10 @@ install(PROGRAMS scripts/fake_elevator.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME fake_elevator
 )
+set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
+install(FILES "${_PARAMS_ROOT}/launch/${PROJECT_NAME}/simulate.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch)
+# Package-local launch files are tests only.
 install(DIRECTORY launch urdf worlds model
   DESTINATION share/${PROJECT_NAME}
 )

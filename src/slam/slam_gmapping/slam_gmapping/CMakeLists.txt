@@ -57,7 +57,8 @@ ament_target_dependencies(slam_gmapping
 install(TARGETS slam_gmapping
         DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch
-	    DESTINATION share/${PROJECT_NAME})
+set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../params")
+install(FILES "${_PARAMS_ROOT}/launch/${PROJECT_NAME}/slam_gmapping.launch.py"
+        DESTINATION share/${PROJECT_NAME}/launch)
 
 ament_package()

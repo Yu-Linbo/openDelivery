@@ -208,9 +208,11 @@ class WebMonitorFeatureTest(unittest.TestCase):
             ROOT / "src" / "system" / "log_bag" / "include" / "log_bag" / "recording_topics.hpp"
         ).read_text(encoding="utf-8")
         log_bag_launch = (
-            ROOT / "src" / "system" / "log_bag" / "launch" / "log_bag.launch.py"
+            ROOT / "params" / "launch" / "log_bag" / "log_bag.launch.py"
         ).read_text(encoding="utf-8")
-        startup_launch = (ROOT / "params" / "startup.launch.py").read_text(encoding="utf-8")
+        startup_launch = (
+            ROOT / "params" / "launch" / "system" / "startup.launch.py"
+        ).read_text(encoding="utf-8")
         sim_bringup = (
             ROOT / "src" / "system" / "system" / "scripts" / "sim_bringup.sh"
         ).read_text(encoding="utf-8")

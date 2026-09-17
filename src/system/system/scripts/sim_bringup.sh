@@ -196,7 +196,7 @@ else
 fi
 log "heartbeat current_map=${HB_CURRENT_MAP} map_file=${MAP_FILE:-<none>}"
 
-# --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/startup.launch.py 维护）---
+# --- 0) 基础栈：日志/rosbag + heartbeat（统一由 params/launch/system/startup.launch.py 维护）---
 ros2 launch system startup.launch.py \
   "robot_name:=${RID}" \
   "robot_model:=${ROBOT_MODEL}" \

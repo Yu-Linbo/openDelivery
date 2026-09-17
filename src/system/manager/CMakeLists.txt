@@ -115,7 +115,9 @@ ament_target_dependencies(stack_lifecycle_manager_node
 install(TARGETS health_monitor_node semantic_location_query_node semantic_location_query_example task_manager_node stack_lifecycle_manager_node tf_localization_pose_node
   DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch config
-  DESTINATION share/${PROJECT_NAME})
+set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
+install(FILES "${_PARAMS_ROOT}/launch/${PROJECT_NAME}/manager.launch.py"
+  DESTINATION share/${PROJECT_NAME}/launch)
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()

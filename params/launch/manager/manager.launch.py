@@ -1,4 +1,4 @@
-"""Robot managers plus selectable mapping/localization backends."""
+"""Production robot managers plus selectable mapping/localization backends."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction

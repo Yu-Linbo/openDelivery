@@ -3,17 +3,14 @@ project(system)
 
 find_package(ament_cmake REQUIRED)
 
-# Repo-root params/ — install so `ros2 launch system startup.launch.py` works on Foxy.
+# Production launch sources live only under repo-root params/launch/.
 set(_PARAMS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../params")
 install(
-  FILES "${_PARAMS_ROOT}/startup.launch.py"
+  FILES "${_PARAMS_ROOT}/launch/system/startup.launch.py"
   DESTINATION share/${PROJECT_NAME}
 )
 install(
-  DIRECTORY
-    "${_PARAMS_ROOT}/launch/system"
-    "${_PARAMS_ROOT}/launch/fake"
-    "${_PARAMS_ROOT}/launch/simulate"
+  DIRECTORY "${_PARAMS_ROOT}/launch/fake"
   DESTINATION share/${PROJECT_NAME}/bringup_launch
 )
 

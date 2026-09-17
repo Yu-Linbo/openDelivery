@@ -48,7 +48,7 @@ SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_p
 | **heartbeat** | `system/heartbeat/` | **Lifecycle 心跳节点**：周期发布 `/<R>/robot_status`（`RobotStatus`）；服务 `/<R>/set_heartbeat_params` 供 Web / manager 修改地图名、`robot_status`、`task_status` 等。 |
 | **manager** | `system/manager/` | **`health_monitor`**、**`task_manager`**、**`stack_lifecycle_manager`**（含 SLAM 参数 `config/*.yaml`）：SLAM 模式切换、Lifecycle 代理、**`/<R>/stack_lifecycle`**。 |
 | **log_bag** | `system/log_bag/` | 按机器人 **`robot_log_recorder`**：终端日志 + 核心传感器/TF/状态白名单 **rosbag2** 录制（`log_bag/<R>/`），默认 50 MiB 分包；单机器人达到 1 GiB 时在当前 recorder 持续写入期间从最旧 bag 开始清理，使当前包与归档包合计降到 500 MiB；时间固定采用 CST（UTC+8），任务期间按 task ID 打多 tag。 |
-| **system** | `system/system/` | **元包 / 集成层**：安装仓库 `params/` launch、`sim_bringup.sh`（Web 仿真上线唯一入口）、`startup.launch.py`（log_bag + heartbeat）；可选安装 `fake_pub` 演示节点。 |
+| **system** | `system/system/` | **元包 / 集成层**：安装 `params/launch/system/startup.launch.py`、`sim_bringup.sh`（Web 仿真上线唯一入口）和 `fake_pub` 演示节点。 |
 
 ### 1.6 演示与其它（非独立 ament 包）
 
@@ -67,6 +67,10 @@ SLAM 参数文件：`system/manager/config/mapper_params.yaml`、`localization_p
 | `tool/` | 工具脚本 |
 
 空目录以 `.gitkeep` 占位，便于 Git 跟踪。
+
+### 1.8 Launch 文件约定
+
+所有生产/服务启动 launch 的唯一源码都在仓库根目录 `params/launch/<包名>/`；各功能包通过 CMake 将其安装到自己的 ROS share 目录，因此 `ros2 launch <包名> <文件>` 的使用方式不变。`src/**/launch/` 只允许存放 `test*` 或 `debug*` 测试辅助 launch，避免同一生产 launch 出现两份源码并逐渐失配。
 
 ### 1.8 Web 后端桥（不在 `src/`，与上表协同）
 
@@ -326,7 +330,7 @@ GMapping 源码已包含在工作区；定位使用系统包 `ros-foxy-nav2-amcl
 
 主入口 **`simulate.launch.py`**：`robot_state_publisher` 与 `spawn_entity` 在 **`PushRosNamespace`** 下。Web 仿真上线由后端单独托管全局 Gazebo/Xvfb 世界；每个机器人栈固定使用 `start_gazebo:=false`，只生成自己的唯一 entity，并使用持久化且互不重叠的出生位姿。机器人离线仅删除本实体，不停止共享 Gazebo。
 
-`params/launch/simulate/` 与包内 `launch/` 同步，由 `system` 包安装到 **`bringup_launch/simulate/`**。
+生产入口的唯一源码是 `params/launch/simulate/simulate.launch.py`，由 `simulate` 包安装；包内 `launch/test.launch.py` 仅用于测试。
 
 ```bash
 cd /path/to/openDelivery
@@ -336,7 +340,6 @@ source install/setup.bash
 
 ros2 launch simulate simulate.launch.py
 # ros2 launch simulate simulate.launch.py namespace:=robot2
-# ros2 launch system bringup_launch/simulate/simulate.launch.py
 ros2 launch simulate test.launch.py
 ```
 

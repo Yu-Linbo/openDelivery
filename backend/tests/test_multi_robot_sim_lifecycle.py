@@ -151,20 +151,16 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         )
 
     def test_launch_spawn_slots_match_map_default_positions(self):
-        paths = (
-            PROJECT_ROOT / "src" / "simulate" / "simulate" / "launch" / "simulate.launch.py",
-            PROJECT_ROOT / "params" / "launch" / "simulate" / "simulate.launch.py",
-        )
+        path = PROJECT_ROOT / "params" / "launch" / "simulate" / "simulate.launch.py"
         expected_rows = (
             '"1": (-14.41, 12.54, 0.05, 0.0)',
             '"2": (6.81, 12.92, 0.05, 0.0)',
             '"3": (-6.01, -7.04, 0.05, 0.0)',
             '"4": (6.45, -7.81, 0.05, 0.0)',
         )
-        for path in paths:
-            text = path.read_text(encoding="utf-8")
-            for row in expected_rows:
-                self.assertIn(row, text)
+        text = path.read_text(encoding="utf-8")
+        for row in expected_rows:
+            self.assertIn(row, text)
 
     def test_spawn_slot_assigns_unique_lidar_collision_bit(self):
         orchestrator = self._orchestrator()

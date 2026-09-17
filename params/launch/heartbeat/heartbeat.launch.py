@@ -1,4 +1,4 @@
-"""Keep in sync with openDelivery/params/launch/system/heartbeat.launch.py.
+"""Production heartbeat launch; installed by the heartbeat package.
 
 Isolation: PushRosNamespace so publisher/service use relative names under /<namespace>/.
 health_monitor + task_manager are started by sim_bringup.sh (after heartbeat lifecycle
