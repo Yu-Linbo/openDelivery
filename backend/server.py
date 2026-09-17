@@ -1126,6 +1126,26 @@ SIM_PRESENCE = SimPresenceState()
 
 
 SIM_BOOT_GRACE_SEC = 90.0
+DDS_RECOVERY_GRACE_SEC = float(
+    os.environ.get("OPEN_DELIVERY_DDS_RECOVERY_GRACE_SEC") or 75.0
+)
+_DDS_RECOVERY_LOCK = threading.Lock()
+_DDS_RECOVERY_PENDING = set()
+
+
+def _backend_is_supervised() -> bool:
+    explicit = str(
+        os.environ.get("OPEN_DELIVERY_BACKEND_SUPERVISED") or ""
+    ).strip().lower()
+    if explicit in ("1", "true", "yes"):
+        return True
+    # Rolling backend restarts can still be handled by an already-running
+    # start_web_stack.sh whose environment predates the explicit marker.
+    try:
+        parent_cmdline = Path(f"/proc/{os.getppid()}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"start_web_stack.sh" in parent_cmdline
 
 
 def _robot_live_online(rid: str) -> bool:
@@ -1144,6 +1164,63 @@ def _robot_live_online(rid: str) -> bool:
     except Exception:
         pass
     return False
+
+
+def _run_startup_heartbeat_recovery_check(rid: str, terminate_fn=None) -> bool:
+    """Restart a supervised backend once when its DDS participant is wedged.
+
+    The robot stack is a separate process group and remains running. A fresh
+    backend process creates a new DDS participant, which restores discovery and
+    heartbeat delivery without restarting Gazebo or the robot stack.
+    """
+    if not _backend_is_supervised() or _robot_live_online(rid):
+        return False
+
+    managed = ROS_NODE_MANAGER.status().get("managed_nodes") or []
+    robot_process_running = any(
+        str(item.get("id") or "") == rid and bool(item.get("running"))
+        for item in managed
+        if isinstance(item, dict)
+    )
+    if not robot_process_running:
+        return False
+
+    print(
+        f"[dds-recovery] {rid} stack is running but heartbeat is missing; "
+        "restarting supervised backend to rebuild the DDS participant",
+        flush=True,
+    )
+    if terminate_fn is None:
+        terminate_fn = lambda: os.kill(os.getpid(), signal.SIGTERM)
+    terminate_fn()
+    return True
+
+
+def _schedule_startup_heartbeat_recovery(rid: str, grace_sec=None) -> bool:
+    """Schedule one recovery check for a user-triggered simulation startup."""
+    if not _backend_is_supervised():
+        return False
+    with _DDS_RECOVERY_LOCK:
+        if rid in _DDS_RECOVERY_PENDING:
+            return False
+        _DDS_RECOVERY_PENDING.add(rid)
+
+    delay = DDS_RECOVERY_GRACE_SEC if grace_sec is None else float(grace_sec)
+
+    def _watch() -> None:
+        try:
+            time.sleep(max(0.0, delay))
+            _run_startup_heartbeat_recovery_check(rid)
+        finally:
+            with _DDS_RECOVERY_LOCK:
+                _DDS_RECOVERY_PENDING.discard(rid)
+
+    threading.Thread(
+        target=_watch,
+        name=f"dds_recovery_{rid}",
+        daemon=True,
+    ).start()
+    return True
 
 
 def _build_presence_rows() -> dict:
@@ -2376,6 +2453,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 SIM_PRESENCE.mark_start_failed(robot_id)
                 self._send_json({"error": str(err)}, 500)
                 return
+            _schedule_startup_heartbeat_recovery(robot_id)
             self._send_json({"ok": True, **out})
             return
 

@@ -26,6 +26,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -571,8 +572,13 @@ bool remove_path_recursive(const std::string & path) {
   if (!path_exists(path)) {
     return true;
   }
-  const int rc = run_shell_command_sync("rm -rf " + shell_quote(path), 30000);
-  return rc == 0;
+  // Forking one `rm -rf` process per rotated bag imposes a minimum 100 ms
+  // wait in wait_process(). A large recovery backlog can therefore block the
+  // recorder (and robot shutdown) for tens of minutes. C++17 remove_all keeps
+  // the same no-symlink-following behavior without spawning child processes.
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  return !error;
 }
 
 std::string command_output(const std::string & command) {
@@ -1161,6 +1167,10 @@ private:
     }
     const auto keep = log_bag::retention_keep_mask(tagged);
     for (std::size_t i = 0; i < names.size(); ++i) {
+      if (g_stop_requested.load()) {
+        log_recovery("retention interrupted by shutdown request");
+        break;
+      }
       if (keep[i] || tagged[i]) {
         continue;
       }

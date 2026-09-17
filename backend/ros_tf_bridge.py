@@ -260,6 +260,7 @@ class OpenDeliveryTfBridgeNode(Node):
         self._robot_status_topic_by_id: Dict[str, str] = {}
         self._robot_status_subs: Dict[str, Any] = {}
         self._robot_status_payload_by_id: Dict[str, Dict[str, Any]] = {}
+        self._robot_status_error_last_log_monotonic: Dict[str, float] = {}
         self._robot_specific_subs_enabled = False
         self._wait_enable_robot_specific_timer = None
         self._sub_scan: Dict[str, Any] = {}
@@ -604,8 +605,19 @@ class OpenDeliveryTfBridgeNode(Node):
                     topic=topic_name,
                     stamp_ns=last_ns,
                 )
-            except Exception:  # noqa: BLE001
-                return
+            except Exception as exc:  # noqa: BLE001
+                # A malformed/custom-message mismatch must be visible during
+                # bringup diagnosis. Throttle per robot because heartbeat is a
+                # high-frequency topic and a persistent error would otherwise
+                # flood the service log.
+                now = time.monotonic()
+                last_log = self._robot_status_error_last_log_monotonic.get(rid, 0.0)
+                if now - last_log >= 5.0:
+                    self._robot_status_error_last_log_monotonic[rid] = now
+                    self.get_logger().error(
+                        f"failed to process {topic_name} for {rid}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
         return _cb
 

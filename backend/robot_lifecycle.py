@@ -89,6 +89,17 @@ def _persisted_auto_mapping(last: Optional[Dict[str, Any]]) -> bool:
     return str(last.get("robot_status") or "").strip().lower() == "mapping"
 
 
+def _is_robot_log_recorder_process(argv: List[str], robot_id: str) -> bool:
+    if not any(Path(arg).name == "robot_log_recorder" for arg in argv):
+        return False
+    return any(
+        arg == "--robot-name"
+        and index + 1 < len(argv)
+        and argv[index + 1] == robot_id
+        for index, arg in enumerate(argv)
+    )
+
+
 class RobotLifecycleOrchestrator:
     """Backend orchestration layer for lifecycle-style robot stack control."""
 
@@ -422,6 +433,7 @@ class RobotLifecycleOrchestrator:
             except (OSError, ProcessLookupError):
                 continue
             joined = " ".join(argv)
+            is_robot_recorder = _is_robot_log_recorder_process(argv, rid)
             namespaced = any(
                 arg == namespace_token or arg.startswith(namespace_token + "/")
                 for arg in argv
@@ -435,6 +447,7 @@ class RobotLifecycleOrchestrator:
                 or robot_arg in argv
                 or bringup_pattern.search(joined)
                 or stale_robot_cli
+                or is_robot_recorder
             ):
                 targets.append(int(entry.name))
         for sig in (signal.SIGTERM, signal.SIGKILL):

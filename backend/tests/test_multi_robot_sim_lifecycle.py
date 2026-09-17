@@ -41,6 +41,22 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
     def tearDown(self):
         ros_node_store.clear()
 
+    def test_stale_process_matching_includes_only_the_selected_robot_recorder(self):
+        argv = [
+            "/workspace/install/log_bag/lib/log_bag/robot_log_recorder",
+            "--robot-name",
+            "robot1",
+            "--root",
+            "/workspace/log_bag",
+        ]
+        self.assertTrue(robot_lifecycle._is_robot_log_recorder_process(argv, "robot1"))
+        self.assertFalse(robot_lifecycle._is_robot_log_recorder_process(argv, "robot2"))
+        self.assertFalse(
+            robot_lifecycle._is_robot_log_recorder_process(
+                ["python3", "worker.py", "--robot-name", "robot1"], "robot1"
+            )
+        )
+
     def test_ros_node_manager_reuses_persistent_graph_without_cli_processes(self):
         ros_node_store.set_nodes(["/robot1/heartbeat", "/robot1/task_manager"])
         manager = server.RosNodeManager(PROJECT_ROOT)

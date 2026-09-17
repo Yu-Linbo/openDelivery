@@ -244,7 +244,9 @@ BACKEND_PID=""
 backend_supervisor() {
   while [[ "${STOP_ALL}" -eq 0 ]]; do
     echo "[open-delivery] starting backend on ${BACKEND_HOST}:${BACKEND_PORT} (ROBOT_POSE_MODE=${ROBOT_POSE_MODE})"
-    MAP_API_PORT="${BACKEND_PORT}" MAP_API_HOST="${BACKEND_HOST}" python3 "${BACKEND_SCRIPT}" &
+    OPEN_DELIVERY_BACKEND_SUPERVISED=1 \
+      MAP_API_PORT="${BACKEND_PORT}" MAP_API_HOST="${BACKEND_HOST}" \
+      python3 "${BACKEND_SCRIPT}" &
     BACKEND_PID=$!
     wait "${BACKEND_PID}" || true
     if [[ "${STOP_ALL}" -ne 0 ]]; then
