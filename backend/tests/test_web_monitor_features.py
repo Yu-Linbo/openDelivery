@@ -178,6 +178,25 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("max-width: 1400px", css)
         self.assertIn(".content.content--monitor", css)
 
+    def test_web_console_supports_chinese_and_english(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        i18n = (ROOT / "web" / "i18n.js").read_text(encoding="utf-8")
+        css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertEqual(html.count('id="language-select"'), 1)
+        self.assertIn('<option value="zh-CN">中文</option>', html)
+        self.assertIn('<option value="en">English</option>', html)
+        self.assertIn('src="./i18n.js?', html)
+        self.assertLess(html.index('src="./i18n.js?'), html.index('src="./app.js?'))
+        self.assertIn('const DEFAULT_LOCALE = "zh-CN"', i18n)
+        self.assertIn('openDelivery_language_v1', i18n)
+        self.assertIn('document.documentElement.lang = locale', i18n)
+        self.assertIn('document.title = locale === DEFAULT_LOCALE', i18n)
+        self.assertIn('MutationObserver', i18n)
+        self.assertIn('wrapCanvasText("fillText")', i18n)
+        self.assertIn('window.OpenDeliveryI18n', i18n)
+        self.assertIn('.language-picker', css)
+
     def test_log_bag_player_is_offline_and_complete(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

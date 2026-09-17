@@ -571,12 +571,60 @@ body {
 
 .sidebar {
   grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
   padding: 18px 14px;
   background: var(--panel);
   position: sticky;
   top: 0;
   height: 100vh;
+  box-sizing: border-box;
+}
+
+.language-picker {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 2px 8px;
+  align-items: center;
+  margin-top: auto;
+  padding: 12px 14px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+}
+
+.language-picker__icon {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #bfdbfe;
+  font-weight: 700;
+}
+
+.language-picker__label {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.language-picker select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 26px 5px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 7px;
+  background: #172033;
+  color: #f8fafc;
+  font: inherit;
+  cursor: pointer;
+}
+
+.language-picker select:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
 }
 
 
