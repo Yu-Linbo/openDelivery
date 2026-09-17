@@ -16,6 +16,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 os.environ.setdefault("ROBOT_POSE_MODE", "mock")
 
 import robot_lifecycle  # noqa: E402
+import ros_node_store  # noqa: E402
 import server  # noqa: E402
 
 
@@ -37,6 +38,22 @@ class FakeRosNodeManager:
 
 
 class MultiRobotSimulationLifecycleTest(unittest.TestCase):
+    def tearDown(self):
+        ros_node_store.clear()
+
+    def test_ros_node_manager_reuses_persistent_graph_without_cli_processes(self):
+        ros_node_store.set_nodes(["/robot1/heartbeat", "/robot1/task_manager"])
+        manager = server.RosNodeManager(PROJECT_ROOT)
+
+        with mock.patch.object(server.subprocess, "run") as run:
+            nodes = manager.list_ros_nodes()
+
+        self.assertEqual(
+            [row["name"] for row in nodes],
+            ["/robot1/heartbeat", "/robot1/task_manager"],
+        )
+        run.assert_not_called()
+
     def test_direct_backend_start_defaults_to_compatible_fastdds(self):
         env = {}
 

@@ -46,6 +46,10 @@ constexpr std::uintmax_t kDefaultMaxRobotBytes = 1024U * 1024U * 1024U;
 constexpr std::uintmax_t kDefaultPruneTargetBytes = 500U * 1024U * 1024U;
 constexpr std::uintmax_t kMinArchiveBagBytes = 64U * 1024U;
 constexpr auto kCriticalTopicGrace = std::chrono::seconds(10);
+constexpr auto kCriticalTopicCheckInterval = std::chrono::seconds(10);
+constexpr auto kCriticalTopicStall = std::chrono::seconds(30);
+constexpr auto kRobotStatusStall = std::chrono::seconds(30);
+constexpr auto kMaxRecorderRestartBackoff = std::chrono::seconds(60);
 constexpr auto kStorageCheckInterval = std::chrono::seconds(5);
 
 std::atomic_bool g_stop_requested{false};
@@ -905,6 +909,15 @@ public:
       " prune_target_bytes=" + std::to_string(cfg_.prune_target_bytes));
     while (!g_stop_requested.load()) {
       rclcpp::spin_some(node_);
+      const auto heartbeat_now = std::chrono::steady_clock::now();
+      if (has_latest_robot_status_ &&
+        heartbeat_now - last_robot_status_received_steady_ >= kRobotStatusStall)
+      {
+        write_line("robot_status heartbeat stalled; restarting recorder process");
+        stop_current_bag("heartbeat_stalled");
+        archive_text_log();
+        return 3;
+      }
       write_bag_tags_marker(current_bag_path_, current_tags_);
       rotate_bag_if_needed();
       if (bag_pid_ <= 0) {
@@ -981,6 +994,7 @@ private:
 
   void on_robot_status(const custom_msgs_srvs::msg::RobotStatus & msg) {
     latest_robot_status_ = record_robot_status(msg);
+    last_robot_status_received_steady_ = std::chrono::steady_clock::now();
     has_latest_robot_status_ = true;
     if (!current_bag_path_.empty()) {
       current_status_samples_.push_back(latest_robot_status_);
@@ -1309,6 +1323,10 @@ private:
   }
 
   void start_next_bag_if_needed() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_bag_start_not_before_) {
+      return;
+    }
     const auto topics = robot_topics();
     const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
     if (!has_latest_robot_status_) {
@@ -1335,7 +1353,10 @@ private:
       latest_robot_status_.timestamp_ns = system_now_ns();
       current_status_samples_.push_back(latest_robot_status_);
     }
-    current_bag_started_steady_ = std::chrono::steady_clock::now();
+    current_bag_started_steady_ = now;
+    next_bag_health_check_ = now + kCriticalTopicGrace;
+    last_critical_progress_ = now;
+    last_critical_message_count_ = 0;
     current_bag_health_verified_ = false;
     std::ostringstream cmd;
     cmd << "export AMENT_PREFIX_PATH=" << shell_quote(custom_msgs_prefix)
@@ -1350,6 +1371,29 @@ private:
     bag_pid_ = spawn_shell_command(cmd.str(), log_fd_);
   }
 
+  void restart_unhealthy_bag(const std::string & reason, std::uintmax_t status_messages)
+  {
+    consecutive_unhealthy_bags_ = std::min(5U, consecutive_unhealthy_bags_ + 1U);
+    const unsigned int exponent = std::min(
+      4U, consecutive_unhealthy_bags_ - 1U);
+    const auto backoff = std::min(
+      kMaxRecorderRestartBackoff, std::chrono::seconds(5U * (1U << exponent)));
+    write_line(
+      "bag unhealthy: " + reason +
+      " robot_status_messages=" + std::to_string(status_messages) +
+      " retry_in_seconds=" + std::to_string(backoff.count()));
+    stop_process_group(bag_pid_, SIGINT);
+    wait_process(bag_pid_);
+    bag_pid_ = -1;
+    const auto failed_bytes = directory_size(current_bag_path_);
+    if (current_tags_.empty()) {
+      discard_current_bag(reason, failed_bytes);
+    } else {
+      archive_current_bag(reason);
+    }
+    next_bag_start_not_before_ = std::chrono::steady_clock::now() + backoff;
+  }
+
   void rotate_bag_if_needed() {
     if (bag_pid_ <= 0) {
       return;
@@ -1361,29 +1405,36 @@ private:
       archive_current_bag("recorder_exit");
       return;
     }
+    const auto now = std::chrono::steady_clock::now();
     const auto recording_age =
-      std::chrono::steady_clock::now() - current_bag_started_steady_;
-    if (!current_bag_health_verified_ && has_latest_robot_status_ &&
-      recording_age >= kCriticalTopicGrace)
+      now - current_bag_started_steady_;
+    if (now >= next_bag_health_check_)
     {
       const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
       std::uintmax_t status_messages = 0;
       const bool count_ready = sqlite_topic_message_count(
         current_bag_path_, critical_status_topic, &status_messages);
-      if (count_ready && status_messages > 0) {
-        current_bag_health_verified_ = true;
-      } else if (count_ready) {
-        // This process has already received RobotStatus and persists it in the
-        // sidecar.  Some rosbag2/RMW combinations create all subscriptions but
-        // do not make messages visible in SQLite during this short grace window.
-        // Killing the recorder every ten seconds turns a transient/transport
-        // problem into an endless stream of empty bags.  Keep recording and let
-        // the sidecar provide the critical status during offline replay.
-        write_line(
-          "bag warning: robot_status is not visible in SQLite after grace period; "
-          "continuing with recorder sidecar fallback");
-        current_bag_health_verified_ = true;
+      if (count_ready) {
+        if (status_messages > last_critical_message_count_) {
+          last_critical_message_count_ = status_messages;
+          last_critical_progress_ = now;
+          current_bag_health_verified_ = true;
+          consecutive_unhealthy_bags_ = 0;
+        }
+        const bool heartbeat_fresh = has_latest_robot_status_ &&
+          now - last_robot_status_received_steady_ < kCriticalTopicGrace;
+        const bool missing_initial_status = !current_bag_health_verified_ &&
+          recording_age >= kCriticalTopicGrace;
+        const bool status_stalled = current_bag_health_verified_ &&
+          now - last_critical_progress_ >= kCriticalTopicStall;
+        if (heartbeat_fresh && (missing_initial_status || status_stalled)) {
+          const std::string reason = missing_initial_status
+            ? "missing_robot_status" : "stalled_robot_status";
+          restart_unhealthy_bag(reason, status_messages);
+          return;
+        }
       }
+      next_bag_health_check_ = now + kCriticalTopicCheckInterval;
     }
     const auto logical_bytes = sqlite_logical_bag_size(current_bag_path_);
     const auto bytes = logical_bytes ? logical_bytes : directory_size(current_bag_path_);
@@ -1496,6 +1547,7 @@ private:
   rclcpp::Subscription<custom_msgs_srvs::msg::RobotStatus>::SharedPtr robot_status_sub_;
   RecordedRobotStatus latest_robot_status_;
   bool has_latest_robot_status_{false};
+  std::chrono::steady_clock::time_point last_robot_status_received_steady_{};
   std::vector<RecordedRobotStatus> current_status_samples_;
   std::vector<std::string> active_task_ids_;
   std::string text_log_real_path_;
@@ -1507,6 +1559,11 @@ private:
   std::vector<std::string> current_bag_topics_;
   std::vector<std::string> current_tags_;
   std::chrono::steady_clock::time_point current_bag_started_steady_{};
+  std::chrono::steady_clock::time_point next_bag_health_check_{};
+  std::chrono::steady_clock::time_point last_critical_progress_{};
+  std::chrono::steady_clock::time_point next_bag_start_not_before_{};
+  std::uintmax_t last_critical_message_count_{0};
+  unsigned int consecutive_unhealthy_bags_{0};
   std::chrono::steady_clock::time_point next_storage_check_{};
   bool current_bag_health_verified_{false};
   bool prune_pending_{false};

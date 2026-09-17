@@ -35,6 +35,7 @@ from ros_sensor_store import (
 from robot_lifecycle import RobotLifecycleOrchestrator, run_shell_process_group
 import map_assets
 import bag_replay
+import ros_node_store
 import ros_task_store
 import openclaw_chat
 
@@ -556,25 +557,11 @@ class RosNodeManager:
         return None
 
     def list_ros_nodes(self):
-        cmd = self._bash_prefix() + "ros2 node list"
-        try:
-            proc = subprocess.run(
-                ["bash", "-lc", cmd],
-                capture_output=True,
-                text=True,
-                timeout=4.0,
-                env=os.environ.copy(),
-            )
-            if proc.returncode != 0:
-                return []
-            out = []
-            for line in (proc.stdout or "").splitlines():
-                name = line.strip()
-                if name:
-                    out.append({"name": name, "running": True})
-            return out
-        except Exception:
-            return []
+        # Reuse the graph of the backend's persistent rclpy bridge. Spawning a
+        # ros2 CLI process on every status poll leaks Fast DDS SHM artifacts on
+        # Foxy and eventually breaks rosbag topic discovery.
+        snapshot = ros_node_store.get_snapshot()
+        return snapshot.get("nodes") if isinstance(snapshot.get("nodes"), list) else []
 
     def status(self):
         managed = [self._node_status(spec) for spec in self._managed_nodes]
@@ -1338,10 +1325,6 @@ def _lifecycle_set_quick(root_dir: Path, node_name: str, transition: str, timeou
 
 def _build_debug_nodes_view() -> dict:
     discovered = ROS_NODE_MANAGER.list_ros_nodes()
-    # DDS discovery can be jittery; one quick retry improves stability.
-    if not discovered:
-        time.sleep(0.25)
-        discovered = ROS_NODE_MANAGER.list_ros_nodes()
     names = sorted({str(n.get("name") or "").strip() for n in discovered if isinstance(n, dict)})
     names = [n for n in names if n]
     
@@ -1361,27 +1344,16 @@ def _build_debug_nodes_view() -> dict:
         )
         return any(h in n for h in hints)
 
-    def _should_probe_lifecycle_now(node_name: str) -> bool:
-        # Keep this endpoint responsive for the Web ROS panel.
-        # Probe only key orchestration nodes every poll; other candidates still
-        # keep lifecycle action buttons but skip per-request state probing.
-        n = str(node_name or "")
-        return (
-            "/slam/lifecycle_manager" in n
-            or "/heartbeat" in n
-            or "/navigation/lifecycle_manager" in n
-        )
-
     nodes = []
     for nm in names:
         lc_capable = _is_lifecycle_candidate(nm)
+        # Lifecycle transitions remain available on demand, but the background
+        # table never creates ROS CLI participants just to display a state.
         lc = (
-            _lifecycle_get_quick(ROOT_DIR, nm, timeout_s=3.0)
-            if lc_capable and _should_probe_lifecycle_now(nm)
+            {"available": True, "state": "unknown", "raw": "persistent-graph"}
+            if lc_capable
             else {"available": False, "state": "missing", "raw": "not-lifecycle-candidate"}
         )
-        if lc_capable and not _should_probe_lifecycle_now(nm):
-            lc = {"available": True, "state": "unknown", "raw": "deferred"}
         nodes.append(
             {
                 "name": nm,

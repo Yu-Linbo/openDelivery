@@ -173,6 +173,7 @@ def _task_status_to_msg(v: Any, default: str = "idle") -> str:
 import localization_command
 import ros_command_queue
 import ros_map_store
+import ros_node_store
 import ros_robot_status_store
 import ros_sensor_store
 import ros_task_store
@@ -354,6 +355,8 @@ class OpenDeliveryTfBridgeNode(Node):
             self.get_logger().info("enabled heartbeat topic discovery (/robot_status)")
 
         self.create_timer(2.0, self._retry_stale_mapping_subs)
+        self.create_timer(2.0, self._publish_node_graph)
+        self._publish_node_graph()
 
         # If there is *no* robot_status topic at all, do not create robot-specific
         # subscriptions (scan_2d/planned_path/mapping). Enable them once
@@ -377,6 +380,24 @@ class OpenDeliveryTfBridgeNode(Node):
             if self._robot_status_topic_rx.match(str(name)):
                 return True
         return False
+
+    def _publish_node_graph(self) -> None:
+        """Publish graph data without creating a short-lived DDS participant."""
+        try:
+            names = []
+            for name, namespace in self.get_node_names_and_namespaces():
+                node_name = str(name or "").strip("/")
+                node_namespace = str(namespace or "/").strip()
+                if not node_name:
+                    continue
+                if node_namespace in ("", "/"):
+                    full_name = f"/{node_name}"
+                else:
+                    full_name = f"/{node_namespace.strip('/')}/{node_name}"
+                names.append(full_name)
+            ros_node_store.set_nodes(names)
+        except Exception:  # noqa: BLE001
+            return
 
     def _wait_and_enable_robot_specific_subs(self) -> None:
         if self._robot_specific_subs_enabled:
@@ -1416,6 +1437,7 @@ def run_ros_tf_bridge(
             executor.spin_once(timeout_sec=0.05)
     finally:
         ros_command_queue.set_bridge_ready(False)
+        ros_node_store.clear()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

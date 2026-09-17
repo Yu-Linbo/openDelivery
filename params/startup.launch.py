@@ -35,6 +35,8 @@ def generate_launch_description():
                 name="robot_log_recorder",
                 namespace=LaunchConfiguration("robot_name"),
                 output="screen",
+                respawn=True,
+                respawn_delay=5.0,
                 arguments=[
                     "--robot-name",
                     LaunchConfiguration("robot_name"),
