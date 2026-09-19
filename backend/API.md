@@ -158,7 +158,7 @@ These are safe for both Web and future AI workflows when called through backend.
 
 - `POST /api/robot/motion/teleop`
   - Body: `{ "robot_id": "robot2", "linear": 0.2, "angular": 0, "active": true, "confirmed": true, "session_id": "...", "sequence": 1 }`.
-  - Purpose: one publisher per robot for hold-to-drive Web teleop; release/stop replaces it and publishes zero. Stale sequence numbers are ignored; a 0.8 s renewable lease automatically stops output after browser/network loss. Backend shutdown also stops publishers and best-effort publishes zero.
+  - Purpose: hold-to-drive Web teleop through `/<robot>/advance/cmd_vel`. The ROS bridge switches heartbeat control mode to `JOY` while active, publishes zero and restores `AUTO` on release, and ignores stale sequence numbers. A 0.8 s renewable lease automatically stops output after browser/network loss.
 
 ## Reserved For AI / Debug
 

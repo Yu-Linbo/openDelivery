@@ -257,6 +257,45 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         with mock.patch.object(robot_lifecycle.subprocess, "run", return_value=completed):
             self.assertFalse(orchestrator._native_simulation_entity_present("robot2"))
 
+    def test_entity_presence_falls_back_to_ros_model_list(self):
+        orchestrator = self._orchestrator()
+        completed = subprocess.CompletedProcess(
+            ["ros2"],
+            0,
+            stdout=(
+                "response:\n"
+                "gazebo_msgs.srv.GetModelList_Response("
+                "model_names=['ground_plane', 'robot2'], success=True)\n"
+            ),
+            stderr="",
+        )
+        with mock.patch(
+            "ros_sensor_store.get_gazebo_models", return_value={}
+        ), mock.patch.object(
+            orchestrator, "_run_shell", return_value=completed
+        ) as run, mock.patch.object(
+            robot_lifecycle.subprocess, "run"
+        ) as native_run:
+            self.assertTrue(orchestrator._simulation_entity_present("robot2"))
+        self.assertIn("/get_model_list", run.call_args.args[0])
+        native_run.assert_not_called()
+
+    def test_absent_entity_is_not_deleted_during_fresh_start(self):
+        orchestrator = self._orchestrator()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_services_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_gazebo_transport_ready", return_value=True))
+            stack.enter_context(mock.patch.object(orchestrator, "_simulation_entity_present", return_value=False))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_simulation_world"))
+            stack.enter_context(mock.patch.object(orchestrator, "_ensure_robot_specs"))
+            stack.enter_context(mock.patch.object(orchestrator, "_sim_managed_running", return_value=False))
+            stack.enter_context(mock.patch.object(orchestrator, "_terminate_stale_robot_processes"))
+            stack.enter_context(mock.patch.object(orchestrator, "_start_if_needed"))
+            delete = stack.enter_context(mock.patch.object(orchestrator, "_delete_simulation_entity"))
+            stack.enter_context(mock.patch.object(robot_lifecycle.time, "sleep"))
+            orchestrator.startup_selected_robot("robot2", is_online=lambda _rid: False)
+        delete.assert_not_called()
+
     def test_gazebo_transport_rejects_success_without_pose(self):
         orchestrator = self._orchestrator()
         completed = subprocess.CompletedProcess(
@@ -312,6 +351,14 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         empty = subprocess.CompletedProcess(["ros2"], 124, stdout="", stderr="")
         with mock.patch.object(orchestrator, "_run_shell", return_value=empty):
             self.assertFalse(orchestrator._gazebo_data_plane_ready())
+
+    def test_gazebo_wait_uses_fresh_bridge_sample_without_cold_cli(self):
+        orchestrator = self._orchestrator()
+        with mock.patch.object(
+            orchestrator, "_gazebo_bridge_data_ready", return_value=True
+        ), mock.patch.object(orchestrator, "_run_shell") as run:
+            orchestrator._wait_for_gazebo(timeout_sec=0.1)
+        run.assert_not_called()
 
     def test_fastdds_cleanup_uses_official_zombie_cleaner(self):
         orchestrator = self._orchestrator()
@@ -483,7 +530,7 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
             )
 
         ensure_world.assert_called_once_with()
-        delete_entity.assert_called_once_with("robot2")
+        delete_entity.assert_not_called()
         self.assertIn(("robot2", "pause"), manager.controls)
         self.assertNotIn(("simulation_world", "pause"), manager.controls)
         self.assertTrue(start_robot.call_args.kwargs["force"])

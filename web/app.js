@@ -5015,6 +5015,7 @@ let teleopHeldAction = "";
 let teleopHeldRobotId = "";
 let teleopRequestSeq = 0;
 let teleopHeartbeatTimer = null;
+let teleopPointerId = null;
 const teleopSessionId = (window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`).replace(/[^A-Za-z0-9_-]/g, "_");
 function teleopVector(action) {
   const lin = Math.min(1.2, Math.max(0.02, Number(teleopLinear && teleopLinear.value) || 0.2));
@@ -5057,14 +5058,38 @@ function releaseTeleop(force = false) {
 }
 function initMonitorTeleop() {
   document.querySelectorAll("button[data-teleop]").forEach((button) => {
-    button.addEventListener("pointerdown", (ev) => { ev.preventDefault(); button.setPointerCapture?.(ev.pointerId); setTeleopHeld(button.dataset.teleop); });
-    ["pointerup", "pointercancel", "lostpointercapture"].forEach((name) => button.addEventListener(name, releaseTeleop));
+    button.addEventListener("pointerdown", (ev) => {
+      if ((ev.pointerType === "mouse" && ev.button !== 0) || ev.isPrimary === false) return;
+      ev.preventDefault();
+      teleopPointerId = ev.pointerId;
+      button.setPointerCapture?.(ev.pointerId);
+      setTeleopHeld(button.dataset.teleop);
+    });
+    const finishPointer = (ev) => {
+      if (teleopPointerId == null || ev.pointerId !== teleopPointerId) return;
+      teleopPointerId = null;
+      releaseTeleop();
+    };
+    button.addEventListener("pointerup", finishPointer);
+    button.addEventListener("pointercancel", finishPointer);
+    button.addEventListener("contextmenu", (ev) => ev.preventDefault());
+    button.addEventListener("dragstart", (ev) => ev.preventDefault());
   });
+  window.addEventListener("pointerup", (ev) => {
+    if (teleopPointerId == null || ev.pointerId !== teleopPointerId) return;
+    teleopPointerId = null;
+    releaseTeleop();
+  }, true);
+  window.addEventListener("pointercancel", (ev) => {
+    if (teleopPointerId == null || ev.pointerId !== teleopPointerId) return;
+    teleopPointerId = null;
+    releaseTeleop();
+  }, true);
   const keys = { KeyW: "forward", ArrowUp: "forward", KeyS: "backward", ArrowDown: "backward", KeyA: "left", ArrowLeft: "left", KeyD: "right", ArrowRight: "right" };
   window.addEventListener("keydown", (ev) => { if (document.activeElement && /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return; if (keys[ev.code]) { ev.preventDefault(); setTeleopHeld(keys[ev.code]); } });
   window.addEventListener("keyup", (ev) => { if (keys[ev.code] && teleopHeldAction === keys[ev.code]) releaseTeleop(); });
-  window.addEventListener("blur", releaseTeleop);
-  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseTeleop(); });
+  window.addEventListener("blur", () => { teleopPointerId = null; releaseTeleop(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) { teleopPointerId = null; releaseTeleop(); } });
 }
 
 function initGazeboPage() {

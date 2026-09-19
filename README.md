@@ -155,7 +155,7 @@ cd /home/ubuntu/project_openclaw/openDelivery
 - **地图点位**：支持电梯内点、电梯等待点、待机点、自定义点位和重定位点；重定位点与自定义点尺寸一致并复用删除功能。
 - **语义叠加**：语义 PNG 可按开关以透明层叠加，不替换占用栅格底图。
 - **地图编辑**：支持栅格画笔/擦除、语义标注/擦除，以及点位新增、移动、删除。跨层修改会一起保存；切图前有未保存确认。
-- **简易遥控**：按住方向按钮或 `W/A/S/D` 发布机器人命名空间下的 `cmd_vel`，松手、页面失焦、切换机器人或网络租约超时都会停车。
+- **简易遥控**：按住方向按钮或 `W/A/S/D` 时切换到底盘 `JOY` 模式，并向机器人命名空间下的 `advance/cmd_vel` 发布；松手、页面失焦、切换机器人或网络租约超时会先停车，再恢复 `AUTO`。
 
 ### 地图目录约定
 
@@ -178,7 +178,7 @@ cd /home/ubuntu/project_openclaw/openDelivery
 - **保存地图**：仅在建图楼层时显示「保存为 / 保存地图」工具条；写入 `map/<名称>/`（`nav2_map_server` 的 `map_saver_cli`）。**切图** 时：后端向 `/<robot_id>/robot_status` 发布 `RobotStatus`，在消息里设置 `current_map`（已保存楼层用该楼层名；建图楼层用「保存为」输入框中的名称）。
 - **`GET /api/robot/pose`**（及 SSE）：每台机器人的当前楼层在 JSON 字段 **`active_floor`** 中（由 TF 桥从 `RobotStatus` 合并而来）；前端不再使用已废弃的 `/*/current_map` 话题，也不单独轮询该话题。
 - **地图资源 API**：`GET /api/maps/{floor}/assets` 读取语义图例和点位；三个 POST 路由分别保存点位、栅格和语义图。
-- **遥控 API**：`POST /api/robot/motion/teleop` 使用浏览器会话、单调序列号和 0.8 秒可续租租约；后端始终维持每机器人最多一个遥控发布进程。
+- **遥控 API**：`POST /api/robot/motion/teleop` 使用浏览器会话、单调序列号和 0.8 秒可续租租约；长驻 ROS 桥为每台机器人维持单一遥控状态，并通过 heartbeat 服务在 `JOY` / `AUTO` 间切换。
 - **Web 导航任务**：`POST /api/robot/motion/goto` 转成 `TaskInfo` 后按下列路径执行；Web 桥订阅根 `TaskStatus`，供机器人详情页轮询展示。
 
 ```text

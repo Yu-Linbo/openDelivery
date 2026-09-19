@@ -262,6 +262,8 @@ class RobotLifecycleOrchestrator:
 
     def _gazebo_data_plane_ready(self) -> bool:
         """Require one live Gazebo ROS sample, not graph visibility alone."""
+        if self._gazebo_bridge_data_ready():
+            return True
         try:
             proc = self._run_shell(
                 "timeout 4s ros2 topic echo /gazebo/model_states",
@@ -272,6 +274,24 @@ class RobotLifecycleOrchestrator:
         # Topic echo is continuous and normally exits through GNU timeout with
         # code 124. Any output proves that DDS user data is actually flowing.
         return bool((proc.stdout or "").strip())
+
+    def _gazebo_bridge_data_ready(self) -> bool:
+        """Use the long-lived Web bridge sample instead of a cold ROS CLI probe."""
+        try:
+            from ros_sensor_store import get_gazebo_models
+
+            snapshot = get_gazebo_models() or {}
+            cached_at = float(snapshot.get("_cached_at") or snapshot.get("stamp") or 0.0)
+            if not snapshot.get("available") or time.time() - cached_at > 3.0:
+                return False
+            names = {
+                str(item.get("name") or "").strip()
+                for item in snapshot.get("models") or []
+                if isinstance(item, dict)
+            }
+            return "ground_plane" in names
+        except Exception:
+            return False
 
     def _clean_fastdds_shm_zombies(self) -> None:
         """Best-effort cleanup of abandoned Fast DDS SHM segments.
@@ -300,6 +320,12 @@ class RobotLifecycleOrchestrator:
     def _wait_for_gazebo(self, timeout_sec: float = 60.0) -> None:
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
+            # The bridge is already part of this process and stays discovered.
+            # A fresh model-state sample proves the Gazebo ROS data plane is
+            # alive without paying Foxy's several-second cold CLI discovery on
+            # every loop iteration.
+            if self._gazebo_bridge_data_ready():
+                return
             try:
                 proc = self._run_shell("ros2 service list", timeout=4.0)
             except Exception:
@@ -460,7 +486,7 @@ class RobotLifecycleOrchestrator:
                 time.sleep(1.0)
 
     def _simulation_entity_present(self, robot_id: str) -> Optional[bool]:
-        """Return entity presence from the fresh Web bridge cache, or None if unknown."""
+        """Return entity presence without invoking Gazebo's crash-prone native info query."""
         rid = self._ensure_robot(robot_id)
         try:
             from ros_sensor_store import get_gazebo_models
@@ -468,7 +494,7 @@ class RobotLifecycleOrchestrator:
             snapshot = get_gazebo_models() or {}
             cached_at = float(snapshot.get("_cached_at") or snapshot.get("stamp") or 0.0)
             if not snapshot.get("available") or time.time() - cached_at > 3.0:
-                return self._native_simulation_entity_present(rid)
+                return self._ros_simulation_entity_present(rid)
             names = {
                 str(item.get("name") or "").strip()
                 for item in snapshot.get("models") or []
@@ -476,7 +502,36 @@ class RobotLifecycleOrchestrator:
             }
             return rid in names
         except Exception:
-            return self._native_simulation_entity_present(rid)
+            return self._ros_simulation_entity_present(rid)
+
+    def _ros_simulation_entity_present(self, robot_id: str) -> Optional[bool]:
+        """Query the Gazebo ROS API when the bridge cache has no fresh sample.
+
+        ``gz model -m NAME -i`` can abort Gazebo Classic while the transport
+        connection is being recreated.  The GetModelList ROS service exercises
+        the same information path without creating that native transport race.
+        """
+        rid = self._ensure_robot(robot_id)
+        try:
+            proc = self._run_shell(
+                "ros2 service call /get_model_list "
+                "gazebo_msgs/srv/GetModelList '{}'",
+                timeout=7.0,
+            )
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            return None
+        if proc.returncode != 0:
+            return None
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        match = re.search(r"model_names\s*(?:=|:)\s*\[([^\]]*)\]", output)
+        if not match:
+            return None
+        names = {
+            value.strip().strip("'\"")
+            for value in match.group(1).split(",")
+            if value.strip()
+        }
+        return rid in names
 
     def _native_simulation_entity_present(self, robot_id: str) -> Optional[bool]:
         """Query Gazebo transport directly when the Web model cache is unavailable."""
@@ -504,7 +559,7 @@ class RobotLifecycleOrchestrator:
         for other_id in self._robot_from_state():
             if other_id == rid:
                 continue
-            if self._native_simulation_entity_present(other_id) is True:
+            if self._simulation_entity_present(other_id) is True:
                 return True
         return False
 
@@ -938,26 +993,28 @@ class RobotLifecycleOrchestrator:
                     pass
                 if self._gazebo_services_ready():
                     existing = self._simulation_entity_present(rid)
+                    if existing is True:
+                        deleted = self._delete_simulation_entity(rid)
+                        if not deleted:
+                            if self._other_simulation_entity_present(rid):
+                                raise RuntimeError(
+                                    f"failed to delete Gazebo entity {rid}; "
+                                    "preserving shared world with active peer robots"
+                                )
+                            self._restart_simulation_world()
+                time.sleep(0.8)
+            elif not sim_running:
+                # Remove a stale entity left by an interrupted backend/robot stack.
+                existing = self._simulation_entity_present(rid)
+                if existing is True:
                     deleted = self._delete_simulation_entity(rid)
-                    if existing is True and not deleted:
+                    if not deleted:
                         if self._other_simulation_entity_present(rid):
                             raise RuntimeError(
                                 f"failed to delete Gazebo entity {rid}; "
                                 "preserving shared world with active peer robots"
                             )
                         self._restart_simulation_world()
-                time.sleep(0.8)
-            elif not sim_running:
-                # Remove a stale entity left by an interrupted backend/robot stack.
-                existing = self._simulation_entity_present(rid)
-                deleted = self._delete_simulation_entity(rid)
-                if existing is True and not deleted:
-                    if self._other_simulation_entity_present(rid):
-                        raise RuntimeError(
-                            f"failed to delete Gazebo entity {rid}; "
-                            "preserving shared world with active peer robots"
-                        )
-                    self._restart_simulation_world()
             if force_restart or not sim_running:
                 self._terminate_stale_robot_processes(rid)
             spec = self._robot_process_spec(rid, sim_mode, spawn_pose, slot)

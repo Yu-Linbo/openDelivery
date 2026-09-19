@@ -69,7 +69,12 @@ private:
     const auto current = now();
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (control_status_ == "JOY" && fresh(advance_received_, advance_stamp_, current)) {
+      // A fresh operator command is the authority for the short command lease.
+      // Do not wait for the separately published heartbeat mode to make a full
+      // round trip: otherwise the first Web command can be discarded while the
+      // heartbeat is still changing AUTO -> JOY.  The advance command timeout
+      // remains the fail-safe if the browser, Web bridge, or DDS link disappears.
+      if (fresh(advance_received_, advance_stamp_, current)) {
         output = advance_cmd_;
       } else if (
         control_status_ == "AUTO" && fresh(navigation_received_, navigation_stamp_, current)) {

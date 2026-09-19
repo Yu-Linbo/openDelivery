@@ -11,11 +11,11 @@ sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("ROBOT_POSE_MODE", "none")
 
 import robot_motion_api as motion  # noqa: E402
+import ros_tf_bridge  # noqa: E402
 
 
 class WebMonitorFeatureTest(unittest.TestCase):
     def tearDown(self):
-        motion._TELEOP_PROCESSES.clear()
         motion._TELEOP_SEQUENCE.clear()
         motion._TELEOP_STATE.clear()
         motion._TELEOP_LEASE_DEADLINE.clear()
@@ -32,14 +32,9 @@ class WebMonitorFeatureTest(unittest.TestCase):
                 session_id="", sequence=0,
             )
 
-    @mock.patch.object(motion, "_start_ros_process")
-    def test_stale_start_cannot_override_newer_stop(self, start_process):
-        fake = mock.Mock()
-        fake.poll.return_value = None
-        start_process.return_value = fake
-        with mock.patch.object(motion, "_stop_teleop_process"), mock.patch.object(
-            motion, "_ros_run", return_value={"ok": True}
-        ):
+    @mock.patch.object(motion, "_send_teleop_command", return_value={"ok": True})
+    def test_stale_start_cannot_override_newer_stop(self, send_teleop):
+        with mock.patch.object(motion, "_send_teleop_command", send_teleop):
             stopped = motion.set_teleop_velocity(
                 "robot2", 0, 0, active=False, confirmed=True,
                 session_id="browser", sequence=2,
@@ -50,14 +45,13 @@ class WebMonitorFeatureTest(unittest.TestCase):
             )
         self.assertFalse(stopped["active"])
         self.assertTrue(stale["stale"])
-        start_process.assert_not_called()
+        send_teleop.assert_called_once_with("robot2", 0.0, 0.0, active=False)
 
     @mock.patch.object(motion, "_ensure_teleop_watchdog")
-    @mock.patch.object(motion, "_start_ros_process")
-    def test_active_teleop_sets_a_short_lease(self, start_process, ensure_watchdog):
-        fake = mock.Mock()
-        fake.poll.return_value = None
-        start_process.return_value = fake
+    @mock.patch.object(motion, "_send_teleop_command", return_value={"ok": True})
+    def test_active_teleop_sets_a_short_lease(
+        self, send_teleop, ensure_watchdog
+    ):
         result = motion.set_teleop_velocity(
             "robot2", 0.2, 0, active=True, confirmed=True,
             session_id="browser", sequence=1,
@@ -65,20 +59,78 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertTrue(result["active"])
         self.assertLessEqual(result["lease_sec"], 1.0)
         self.assertIn("robot2", motion._TELEOP_LEASE_DEADLINE)
+        send_teleop.assert_called_once_with("robot2", 0.2, 0.0, active=True)
         ensure_watchdog.assert_called_once()
 
     def test_expired_teleop_stops_publisher_and_publishes_zero(self):
-        motion._TELEOP_PROCESSES["robot2"] = mock.Mock()
         motion._TELEOP_STATE["robot2"] = ("browser", 0.2, 0.0)
         motion._TELEOP_LEASE_DEADLINE["robot2"] = 10.0
-        with mock.patch.object(motion, "_stop_teleop_process") as stop, mock.patch.object(
-            motion, "_ros_run", return_value={"ok": True}
-        ) as ros_run:
+        with mock.patch.object(
+            motion, "_send_teleop_command", return_value={"ok": True}
+        ) as send_teleop:
             expired = motion._expire_teleop_leases(now=10.1)
         self.assertEqual(expired, ["robot2"])
-        stop.assert_called_once_with("robot2")
         self.assertNotIn("robot2", motion._TELEOP_LEASE_DEADLINE)
-        self.assertIn("linear: {x: 0.0", ros_run.call_args.args[0])
+        send_teleop.assert_called_once_with("robot2", 0.0, 0.0, active=False)
+
+    def test_teleop_uses_bridge_queue(self):
+        with mock.patch(
+            "ros_command_queue.enqueue_command_and_wait", return_value={"ok": True}
+        ) as enqueue:
+            motion._send_teleop_command("robot2", 0.2, 0.0, active=True)
+        command = enqueue.call_args.args[0]
+        self.assertEqual(command["type"], "teleop")
+        self.assertEqual(command["robot_id"], "robot2")
+        self.assertTrue(command["active"])
+
+    def test_bridge_routes_teleop_to_joy_input_and_zeroes_on_stop(self):
+        bridge = mock.Mock()
+        bridge._teleop_state = {}
+        bridge._teleop_desired_status = {}
+        bridge._ensure_teleop_interfaces = mock.Mock()
+        bridge._publish_teleop_twist = mock.Mock()
+        with mock.patch.object(ros_tf_bridge.time, "monotonic", return_value=10.0):
+            ros_tf_bridge.OpenDeliveryTfBridgeNode._handle_teleop_command(
+                bridge,
+                {
+                    "robot_id": "robot2",
+                    "linear": 0.2,
+                    "angular": 0.0,
+                    "active": True,
+                    "lease_sec": 0.8,
+                },
+            )
+        self.assertEqual(bridge._teleop_desired_status["robot2"], "JOY")
+        self.assertEqual(bridge._teleop_state["robot2"]["deadline"], 10.8)
+        bridge._publish_teleop_twist.assert_called_once_with("robot2", 0.2, 0.0)
+
+        ros_tf_bridge.OpenDeliveryTfBridgeNode._handle_teleop_command(
+            bridge, {"robot_id": "robot2", "active": False}
+        )
+        self.assertNotIn("robot2", bridge._teleop_state)
+        self.assertEqual(bridge._teleop_desired_status["robot2"], "AUTO")
+        bridge._publish_teleop_twist.assert_called_with("robot2", 0.0, 0.0)
+
+        with self.assertRaises(ValueError):
+            ros_tf_bridge.OpenDeliveryTfBridgeNode._handle_teleop_command(
+                bridge,
+                {"robot_id": "robot2", "linear": 1.3, "active": True},
+            )
+
+    def test_bridge_teleop_lease_expiry_stops_and_restores_auto(self):
+        bridge = mock.Mock()
+        bridge._teleop_state = {
+            "robot2": {"linear": 0.2, "angular": 0.0, "deadline": 10.0}
+        }
+        bridge._teleop_desired_status = {"robot2": "JOY"}
+        bridge._publish_teleop_twist = mock.Mock()
+        bridge._request_teleop_control_status = mock.Mock()
+        with mock.patch.object(ros_tf_bridge.time, "monotonic", return_value=10.1):
+            ros_tf_bridge.OpenDeliveryTfBridgeNode._tick_teleop(bridge)
+        self.assertNotIn("robot2", bridge._teleop_state)
+        self.assertEqual(bridge._teleop_desired_status["robot2"], "AUTO")
+        bridge._publish_teleop_twist.assert_called_once_with("robot2", 0.0, 0.0)
+        bridge._request_teleop_control_status.assert_called_once_with("robot2", "AUTO")
 
     def test_monitor_dom_and_script_contain_requested_features(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
@@ -150,6 +202,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("visibilitychange", js)
         self.assertIn("teleopHeartbeatTimer", js)
         self.assertIn("teleopHeldRobotId", js)
+        self.assertIn("teleopPointerId", js)
+        self.assertNotIn('["pointerup", "pointercancel", "lostpointercapture"]', js)
         self.assertIn("mapEditorDirtyLayers", js)
         self.assertIn("setMapEditorDialogOpen", js)
         self.assertIn("undoMapEditorChange", js)

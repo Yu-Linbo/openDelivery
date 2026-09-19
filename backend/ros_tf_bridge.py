@@ -63,7 +63,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
 from gazebo_msgs.msg import ModelStates
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, Image
@@ -86,9 +86,10 @@ except Exception:  # noqa: BLE001
     TaskCommand = None
 
 try:
-    from custom_msgs_srvs.srv import RecordRelocalization
+    from custom_msgs_srvs.srv import RecordRelocalization, SetHeartbeatParams
 except Exception:  # noqa: BLE001
     RecordRelocalization = None
+    SetHeartbeatParams = None
 
 _ROBOT_STATUS_LABELS = (
     "initializing",
@@ -244,6 +245,13 @@ class OpenDeliveryTfBridgeNode(Node):
         self._task_command_pubs: Dict[str, Any] = {}
         self._task_status_subs: Dict[str, Any] = {}
         self._record_relocalization_clients: Dict[str, Any] = {}
+        self._teleop_pubs: Dict[str, Any] = {}
+        self._teleop_control_clients: Dict[str, Any] = {}
+        self._teleop_state: Dict[str, Dict[str, Any]] = {}
+        self._teleop_desired_status: Dict[str, str] = {}
+        self._teleop_actual_status: Dict[str, str] = {}
+        self._teleop_control_futures: Dict[str, Any] = {}
+        self._teleop_control_retry_after: Dict[str, float] = {}
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
         # When enabled, web-side identity is derived from discovered robot_status topics.
@@ -570,6 +578,7 @@ class OpenDeliveryTfBridgeNode(Node):
                 robot_status = _robot_status_label(getattr(msg, "robot_status", 0))
                 task_status = _task_status_label(getattr(msg, "task_status", 0))
                 control_status = str(getattr(msg, "control_status", "AUTO") or "AUTO").upper()
+                self._teleop_actual_status[rid] = control_status
                 localization_method = str(
                     getattr(msg, "localization_method", "gazebo_ground_truth")
                     or "gazebo_ground_truth"
@@ -854,6 +863,104 @@ class OpenDeliveryTfBridgeNode(Node):
                 self.get_logger().error(f"web command failed: {ex}")
                 if response_id:
                     ros_command_queue.complete_command(response_id, error=str(ex))
+        self._tick_teleop()
+
+    def _ensure_teleop_interfaces(self, rid: str) -> None:
+        if rid not in self._teleop_pubs:
+            topic = f"/{rid}/advance/cmd_vel"
+            self._teleop_pubs[rid] = self.create_publisher(Twist, topic, 10)
+            self.get_logger().info(f"teleop publisher: {topic}")
+        if SetHeartbeatParams is not None and rid not in self._teleop_control_clients:
+            self._teleop_control_clients[rid] = self.create_client(
+                SetHeartbeatParams, f"/{rid}/set_heartbeat_params"
+            )
+
+    def _publish_teleop_twist(self, rid: str, linear: float, angular: float) -> None:
+        publisher = self._teleop_pubs.get(rid)
+        if publisher is None:
+            return
+        msg = Twist()
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
+        publisher.publish(msg)
+
+    def _request_teleop_control_status(self, rid: str, status: str) -> None:
+        desired = str(status or "AUTO").upper()
+        if self._teleop_actual_status.get(rid) == desired:
+            return
+        if rid in self._teleop_control_futures:
+            return
+        now = time.monotonic()
+        if now < self._teleop_control_retry_after.get(rid, 0.0):
+            return
+        client = self._teleop_control_clients.get(rid)
+        if client is None or SetHeartbeatParams is None:
+            self._teleop_control_retry_after[rid] = now + 0.25
+            return
+        if not client.service_is_ready():
+            self._teleop_control_retry_after[rid] = now + 0.25
+            return
+        request = SetHeartbeatParams.Request()
+        request.control_status = desired
+        request.rate_hz = 0.0
+        request.task_progress = -1.0
+        future = client.call_async(request)
+        self._teleop_control_futures[rid] = future
+
+        def done(completed) -> None:
+            self._teleop_control_futures.pop(rid, None)
+            try:
+                response = completed.result()
+                if response is None or not response.success:
+                    detail = response.message if response is not None else "empty response"
+                    raise RuntimeError(detail)
+                self._teleop_actual_status[rid] = desired
+                self._teleop_control_retry_after.pop(rid, None)
+            except Exception as ex:  # noqa: BLE001
+                self._teleop_control_retry_after[rid] = time.monotonic() + 0.25
+                self.get_logger().warning(
+                    f"teleop control_status={desired} failed for {rid}: {ex}"
+                )
+
+        future.add_done_callback(done)
+
+    def _tick_teleop(self) -> None:
+        now = time.monotonic()
+        for rid, state in list(self._teleop_state.items()):
+            if now >= float(state.get("deadline", 0.0)):
+                self._publish_teleop_twist(rid, 0.0, 0.0)
+                self._teleop_state.pop(rid, None)
+                self._teleop_desired_status[rid] = "AUTO"
+                continue
+            self._publish_teleop_twist(
+                rid, float(state["linear"]), float(state["angular"])
+            )
+        for rid, desired in list(self._teleop_desired_status.items()):
+            self._request_teleop_control_status(rid, desired)
+
+    def _handle_teleop_command(self, cmd: Dict[str, Any]) -> None:
+        rid = str(cmd.get("robot_id") or "").strip()
+        if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
+            raise ValueError("invalid robot_id")
+        self._ensure_teleop_interfaces(rid)
+        active = bool(cmd.get("active"))
+        if active:
+            linear = float(cmd.get("linear", 0.0))
+            angular = float(cmd.get("angular", 0.0))
+            if abs(linear) > 1.2 or abs(angular) > 1.5:
+                raise ValueError("teleop linear/angular out of safe range")
+            lease_sec = max(0.2, min(float(cmd.get("lease_sec", 0.8)), 2.0))
+            self._teleop_state[rid] = {
+                "linear": linear,
+                "angular": angular,
+                "deadline": time.monotonic() + lease_sec,
+            }
+            self._teleop_desired_status[rid] = "JOY"
+            self._publish_teleop_twist(rid, linear, angular)
+        else:
+            self._teleop_state.pop(rid, None)
+            self._teleop_desired_status[rid] = "AUTO"
+            self._publish_teleop_twist(rid, 0.0, 0.0)
 
     def _record_relocalization(self, cmd: Dict[str, Any]) -> bool:
         if RecordRelocalization is None:
@@ -1023,6 +1130,9 @@ class OpenDeliveryTfBridgeNode(Node):
             return False
         if ctype == "navigation_task":
             self._publish_navigation_task(cmd)
+            return False
+        if ctype == "teleop":
+            self._handle_teleop_command(cmd)
             return False
 
         mode = str(cmd.get("mode") or "").strip()

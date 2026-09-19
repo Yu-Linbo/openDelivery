@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _LOCK = threading.Lock()
 _WAYPOINTS_PATH: Optional[Path] = None
-_TELEOP_PROCESSES: Dict[str, subprocess.Popen] = {}
 _TELEOP_LOCK = threading.Lock()
 _TELEOP_SEQUENCE: Dict[str, Tuple[str, int]] = {}
 _TELEOP_STATE: Dict[str, Tuple[str, float, float]] = {}
@@ -147,33 +146,23 @@ def _velocity_pub_command(rid: str, linear: float, angular: float, *, once: bool
     return f"ros2 topic pub {mode} {shlex.quote(topic)} geometry_msgs/msg/Twist {shlex.quote(msg)}"
 
 
-def _start_ros_process(cmd: str) -> subprocess.Popen:
-    root = _root_dir()
-    install = root / "install" / "setup.bash"
-    distro = (os.environ.get("ROS_DISTRO") or "foxy").strip()
-    install_src = f'source "{install}"' if install.is_file() else "true"
-    full = (
-        f'set -eo pipefail; source "/opt/ros/{distro}/setup.bash"; '
-        f'cd "{root}" && {install_src}; exec {cmd}'
-    )
-    return subprocess.Popen(
-        ["bash", "-lc", full], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        env=os.environ.copy(), start_new_session=True,
-    )
+def _send_teleop_command(
+    rid: str, linear: float, angular: float, *, active: bool,
+) -> Dict[str, Any]:
+    """Send teleop through the long-lived in-process ROS bridge."""
+    import ros_command_queue
 
-
-def _stop_teleop_process(rid: str) -> None:
-    proc = _TELEOP_PROCESSES.pop(rid, None)
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=1.0)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    return ros_command_queue.enqueue_command_and_wait(
+        {
+            "type": "teleop",
+            "robot_id": rid,
+            "linear": float(linear),
+            "angular": float(angular),
+            "active": bool(active),
+            "lease_sec": _TELEOP_LEASE_SEC,
+        },
+        timeout=1.5,
+    )
 
 
 def _teleop_watchdog_loop() -> None:
@@ -188,13 +177,12 @@ def _expire_teleop_leases(now: Optional[float] = None) -> List[str]:
     with _TELEOP_LOCK:
         for rid, deadline in list(_TELEOP_LEASE_DEADLINE.items()):
             if current >= deadline:
-                _stop_teleop_process(rid)
                 _TELEOP_LEASE_DEADLINE.pop(rid, None)
                 _TELEOP_STATE.pop(rid, None)
                 expired.append(rid)
     for rid in expired:
         try:
-            _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
+            _send_teleop_command(rid, 0.0, 0.0, active=False)
         except Exception:
             pass
     return expired
@@ -228,19 +216,14 @@ def set_teleop_velocity(
             return {"ok": True, "robot_id": rid, "active": bool(active), "stale": True}
         _TELEOP_SEQUENCE[rid] = (session, seq)
         if active and (lin != 0.0 or ang != 0.0):
-            state = (session, lin, ang)
-            proc = _TELEOP_PROCESSES.get(rid)
-            if _TELEOP_STATE.get(rid) != state or proc is None or proc.poll() is not None:
-                _stop_teleop_process(rid)
-                _TELEOP_PROCESSES[rid] = _start_ros_process(_velocity_pub_command(rid, lin, ang))
-                _TELEOP_STATE[rid] = state
+            _send_teleop_command(rid, lin, ang, active=True)
+            _TELEOP_STATE[rid] = (session, lin, ang)
             _TELEOP_LEASE_DEADLINE[rid] = time.monotonic() + _TELEOP_LEASE_SEC
             _ensure_teleop_watchdog()
             return {"ok": True, "robot_id": rid, "active": True, "linear": lin, "angular": ang, "lease_sec": _TELEOP_LEASE_SEC}
-        _stop_teleop_process(rid)
+        _send_teleop_command(rid, 0.0, 0.0, active=False)
         _TELEOP_STATE.pop(rid, None)
         _TELEOP_LEASE_DEADLINE.pop(rid, None)
-    _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=8.0)
     return {"ok": True, "robot_id": rid, "active": False, "linear": 0.0, "angular": 0.0}
 
 
@@ -248,14 +231,12 @@ def stop_all_teleop() -> None:
     """Stop managed teleop publishers during backend shutdown."""
     robot_ids: List[str] = []
     with _TELEOP_LOCK:
-        robot_ids = list(_TELEOP_PROCESSES)
-        for rid in robot_ids:
-            _stop_teleop_process(rid)
+        robot_ids = list(_TELEOP_STATE)
         _TELEOP_STATE.clear()
         _TELEOP_LEASE_DEADLINE.clear()
     for rid in robot_ids:
         try:
-            _ros_run(_velocity_pub_command(rid, 0.0, 0.0, once=True), timeout=2.0)
+            _send_teleop_command(rid, 0.0, 0.0, active=False)
         except Exception:
             pass
 
