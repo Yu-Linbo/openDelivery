@@ -12,6 +12,7 @@
   <depend>rcl_interfaces</depend>
   <depend>custom_msgs_srvs</depend>
   <depend>sqlite3</depend>
+  <depend>rosbag2_cpp</depend>
 
   <exec_depend>rosbag2_transport</exec_depend>
 

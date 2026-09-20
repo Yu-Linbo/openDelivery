@@ -7,6 +7,7 @@
 #include "log_bag/local_time.hpp"
 #include "log_bag/match_index_utils.hpp"
 #include "log_bag/recording_topics.hpp"
+#include "log_bag/persistent_recorder.hpp"
 #include "log_bag/retention_policy.hpp"
 
 #include <sys/stat.h>
@@ -444,7 +445,7 @@ bool sqlite_topic_message_count(
     }
     sqlite3_busy_timeout(db, 100);
     sqlite3_stmt * query = nullptr;
-    constexpr const char * statement =
+    const char * statement = topic.empty() ? "SELECT COUNT(*) FROM messages" :
       "SELECT COUNT(m.id) FROM topics t LEFT JOIN messages m ON m.topic_id=t.id "
       "WHERE t.name=?";
     if (sqlite3_prepare_v2(db, statement, -1, &query, nullptr) != SQLITE_OK) {
@@ -520,15 +521,11 @@ pid_t spawn_shell_command(const std::string & command, int log_fd) {
       ::dup2(log_fd, STDOUT_FILENO);
       ::dup2(log_fd, STDERR_FILENO);
     }
-    execl("/bin/bash", "bash", "-lc", command.c_str(), static_cast<char *>(nullptr));
+    execl("/bin/bash", "bash", "-c", command.c_str(), static_cast<char *>(nullptr));
     _exit(127);
   }
   ::setpgid(pid, pid);
   return pid;
-}
-
-bool process_exited(pid_t pid, int * status) {
-  return ::waitpid(pid, status, WNOHANG) == pid;
 }
 
 void stop_process_group(pid_t pid, int signal_number = SIGINT) {
@@ -913,8 +910,14 @@ public:
       " max_bag_bytes=" + std::to_string(cfg_.max_bag_bytes) +
       " max_robot_bytes=" + std::to_string(cfg_.max_robot_bytes) +
       " prune_target_bytes=" + std::to_string(cfg_.prune_target_bytes));
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(node_);
     while (!g_stop_requested.load()) {
-      rclcpp::spin_some(node_);
+      executor.spin_some(std::chrono::milliseconds(20));
+      if (recording_enabled_ && std::chrono::steady_clock::now() >= next_discovery_) {
+        recorder_->discover();
+        next_discovery_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+      }
       const auto heartbeat_now = std::chrono::steady_clock::now();
       if (has_latest_robot_status_ &&
         heartbeat_now - last_robot_status_received_steady_ >= kRobotStatusStall)
@@ -924,25 +927,28 @@ public:
         archive_text_log();
         return 3;
       }
-      write_bag_tags_marker(current_bag_path_, current_tags_);
-      rotate_bag_if_needed();
-      if (bag_pid_ <= 0) {
+      if (heartbeat_now >= next_bag_poll_) {
+        write_bag_tags_marker(current_bag_path_, current_tags_);
+        rotate_bag_if_needed();
+        next_bag_poll_ = heartbeat_now + std::chrono::milliseconds(
+          static_cast<int>(cfg_.poll_seconds * 1000.0));
+      }
+      if (!recorder_->active()) {
         start_next_bag_if_needed();
       }
-      // Start the next recorder before any potentially slow deletion. The
-      // rosbag child keeps writing while old backups and index rows are pruned.
-      if (bag_pid_ > 0 && current_bag_health_verified_ && prune_pending_) {
+      // Open the next file before retention work; DDS subscriptions stay alive.
+      if (recorder_->active() && current_bag_health_verified_ && prune_pending_) {
         prune_untagged_backups();
         prune_storage_limit();
         prune_pending_ = false;
       }
       const auto now = std::chrono::steady_clock::now();
-      if (bag_pid_ > 0 && current_bag_health_verified_ && now >= next_storage_check_) {
+      if (recorder_->active() && current_bag_health_verified_ && now >= next_storage_check_) {
         prune_storage_limit();
         next_storage_check_ = now + kStorageCheckInterval;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(
-        static_cast<int>(cfg_.poll_seconds * 1000.0)));
+        10));
     }
     stop_current_bag("shutdown");
     archive_text_log();
@@ -951,6 +957,17 @@ public:
 
 private:
   void ensure_ros() {
+    // Some deployed overlays omit custom_msgs_srvs from AMENT_PREFIX_PATH even
+    // though the recorder is linked to it. Dynamic serialized subscriptions
+    // need its ament resource entry as well as the already loaded libraries.
+    const char * root = std::getenv("OPEN_DELIVERY_ROOT");
+    const std::string workspace_root = root && *root ? root : dirname_of(cfg_.root);
+    const std::string prefix = find_custom_msgs_prefix(workspace_root);
+    if (!prefix.empty()) {
+      const char * current = std::getenv("AMENT_PREFIX_PATH");
+      const std::string paths = prefix + (current && *current ? ":" + std::string(current) : "");
+      ::setenv("AMENT_PREFIX_PATH", paths.c_str(), 1);
+    }
     if (!rclcpp::ok()) {
       int argc = 0;
       char ** argv = nullptr;
@@ -974,6 +991,8 @@ private:
       [this](const custom_msgs_srvs::msg::TaskStatus::SharedPtr msg) {
         on_task_status(*msg);
       });
+
+    recorder_ = std::make_unique<log_bag::PersistentRecorder>(node_, robot_topics());
 
     robot_status_sub_ = node_->create_subscription<custom_msgs_srvs::msg::RobotStatus>(
       "robot_status",
@@ -1002,6 +1021,14 @@ private:
     latest_robot_status_ = record_robot_status(msg);
     last_robot_status_received_steady_ = std::chrono::steady_clock::now();
     has_latest_robot_status_ = true;
+    if (!recording_enabled_ && log_bag::recording_start_allowed(msg.robot_status)) {
+      recording_enabled_ = true;
+      write_line("recording enabled by robot_status=" + msg.robot_status);
+    }
+    if (msg.robot_status == "shutdown" || msg.robot_status == "initializing") {
+      recording_enabled_ = false;
+      stop_current_bag("robot_" + msg.robot_status);
+    }
     if (!current_bag_path_.empty()) {
       current_status_samples_.push_back(latest_robot_status_);
       if (current_status_samples_.size() > 10000) {
@@ -1338,20 +1365,12 @@ private:
       return;
     }
     const auto topics = robot_topics();
-    const std::string critical_status_topic = "/" + cfg_.robot_name + "/robot_status";
     if (!has_latest_robot_status_) {
-      write_line("critical topic has no heartbeat yet; bag recorder waits topic=" +
-        critical_status_topic);
       return;
     }
-    const char * configured_root = std::getenv("OPEN_DELIVERY_ROOT");
-    const std::string workspace_root = configured_root && *configured_root
-      ? configured_root : dirname_of(cfg_.root);
-    const std::string custom_msgs_prefix = find_custom_msgs_prefix(workspace_root);
-    if (custom_msgs_prefix.empty()) {
-      write_line(
-        "custom_msgs_srvs ament prefix unavailable; bag recorder waits instead of "
-        "creating a rosout-only bag");
+    if (!recording_enabled_ ||
+      now - last_robot_status_received_steady_ >= kCriticalTopicGrace)
+    {
       return;
     }
     current_bag_topics_ = topics;
@@ -1364,21 +1383,13 @@ private:
       current_status_samples_.push_back(latest_robot_status_);
     }
     current_bag_started_steady_ = now;
-    next_bag_health_check_ = now + kCriticalTopicGrace;
+    next_bag_health_check_ = now + std::chrono::milliseconds(500);
     last_critical_progress_ = now;
     last_critical_message_count_ = 0;
     current_bag_health_verified_ = false;
-    std::ostringstream cmd;
-    cmd << "export AMENT_PREFIX_PATH=" << shell_quote(custom_msgs_prefix)
-        << "${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}; "
-        << "export LD_LIBRARY_PATH=" << shell_quote(join_path(custom_msgs_prefix, "lib"))
-        << "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}; "
-        << "exec ros2 bag record -o " << shell_quote(current_bag_path_);
-    for (const auto & topic : topics) {
-      cmd << " " << shell_quote(topic);
-    }
-    write_line("starting bag recorder: " + cmd.str());
-    bag_pid_ = spawn_shell_command(cmd.str(), log_fd_);
+    write_line("opening bag with persistent subscriptions: " + current_bag_path_);
+    recorder_->discover();
+    recorder_->open(current_bag_path_);
   }
 
   void restart_unhealthy_bag(const std::string & reason, std::uintmax_t status_messages)
@@ -1392,9 +1403,7 @@ private:
       "bag unhealthy: " + reason +
       " robot_status_messages=" + std::to_string(status_messages) +
       " retry_in_seconds=" + std::to_string(backoff.count()));
-    stop_process_group(bag_pid_, SIGINT);
-    wait_process(bag_pid_);
-    bag_pid_ = -1;
+    recorder_->close();
     const auto failed_bytes = directory_size(current_bag_path_);
     if (current_tags_.empty()) {
       discard_current_bag(reason, failed_bytes);
@@ -1405,14 +1414,7 @@ private:
   }
 
   void rotate_bag_if_needed() {
-    if (bag_pid_ <= 0) {
-      return;
-    }
-    int status = 0;
-    if (process_exited(bag_pid_, &status)) {
-      write_line("bag recorder exited with status=" + std::to_string(status));
-      bag_pid_ = -1;
-      archive_current_bag("recorder_exit");
+    if (!recorder_->active()) {
       return;
     }
     const auto now = std::chrono::steady_clock::now();
@@ -1444,7 +1446,8 @@ private:
           return;
         }
       }
-      next_bag_health_check_ = now + kCriticalTopicCheckInterval;
+      next_bag_health_check_ = now + (current_bag_health_verified_
+        ? std::chrono::milliseconds(kCriticalTopicCheckInterval) : std::chrono::milliseconds(500));
     }
     const auto logical_bytes = sqlite_logical_bag_size(current_bag_path_);
     const auto bytes = logical_bytes ? logical_bytes : directory_size(current_bag_path_);
@@ -1455,10 +1458,8 @@ private:
   }
 
   void stop_current_bag(const std::string & reason) {
-    if (bag_pid_ > 0) {
-      stop_process_group(bag_pid_, SIGINT);
-      wait_process(bag_pid_);
-      bag_pid_ = -1;
+    if (recorder_->active()) {
+      recorder_->close();
     }
     archive_current_bag(reason);
   }
@@ -1482,6 +1483,11 @@ private:
       current_bag_started_at_.clear();
       current_tags_.clear();
       current_status_samples_.clear();
+      return;
+    }
+    std::uintmax_t messages = 0;
+    if (sqlite_topic_message_count(current_bag_path_, "", &messages) && messages == 0) {
+      discard_current_bag("empty_" + reason, directory_size(current_bag_path_));
       return;
     }
     write_robot_status_sidecar(current_bag_path_, current_status_samples_);
@@ -1563,7 +1569,10 @@ private:
   std::string text_log_real_path_;
   std::string text_log_link_path_;
   std::string archived_text_log_path_;
-  pid_t bag_pid_{-1};
+  std::unique_ptr<log_bag::PersistentRecorder> recorder_;
+  bool recording_enabled_{false};
+  std::chrono::steady_clock::time_point next_discovery_{};
+  std::chrono::steady_clock::time_point next_bag_poll_{};
   std::string current_bag_path_;
   std::string current_bag_started_at_;
   std::vector<std::string> current_bag_topics_;
@@ -1587,6 +1596,9 @@ int main(int argc, char ** argv) {
   try {
     Config cfg = parse_args(argc, argv);
     RobotLogRecorder recorder(std::move(cfg));
+    // rclcpp::init installs SIGINT; restore our graceful bag-finalization handler.
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
     const int rc = recorder.run();
     if (rclcpp::ok()) {
       rclcpp::shutdown();
