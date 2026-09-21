@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260918-i18n-v1" />
+    <link rel="stylesheet" href="./styles.css?v=20260919-i18n-audit-v2" />
   </head>
   <body>
     <div class="layout">
@@ -285,7 +285,7 @@
 
                 <aside class="standalone-map-editor__sidebar">
                   <section class="map-editor-section is-active" data-map-editor="layer-section">
-                    <span class="map-editor-section__title">图层工具</span>
+                    <span class="map-editor-section__title">图层工具 <span class="map-editor-unsaved-badge">未保存</span></span>
                     <div class="map-editor-control-grid">
                       <label class="reloc-field">编辑层<select data-map-editor="layer"><option value="raster">栅格地图</option><option value="semantic">语义地图</option></select></label>
                       <label class="reloc-field">工具<select data-map-editor="tool"></select></label>
@@ -313,7 +313,7 @@
                   </section>
 
                   <section class="map-editor-section" data-map-editor="point-section">
-                    <span class="map-editor-section__title">点位设置</span>
+                    <span class="map-editor-section__title">点位设置 <span class="map-editor-unsaved-badge">未保存</span></span>
                     <div class="map-editor-control-grid">
                       <label class="reloc-field">名称<input data-map-editor="point-name" type="text" maxlength="80" placeholder="如 A座电梯" /></label>
                       <label class="reloc-field">类型<select data-map-editor="point-type"><option value="elevator_inside">电梯内点</option><option value="elevator_waiting">电梯等待点</option><option value="standby">待机点</option><option value="custom">自定义点位</option><option value="relocalization">重定位点</option></select></label>
@@ -345,29 +345,43 @@
         <section id="view-settings" class="view">
           <header class="view-header">
             <h1>参数设置</h1>
-            <p>基础控制参数配置</p>
+            <p>按机器人绑定、持久化并下发 Nav2 运行参数</p>
           </header>
+
+          <div class="settings-target-card">
+            <label>
+              目标机器人
+              <select id="settings-robot-id">
+                <option value="">暂无机器人</option>
+              </select>
+            </label>
+            <div id="settings-binding-status" class="settings-binding-status">
+              请选择机器人。配置不会再保存在当前浏览器中。
+            </div>
+          </div>
 
           <form id="settings-form" class="settings-form">
             <label>
-              最大速度 (m/s)
-              <input name="maxSpeed" type="number" step="0.1" min="0" required />
+              最大线速度 (m/s)
+              <input name="maxLinearSpeed" type="number" step="0.01" min="0.05" max="2" required />
+              <small>应用到 DWB 的 max_vel_x 与 max_speed_xy。</small>
             </label>
             <label>
-              角速度 (rad/s)
-              <input name="angularSpeed" type="number" step="0.1" min="0" required />
+              最大角速度 (rad/s)
+              <input name="maxAngularSpeed" type="number" step="0.05" min="0.1" max="3" required />
+              <small>应用到路径跟踪与恢复旋转速度上限。</small>
             </label>
             <label>
-              避障距离 (m)
-              <input name="safetyDistance" type="number" step="0.1" min="0" required />
+              障碍膨胀半径 (m)
+              <input name="inflationRadius" type="number" step="0.01" min="0.22" max="3" required />
+              <small>同时应用到该机器人局部与全局代价地图。</small>
             </label>
-            <label>
-              刷新间隔 (ms)
-              <input name="refreshInterval" type="number" step="100" min="100" required />
-            </label>
-            <button type="submit">保存参数</button>
+            <div class="settings-actions">
+              <button id="btn-settings-save" type="submit">保存并应用</button>
+              <span>离线机器人会在下次由本平台启动导航栈时自动加载。</span>
+            </div>
           </form>
-          <p id="settings-message" class="message"></p>
+          <p id="settings-message" class="message" role="status"></p>
         </section>
 
         <section id="view-logs" class="view">
@@ -424,7 +438,7 @@
             <div class="gazebo-panel gazebo-panel--camera">
               <h2 class="gazebo-subtitle">俯视相机</h2>
               <p class="gazebo-hint">
-                左侧画面用于观察与取点。单击画面会把目标位置换算到 world 坐标并填入右侧表单。
+                方向与缩放按键控制俯瞰相机；拖拽、滚轮和双指手势只调整本地图片视图。
               </p>
               <div class="gazebo-camera-stage">
                 <div class="gazebo-camera-wrap" id="gazebo-camera-wrap">
@@ -442,22 +456,22 @@
                 <div class="gazebo-camera-pad">
                   <div class="gazebo-camera-controls__title">俯视相机控制</div>
                   <p class="gazebo-hint">
-                    用右侧遥控手柄控制相机平移与缩放；区域按钮会自动居中并放大到对应区域。
+                    点按立即微调，长按渐进加速；也可使用 WASD / 方向键。这里的按键会实际移动俯瞰相机。
                   </p>
-                  <label class="reloc-field">
-                    移动速度 (m/s)
-                    <input id="camera-drive-speed" type="number" step="0.1" min="0.1" value="4.0" />
+                  <label class="gazebo-camera-speed">
+                    <span>基础移动速度 <output id="camera-drive-speed-output">4.0 m/s</output></span>
+                    <input id="camera-drive-speed" type="range" step="0.5" min="0.5" max="16" value="4" />
                   </label>
                   <div class="gazebo-pad-grid" aria-label="俯视相机方向控制">
-                    <div></div>
-                    <button id="btn-gazebo-cam-up" type="button" class="btn-secondary">上</button>
-                    <div></div>
-                    <button id="btn-gazebo-cam-left" type="button" class="btn-secondary">左</button>
+                    <button id="btn-gazebo-cam-up-left" type="button" class="btn-secondary" aria-label="左上移动">↖</button>
+                    <button id="btn-gazebo-cam-up" type="button" class="btn-secondary" aria-label="向上移动">↑</button>
+                    <button id="btn-gazebo-cam-up-right" type="button" class="btn-secondary" aria-label="右上移动">↗</button>
+                    <button id="btn-gazebo-cam-left" type="button" class="btn-secondary" aria-label="向左移动">←</button>
                     <button id="btn-gazebo-cam-home" type="button" class="btn-secondary">全图</button>
-                    <button id="btn-gazebo-cam-right" type="button" class="btn-secondary">右</button>
-                    <div></div>
-                    <button id="btn-gazebo-cam-down" type="button" class="btn-secondary">下</button>
-                    <div></div>
+                    <button id="btn-gazebo-cam-right" type="button" class="btn-secondary" aria-label="向右移动">→</button>
+                    <button id="btn-gazebo-cam-down-left" type="button" class="btn-secondary" aria-label="左下移动">↙</button>
+                    <button id="btn-gazebo-cam-down" type="button" class="btn-secondary" aria-label="向下移动">↓</button>
+                    <button id="btn-gazebo-cam-down-right" type="button" class="btn-secondary" aria-label="右下移动">↘</button>
                   </div>
                   <div class="gazebo-pad-zoom">
                     <button id="btn-gazebo-cam-zoom-in" type="button" class="btn-secondary">放大</button>
@@ -470,13 +484,16 @@
                     <button id="btn-gazebo-zone-3" type="button" class="btn-secondary">区域 3</button>
                     <button id="btn-gazebo-zone-4" type="button" class="btn-secondary">区域 4</button>
                   </div>
+                  <div id="gazebo-camera-readout" class="gazebo-camera-readout" aria-live="polite">
+                    相机 X 0.00 · Y 0.00 · 高度 32.00 m
+                  </div>
                 </div>
               </div>
               <div class="gazebo-camera-controls">
                 <div class="gazebo-camera-controls__title">俯视相机说明</div>
                 <p class="gazebo-hint">
-                  已移除图片上的拖拽和滚轮操控。当前通过按钮控制俯视相机，点击画面只做
-                  world 坐标取点，不直接移动模型。
+                  图片上的拖拽、滚轮和双指缩放只做局部查看，不会移动俯瞰相机。
+                  未发生拖动的单击仍用于 world 坐标取点。
                 </p>
               </div>
             </div>
@@ -487,7 +504,9 @@
               </p>
               <label class="reloc-field">
                 Gazebo 模型名
-                <input id="gazebo-model-name" type="text" value="robot2" autocomplete="off" />
+                <select id="gazebo-model-name" disabled>
+                  <option value="">暂无在线机器人</option>
+                </select>
               </label>
               <div id="locations-quick-fill" class="locations-quick-fill" style="display:none">
                 <span class="locations-quick-fill__label">快速定位</span>
@@ -556,9 +575,9 @@
           <button class="menu-item" data-view="logs">日志</button>
         </nav>
         <label class="language-picker" for="language-select" data-i18n-ignore>
-          <span class="language-picker__icon" aria-hidden="true">文</span>
+          <span class="language-picker__icon" aria-hidden="true" data-i18n-ignore>文</span>
           <span class="language-picker__label">语言 / Language</span>
-          <select id="language-select" aria-label="语言 / Language">
+          <select id="language-select" aria-label="语言 / Language" data-i18n-ignore>
             <option value="zh-CN">中文</option>
             <option value="en">English</option>
           </select>
@@ -668,8 +687,8 @@
       </form>
       <p id="openclaw-chat-status" class="openclaw-chat-status" role="status"></p>
     </section>
-    <script src="./i18n.js?v=20260918-i18n-v1"></script>
+    <script src="./i18n.js?v=20260919-i18n-audit-v2"></script>
     <script src="./map_editor.js?v=20260918-i18n-v1"></script>
-    <script src="./app.js?v=20260919-teleop-v8"></script>
+    <script src="./app.js?v=20260919-robot-settings-v1"></script>
   </body>
 </html>

@@ -63,7 +63,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from geometry_msgs.msg import Pose, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Twist
 from gazebo_msgs.msg import ModelStates
 from nav_msgs.msg import OccupancyGrid, Path
 from sensor_msgs.msg import LaserScan, Image
@@ -252,6 +252,9 @@ class OpenDeliveryTfBridgeNode(Node):
         self._teleop_actual_status: Dict[str, str] = {}
         self._teleop_control_futures: Dict[str, Any] = {}
         self._teleop_control_retry_after: Dict[str, float] = {}
+        self._topdown_camera_pose_pub = self.create_publisher(
+            PoseStamped, "/open_delivery/topdown_camera/pose", 1
+        )
 
         # Heartbeat-based liveness detection via /<robot_name>/robot_status.
         # When enabled, web-side identity is derived from discovered robot_status topics.
@@ -962,6 +965,22 @@ class OpenDeliveryTfBridgeNode(Node):
             self._teleop_desired_status[rid] = "AUTO"
             self._publish_teleop_twist(rid, 0.0, 0.0)
 
+    def _publish_topdown_camera_pose(self, cmd: Dict[str, Any]) -> None:
+        if self._topdown_camera_pose_pub.get_subscription_count() <= 0:
+            raise RuntimeError("topdown camera control plugin is not ready")
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "world"
+        msg.pose.position.x = float(cmd["x"])
+        msg.pose.position.y = float(cmd["y"])
+        msg.pose.position.z = float(cmd["z"])
+        orientation = cmd.get("orientation") or {}
+        msg.pose.orientation.x = float(orientation["x"])
+        msg.pose.orientation.y = float(orientation["y"])
+        msg.pose.orientation.z = float(orientation["z"])
+        msg.pose.orientation.w = float(orientation["w"])
+        self._topdown_camera_pose_pub.publish(msg)
+
     def _record_relocalization(self, cmd: Dict[str, Any]) -> bool:
         if RecordRelocalization is None:
             raise RuntimeError("RecordRelocalization type unavailable; rebuild custom_msgs_srvs")
@@ -1130,6 +1149,9 @@ class OpenDeliveryTfBridgeNode(Node):
             return False
         if ctype == "navigation_task":
             self._publish_navigation_task(cmd)
+            return False
+        if ctype == "topdown_camera_pose":
+            self._publish_topdown_camera_pose(cmd)
             return False
         if ctype == "teleop":
             self._handle_teleop_command(cmd)

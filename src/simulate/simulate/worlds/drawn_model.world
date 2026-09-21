@@ -16,6 +16,13 @@
       <update_rate>50.0</update_rate>
     </plugin>
 
+    <!-- Low-latency camera motion for the Web Gazebo view. The regular
+         /gazebo/set_model_state service remains available as a fallback. -->
+    <plugin name="topdown_camera_control" filename="libtopdown_camera_control_plugin.so">
+      <model_name>topdown_camera</model_name>
+      <topic_name>/open_delivery/topdown_camera/pose</topic_name>
+    </plugin>
+
     <light name="sun" type="directional">
       <cast_shadows>true</cast_shadows>
       <pose>0 0 100 0 0 0</pose>

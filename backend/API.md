@@ -28,6 +28,22 @@ These endpoints are used by `web/app.js`.
 - `GET /api/robot/pose/stream`
   - Purpose: SSE stream for pose updates.
 
+### Per-robot Navigation Settings
+
+- `GET /api/robot/settings?robot_id=<id>`
+  - Returns the selected robot's server-side settings, source (`defaults` or `saved`),
+    online/navigation readiness, and last runtime-apply result.
+- `POST /api/robot/settings`
+  - Body: `{"robot_id":"robot2","settings":{"max_linear_speed":0.18,"max_angular_speed":0.6,"inflation_radius":0.55}}`
+  - Atomically stores values under that robot ID in `backend/data/robot_settings.json`.
+  - When the robot and Nav2 controller are online, applies values immediately to the
+    namespaced controller, recoveries server, and local/global costmaps. Otherwise
+    `runtime.state` is `pending_restart`; a navigation stack launched by this workspace
+    loads the saved values on its next start. Independently managed physical robots must
+    mount or synchronize the same configuration source in their machine-side startup.
+  - Limits: linear speed `0.05..2.0 m/s`, angular speed `0.1..3.0 rad/s`, inflation
+    radius `0.22..3.0 m`.
+
 - `POST /api/ros/lifecycle/startup`
   - Body: `{ "robot_id": "robot2", "sim_mode": "sim" }`
   - Purpose: start selected robot simulation stack.

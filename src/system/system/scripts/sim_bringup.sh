@@ -318,6 +318,7 @@ fi
 ros2 launch nav_bringup stack.launch.py \
   "robot_name:=${RID}" \
   "grid_mode:=${NAV_GRID_MODE}" \
+  "robot_settings_file:=${OPEN_DELIVERY_ROBOT_SETTINGS_PATH:-${ROOT}/backend/data/robot_settings.json}" \
   "autostart:=true" &
 log "started nav stack.launch.py (pid $!)"
 

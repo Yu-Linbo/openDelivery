@@ -885,6 +885,36 @@ button {
   max-width: 760px;
 }
 
+.settings-target-card {
+  display: flex;
+  align-items: end;
+  gap: 18px;
+  max-width: 760px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.settings-target-card label {
+  display: grid;
+  gap: 7px;
+  min-width: 220px;
+  color: var(--muted);
+}
+
+.settings-binding-status {
+  flex: 1;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.settings-binding-status[data-state="applied"] { color: #86efac; }
+.settings-binding-status[data-state="pending_restart"] { color: #fbbf24; }
+.settings-binding-status[data-state="partial"] { color: #fdba74; }
+
 .settings-form label {
   display: flex;
   flex-direction: column;
@@ -892,9 +922,23 @@ button {
   color: var(--muted);
 }
 
+.settings-form label small {
+  color: #64748b;
+  line-height: 1.4;
+}
+
 .settings-form button {
   width: fit-content;
   border-color: var(--accent);
+}
+
+.settings-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .message {
@@ -1537,6 +1581,14 @@ button {
   background: #ffffff;
   min-height: 420px;
   margin: 0;
+  touch-action: none;
+  user-select: none;
+}
+
+.gazebo-camera-wrap.is-dragging,
+.gazebo-camera-wrap.is-pinching {
+  border-color: rgba(56, 189, 248, 0.8);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14);
 }
 
 .gazebo-camera-wrap--fresh {
@@ -1625,6 +1677,30 @@ button {
   background: rgba(15, 23, 42, 0.5);
 }
 
+.gazebo-camera-speed {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.gazebo-camera-speed span {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gazebo-camera-speed output {
+  color: #bae6fd;
+  font-variant-numeric: tabular-nums;
+}
+
+.gazebo-camera-speed input {
+  width: 100%;
+  accent-color: #38bdf8;
+}
+
 .gazebo-camera-controls {
   margin-bottom: 12px;
   padding: 10px;
@@ -1650,6 +1726,21 @@ button {
 .gazebo-pad-zoom button,
 .gazebo-zone-grid button {
   min-height: 40px;
+  touch-action: none;
+}
+
+.gazebo-pad-grid button {
+  padding: 7px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.gazebo-pad-grid button.is-active,
+.gazebo-pad-zoom button.is-active {
+  border-color: #38bdf8;
+  background: rgba(14, 116, 144, 0.5);
+  color: #e0f2fe;
+  transform: translateY(1px);
 }
 
 .gazebo-pad-zoom {
@@ -1668,12 +1759,29 @@ button {
   gap: 8px;
 }
 
+.gazebo-camera-readout {
+  padding: 8px 9px;
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.55);
+  color: #bae6fd;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 #gazebo-top-camera {
   width: 100%;
   height: 100%;
   display: block;
   background: #ffffff;
-  cursor: crosshair;
+  cursor: grab;
+  touch-action: none;
+}
+
+.gazebo-camera-wrap.is-dragging #gazebo-top-camera,
+.gazebo-camera-wrap.is-pinching #gazebo-top-camera {
+  cursor: grabbing;
 }
 
 @media (max-width: 960px) {
@@ -1687,6 +1795,10 @@ button {
 
   .gazebo-camera-stage {
     grid-template-columns: 1fr;
+  }
+
+  .gazebo-camera-wrap {
+    min-height: 320px;
   }
 
   .gazebo-xyz-grid,
@@ -1957,6 +2069,14 @@ button {
 .robot-detail-params label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
 .robot-detail-params input { width: 100%; }
 .robot-detail-param-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.robot-detail-param-binding {
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 
 @media (max-width: 900px) {
   .robot-detail-panel { top: 82px; right: 10px; width: calc(100vw - 20px); max-height: calc(100vh - 92px); }
@@ -1965,6 +2085,8 @@ button {
   .robot-detail-params { grid-template-columns: 1fr; }
   .robot-quick-chip__name { display: none; }
   .robot-quick-chip { padding-right: 5px; }
+  .settings-target-card { align-items: stretch; flex-direction: column; }
+  .settings-form { grid-template-columns: 1fr; }
 }
 
 /* Monitor workspace: map + relocalization + dedicated teleop rail */
@@ -2051,9 +2173,8 @@ button {
   background: linear-gradient(135deg, rgba(21, 128, 61, .9), rgba(22, 101, 52, .9));
   box-shadow: 0 5px 15px rgba(22, 101, 52, .2);
 }
-.map-editor-section.has-unsaved .map-editor-section__title::after {
-  content: "未保存";
-  display: inline-flex;
+.map-editor-unsaved-badge {
+  display: none;
   margin-left: 7px;
   padding: 2px 6px;
   border: 1px solid rgba(245, 158, 11, .46);
@@ -2064,6 +2185,7 @@ button {
   letter-spacing: 0;
   vertical-align: 1px;
 }
+.map-editor-section.has-unsaved .map-editor-unsaved-badge { display: inline-flex; }
 .semantic-color-preview { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: rgba(2, 6, 23, 0.55); color: var(--text); }
 .semantic-color-swatch { width: 24px; height: 18px; flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.55); border-radius: 5px; box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.8); }
 .map-editor-float__footer { display: grid; gap: 9px; padding: 11px 12px; border-top: 1px solid var(--line); background: rgba(15, 23, 42, 0.96); }

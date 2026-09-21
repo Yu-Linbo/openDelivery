@@ -84,6 +84,8 @@ function scheduleMapPaint() {
 
 const settingsForm = document.getElementById("settings-form");
 const settingsMessage = document.getElementById("settings-message");
+const settingsRobotId = document.getElementById("settings-robot-id");
+const settingsBindingStatus = document.getElementById("settings-binding-status");
 const logBagList = document.getElementById("log-bag-list");
 const logBagFileList = document.getElementById("log-bag-file-list");
 const logBagFileHint = document.getElementById("log-bag-file-hint");
@@ -192,7 +194,6 @@ const rosNodesError = document.getElementById("ros-nodes-error");
 const rosRobotGroups = document.getElementById("ros-robot-groups");
 const btnRosNodesRefresh = document.getElementById("btn-ros-nodes-refresh");
 
-const SETTINGS_KEY = "robotSettings";
 const LOGS_KEY = "robotLogs";
 const MONITOR_CHECKBOXES_KEY = "openDelivery_monitor_checkboxes_v1";
 const FLOOR_PREF_KEY = "openDelivery_active_floor_v1";
@@ -226,6 +227,7 @@ let mapEditorPainting = false;
 let mapEditorResumeAfterPick = false;
 let mapEditorMovedPointId = "";
 let relocRobotOptionsSignature = "";
+let gazeboModelOptionsSignature = "";
 
 /** Latest snapshot from backend: { timestamp, source, robots: [...] } */
 let latestSnapshot = null;
@@ -321,6 +323,8 @@ let mapLiveInFlight = false;
 /** @type {string | null} */
 let activeMappingRobotId = null;
 let rosNodesPollTimer = null;
+let settingsRobotOptionsSignature = "";
+let settingsLoadSequence = 0;
 
 let robotIconLoaded = false;
 const robotIcon = new Image();
@@ -434,7 +438,14 @@ function addFloorOptions() {
 async function fetchJson(path, options = undefined) {
   const res = await fetch(path, options);
   if (!res.ok) {
-    throw new Error(`请求失败: ${path} (${res.status})`);
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = String((body && body.error) || "").trim();
+    } catch {
+      /* response was not JSON */
+    }
+    throw new Error(detail || `请求失败: ${path} (${res.status})`);
   }
   return res.json();
 }
@@ -2066,6 +2077,9 @@ async function fetchRobotStatusCache() {
     robotStatusCacheItems = items;
   } catch {
     robotStatusCacheItems = [];
+  } finally {
+    syncGazeboModelSelect();
+    syncSettingsRobotSelect();
   }
 }
 
@@ -2557,15 +2571,21 @@ function renderScene() {
   drawRelocPickOverlay();
 }
 
-function syncOnlineRobotSelect() {
-  if (!relocRobotId) return;
-  const previous = relocRobotId.value;
+function collectOnlineRobotOptions() {
   const online = mergePresenceRows().filter((row) => row.online);
   const fallback = latestSnapshot && Array.isArray(latestSnapshot.robots)
     ? latestSnapshot.robots.filter((row) => row && row.heartbeat_online !== false).map((row) => ({ id: row.id, name: row.name || row.id, model: row.robot_model || "" })) : [];
   const rows = online.length ? online : fallback;
   const clean = [], seen = new Set();
   rows.forEach((row) => { const id = String(row.id || "").trim(); if (id && !seen.has(id)) { seen.add(id); clean.push({ id, model:String(row.model||"").trim() }); } });
+  return clean;
+}
+
+function syncOnlineRobotSelect() {
+  if (!relocRobotId) return;
+  const previous = relocRobotId.value;
+  const clean = collectOnlineRobotOptions();
+  const seen = new Set(clean.map((row) => row.id));
   const signature = JSON.stringify(clean);
   if (signature === relocRobotOptionsSignature) return;
   relocRobotOptionsSignature = signature;
@@ -2577,9 +2597,40 @@ function syncOnlineRobotSelect() {
   else { relocRobotId.disabled = false; relocRobotId.value = seen.has(previous) ? previous : clean[0].id; }
 }
 
+function syncGazeboModelSelect() {
+  const select = document.getElementById("gazebo-model-name");
+  const moveButton = document.getElementById("btn-gazebo-set-model-state");
+  if (!select) return;
+  const previous = select.value;
+  const clean = collectOnlineRobotOptions();
+  const signature = JSON.stringify(clean);
+  if (signature === gazeboModelOptionsSignature) return;
+  gazeboModelOptionsSignature = signature;
+  select.replaceChildren();
+  clean.forEach((row) => {
+    const option = document.createElement("option");
+    option.value = row.id;
+    option.textContent = row.model ? `${row.id} (${row.model})` : row.id;
+    select.appendChild(option);
+  });
+  if (!clean.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无在线机器人";
+    select.appendChild(option);
+    select.disabled = true;
+    if (moveButton) moveButton.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.value = clean.some((row) => row.id === previous) ? previous : clean[0].id;
+  if (moveButton) moveButton.disabled = false;
+}
+
 function updateRobotStatus() {
   try {
     syncOnlineRobotSelect();
+    syncGazeboModelSelect();
     if (!robotStatus) {
       return;
     }
@@ -3165,30 +3216,124 @@ function bindMapInteractions() {
   canvas.addEventListener("mouseleave", onMouseUp);
 }
 
-function initSettings() {
-  const defaults = {
-    maxSpeed: 1.2,
-    angularSpeed: 0.8,
-    safetyDistance: 0.6,
-    refreshInterval: 500,
+function setSettingsFormDisabled(disabled) {
+  if (!settingsForm) return;
+  Array.from(settingsForm.elements).forEach((element) => { element.disabled = !!disabled; });
+}
+
+function settingsValuesFromEnvelope(envelope) {
+  const value = envelope && envelope.settings ? envelope.settings : {};
+  return {
+    maxLinearSpeed: Number(value.max_linear_speed ?? 0.18),
+    maxAngularSpeed: Number(value.max_angular_speed ?? 0.6),
+    inflationRadius: Number(value.inflation_radius ?? 0.55),
   };
-  const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null") || defaults;
+}
 
-  Object.keys(defaults).forEach((key) => {
-    settingsForm.elements[key].value = saved[key];
+function fillSettingsForm(envelope) {
+  if (!settingsForm) return;
+  const values = settingsValuesFromEnvelope(envelope);
+  settingsForm.elements.maxLinearSpeed.value = values.maxLinearSpeed;
+  settingsForm.elements.maxAngularSpeed.value = values.maxAngularSpeed;
+  settingsForm.elements.inflationRadius.value = values.inflationRadius;
+}
+
+function showSettingsBinding(envelope, runtime = null) {
+  if (!settingsBindingStatus) return;
+  const rid = String((envelope && envelope.robot_id) || (settingsRobotId && settingsRobotId.value) || "");
+  const state = String((runtime && runtime.state) || (envelope && envelope.last_apply && envelope.last_apply.state) || "saved");
+  const onlineText = envelope && envelope.online ? "在线" : "离线";
+  const sourceText = envelope && envelope.source === "saved" ? "已绑定持久配置" : "当前使用系统默认值";
+  const runtimeMessage = String((runtime && runtime.message) || "").trim();
+  settingsBindingStatus.dataset.state = state;
+  settingsBindingStatus.textContent = runtimeMessage || `${rid} · ${onlineText} · ${sourceText}；保存后重启仍然有效。`;
+}
+
+async function loadSettingsForRobot(robotId) {
+  const rid = String(robotId || "").trim();
+  if (!rid || !settingsForm) {
+    setSettingsFormDisabled(true);
+    if (settingsBindingStatus) settingsBindingStatus.textContent = "请选择机器人。配置不会再保存在当前浏览器中。";
+    return;
+  }
+  const sequence = ++settingsLoadSequence;
+  setSettingsFormDisabled(true);
+  if (settingsMessage) settingsMessage.textContent = "正在读取机器人配置…";
+  try {
+    const envelope = await fetchJson(`${API_BASE_URL}/api/robot/settings?robot_id=${encodeURIComponent(rid)}`, { cache: "no-store" });
+    if (sequence !== settingsLoadSequence || !settingsRobotId || settingsRobotId.value !== rid) return;
+    fillSettingsForm(envelope);
+    showSettingsBinding(envelope);
+    if (settingsMessage) settingsMessage.textContent = envelope.source === "saved" ? "已从服务器读取该机器人配置。" : "该机器人尚无单独配置，显示系统默认值。";
+  } catch (err) {
+    if (sequence !== settingsLoadSequence) return;
+    if (settingsMessage) settingsMessage.textContent = `读取失败：${err.message || err}`;
+  } finally {
+    if (sequence === settingsLoadSequence && settingsRobotId && settingsRobotId.value === rid) setSettingsFormDisabled(false);
+  }
+}
+
+function syncSettingsRobotSelect() {
+  if (!settingsRobotId) return;
+  const previous = settingsRobotId.value;
+  const robots = mergePresenceRows();
+  const signature = JSON.stringify(robots.map((row) => [row.id, row.model, row.online]));
+  if (signature === settingsRobotOptionsSignature) return;
+  settingsRobotOptionsSignature = signature;
+  settingsRobotId.replaceChildren();
+  robots.forEach((row) => {
+    const option = document.createElement("option");
+    option.value = row.id;
+    option.textContent = `${row.id}${row.model ? ` (${row.model})` : ""} · ${row.online ? "在线" : "离线"}`;
+    settingsRobotId.appendChild(option);
   });
+  if (!robots.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无机器人";
+    settingsRobotId.appendChild(option);
+    settingsRobotId.disabled = true;
+    setSettingsFormDisabled(true);
+    return;
+  }
+  settingsRobotId.disabled = false;
+  settingsRobotId.value = robots.some((row) => row.id === previous) ? previous : robots[0].id;
+  loadSettingsForRobot(settingsRobotId.value);
+}
 
-  settingsForm.addEventListener("submit", (e) => {
+function initSettings() {
+  if (!settingsForm || !settingsRobotId) return;
+  syncSettingsRobotSelect();
+  settingsRobotId.addEventListener("change", () => loadSettingsForRobot(settingsRobotId.value));
+  settingsForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const robotId = settingsRobotId.value.trim();
+    if (!robotId) return;
     const payload = {
-      maxSpeed: Number(settingsForm.elements.maxSpeed.value),
-      angularSpeed: Number(settingsForm.elements.angularSpeed.value),
-      safetyDistance: Number(settingsForm.elements.safetyDistance.value),
-      refreshInterval: Number(settingsForm.elements.refreshInterval.value),
+      robot_id: robotId,
+      settings: {
+        max_linear_speed: Number(settingsForm.elements.maxLinearSpeed.value),
+        max_angular_speed: Number(settingsForm.elements.maxAngularSpeed.value),
+        inflation_radius: Number(settingsForm.elements.inflationRadius.value),
+      },
     };
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload));
-    settingsMessage.textContent = `已保存: ${new Date().toLocaleString()}`;
-    appendLog(`参数已更新 ${JSON.stringify(payload)}`);
+    setSettingsFormDisabled(true);
+    if (settingsMessage) settingsMessage.textContent = `正在保存并应用到 ${robotId}…`;
+    try {
+      const envelope = await fetchJson(`${API_BASE_URL}/api/robot/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      fillSettingsForm(envelope);
+      showSettingsBinding(envelope, envelope.runtime);
+      if (settingsMessage) settingsMessage.textContent = `${envelope.runtime.message}（${new Date().toLocaleString()}）`;
+      appendLog(`${robotId} 参数保存结果: ${envelope.runtime.state} ${JSON.stringify(payload.settings)}`);
+    } catch (err) {
+      if (settingsMessage) settingsMessage.textContent = `保存失败：${err.message || err}`;
+    } finally {
+      setSettingsFormDisabled(false);
+    }
   });
 }
 
@@ -5100,7 +5245,11 @@ function initGazeboPage() {
   const btnGazeboResetCamera = document.getElementById("btn-gazebo-reset-camera");
   const btnGazeboCamHome = document.getElementById("btn-gazebo-cam-home");
   const btnGazeboCamUp = document.getElementById("btn-gazebo-cam-up");
+  const btnGazeboCamUpLeft = document.getElementById("btn-gazebo-cam-up-left");
+  const btnGazeboCamUpRight = document.getElementById("btn-gazebo-cam-up-right");
   const btnGazeboCamDown = document.getElementById("btn-gazebo-cam-down");
+  const btnGazeboCamDownLeft = document.getElementById("btn-gazebo-cam-down-left");
+  const btnGazeboCamDownRight = document.getElementById("btn-gazebo-cam-down-right");
   const btnGazeboCamLeft = document.getElementById("btn-gazebo-cam-left");
   const btnGazeboCamRight = document.getElementById("btn-gazebo-cam-right");
   const btnGazeboCamZoomIn = document.getElementById("btn-gazebo-cam-zoom-in");
@@ -5165,6 +5314,8 @@ function initGazeboPage() {
   };
   const cameraModelName = "topdown_camera";
   const cameraDriveSpeedEl = document.getElementById("camera-drive-speed");
+  const cameraDriveSpeedOutput = document.getElementById("camera-drive-speed-output");
+  const cameraReadout = document.getElementById("gazebo-camera-readout");
   const camDriveKey = { up: false, down: false, left: false, right: false };
   let lastCameraDriveSendMs = 0;
   let lastCameraDriveTickMs = 0;
@@ -5173,11 +5324,20 @@ function initGazeboPage() {
   let cameraPoseRevision = 0;
   let cameraPoseLoadSeq = 0;
   let cameraDriveTimer = null;
+  let cameraDriveStartedMs = 0;
   let topCameraPollTimer = null;
   let topCameraTelemetryTimer = null;
   let topCameraRefreshInFlight = false;
   let lastRenderedTopCameraFrameSeq = -1;
   let camZoomDir = 0;
+  const TOP_CAMERA_VIEW_SCALE_MAX = 8;
+  let topCameraViewScale = 1;
+  let topCameraViewCenterX = 0.5;
+  let topCameraViewCenterY = 0.5;
+  let latestTopCameraBitmap = null;
+  const cameraPointers = new Map();
+  let cameraDrag = null;
+  let cameraPinch = null;
   /** @type {Record<string, unknown> | null} */
   let lastTopCameraStatusSnap = null;
 
@@ -5198,6 +5358,17 @@ function initGazeboPage() {
 
   function gazeboViewActive() {
     return !!(views.gazebo && views.gazebo.classList.contains("active"));
+  }
+
+  function updateCameraControlReadout() {
+    if (cameraReadout) {
+      cameraReadout.textContent =
+        `相机 X ${cameraModel.x.toFixed(2)} · Y ${cameraModel.y.toFixed(2)} · ` +
+        `高度 ${cameraModel.z.toFixed(2)} m · 图片 ${topCameraViewScale.toFixed(1)}×`;
+    }
+    if (cameraDriveSpeedOutput) {
+      cameraDriveSpeedOutput.textContent = `${cameraDriveSpeedMps().toFixed(1)} m/s`;
+    }
   }
 
   function cameraOrientationPayload() {
@@ -5246,6 +5417,7 @@ function initGazeboPage() {
     cameraModel.qy = Number.isFinite(pose.qy) ? pose.qy : cameraModel.qy;
     cameraModel.qz = Number.isFinite(pose.qz) ? pose.qz : cameraModel.qz;
     cameraModel.qw = Number.isFinite(pose.qw) ? pose.qw : cameraModel.qw;
+    updateCameraControlReadout();
     if (useQuiet) {
       postTopdownCameraPoseQuiet();
       if (gazeboMessage && message) {
@@ -5281,6 +5453,48 @@ function initGazeboPage() {
     return Number.isFinite(v) && v > 0 ? v : 4;
   }
 
+  if (cameraDriveSpeedEl) {
+    cameraDriveSpeedEl.addEventListener("input", updateCameraControlReadout);
+  }
+
+  function cameraDriveActive() {
+    return !!(
+      camDriveKey.up ||
+      camDriveKey.down ||
+      camDriveKey.left ||
+      camDriveKey.right ||
+      camZoomDir
+    );
+  }
+
+  function syncCameraDriveStartedAt(wasActive) {
+    const active = cameraDriveActive();
+    if (active && !wasActive) {
+      cameraDriveStartedMs = performance.now();
+    } else if (!active) {
+      cameraDriveStartedMs = 0;
+    }
+  }
+
+  function nudgeTopdownCamera(screenRight, screenUp) {
+    const drive = cameraScreenDriveVector(screenRight, screenUp);
+    const heightScale = Math.min(2.5, Math.max(0.35, cameraModel.z / cameraDefaultPose.z));
+    const distance = Math.max(0.18, cameraDriveSpeedMps() * heightScale * 0.12);
+    cameraModel.x += drive.x * distance;
+    cameraModel.y += drive.y * distance;
+    cameraPoseRevision += 1;
+    updateCameraControlReadout();
+    postTopdownCameraPoseQuiet(true);
+  }
+
+  function nudgeTopdownCameraZoom(direction) {
+    const factor = direction < 0 ? 0.88 : 1 / 0.88;
+    cameraModel.z = Math.min(CAMERA_Z_MAX, Math.max(CAMERA_Z_MIN, cameraModel.z * factor));
+    cameraPoseRevision += 1;
+    updateCameraControlReadout();
+    postTopdownCameraPoseQuiet(true);
+  }
+
   const CAMERA_DRIVE_SEND_INTERVAL_MS = 66;
 
   function postTopdownCameraPoseQuiet(force = false) {
@@ -5313,6 +5527,7 @@ function initGazeboPage() {
   }
 
   function setCamDriveKey(code, down) {
+    const wasActive = cameraDriveActive();
     if (code === "KeyW" || code === "ArrowUp") {
       if (down && !camDriveKey.up) cameraPoseRevision += 1;
       camDriveKey.up = down;
@@ -5326,6 +5541,7 @@ function initGazeboPage() {
       if (down && !camDriveKey.right) cameraPoseRevision += 1;
       camDriveKey.right = down;
     }
+    syncCameraDriveStartedAt(wasActive);
   }
 
   function clearCamDriveKeys() {
@@ -5336,6 +5552,7 @@ function initGazeboPage() {
     camDriveKey.left = false;
     camDriveKey.right = false;
     camZoomDir = 0;
+    cameraDriveStartedMs = 0;
     if (wasActive) {
       postTopdownCameraPoseQuiet(true);
     }
@@ -5371,7 +5588,12 @@ function initGazeboPage() {
       }
     }
     const drive = cameraScreenDriveVector(screenRight, screenUp);
-    const sp = cameraDriveSpeedMps();
+    const heldSec = cameraDriveStartedMs
+      ? Math.max(0, (now - cameraDriveStartedMs) / 1000)
+      : 0;
+    const acceleration = 0.7 + Math.min(1.5, heldSec * 1.2);
+    const heightScale = Math.min(2.5, Math.max(0.35, cameraModel.z / cameraDefaultPose.z));
+    const sp = cameraDriveSpeedMps() * heightScale * acceleration;
     cameraModel.x += drive.x * sp * dt;
     cameraModel.y += drive.y * sp * dt;
     if (camZoomDir !== 0) {
@@ -5381,6 +5603,7 @@ function initGazeboPage() {
         Math.max(CAMERA_Z_MIN, cameraModel.z + camZoomDir * zoomSpeed * dt)
       );
     }
+    updateCameraControlReadout();
     postTopdownCameraPoseQuiet();
   }
 
@@ -5406,6 +5629,12 @@ function initGazeboPage() {
       return;
     }
     ev.preventDefault();
+    if (!ev.repeat) {
+      if (ev.code === "KeyW" || ev.code === "ArrowUp") nudgeTopdownCamera(0, 1);
+      if (ev.code === "KeyS" || ev.code === "ArrowDown") nudgeTopdownCamera(0, -1);
+      if (ev.code === "KeyA" || ev.code === "ArrowLeft") nudgeTopdownCamera(-1, 0);
+      if (ev.code === "KeyD" || ev.code === "ArrowRight") nudgeTopdownCamera(1, 0);
+    }
     setCamDriveKey(ev.code, true);
   });
   window.addEventListener("keyup", (ev) => {
@@ -5467,6 +5696,7 @@ function initGazeboPage() {
       if (!Number.isNaN(px)) cameraModel.x = px;
       if (!Number.isNaN(py)) cameraModel.y = py;
       if (!Number.isNaN(pz)) cameraModel.z = pz;
+      updateCameraControlReadout();
       gazeboMessage.textContent = `已读取 topdown_camera: (${cameraModel.x.toFixed(2)}, ${cameraModel.y.toFixed(2)}, ${cameraModel.z.toFixed(2)})`;
     } catch (err) {
       gazeboMessage.textContent = err.message || String(err);
@@ -5486,6 +5716,7 @@ function initGazeboPage() {
     topCameraCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     topCameraCtx.fillStyle = "#ffffff";
     topCameraCtx.fillRect(0, 0, vw, vh);
+    renderTopCameraLocalView();
   }
 
   function applyGazeboCameraWrapTier(tier) {
@@ -5600,6 +5831,8 @@ function initGazeboPage() {
     if (!topCameraCanvas || !topCameraCtx) {
       return;
     }
+    latestTopCameraBitmap?.close?.();
+    latestTopCameraBitmap = null;
     fitTopCameraCanvas();
     const vw = topCameraCanvas.clientWidth || 320;
     const vh = topCameraCanvas.clientHeight || 240;
@@ -5726,19 +5959,96 @@ function initGazeboPage() {
     return world;
   }
 
-  function handleTopCameraPick(ev) {
-    if (!topCameraCanvas || !cameraFrame.width || !cameraFrame.height) {
-      return;
+  function clampTopCameraLocalView() {
+    topCameraViewScale = Math.min(
+      TOP_CAMERA_VIEW_SCALE_MAX,
+      Math.max(1, topCameraViewScale)
+    );
+    const halfVisible = 0.5 / topCameraViewScale;
+    topCameraViewCenterX = Math.min(
+      1 - halfVisible,
+      Math.max(halfVisible, topCameraViewCenterX)
+    );
+    topCameraViewCenterY = Math.min(
+      1 - halfVisible,
+      Math.max(halfVisible, topCameraViewCenterY)
+    );
+  }
+
+  function cameraCanvasNormalizedPoint(clientX, clientY, clampOutside = false) {
+    if (!topCameraCanvas) {
+      return null;
     }
     const rect = topCameraCanvas.getBoundingClientRect();
-    const sx = ev.clientX - rect.left;
-    const sy = ev.clientY - rect.top;
-    if (sx < 0 || sy < 0 || sx > rect.width || sy > rect.height) {
+    if (!rect.width || !rect.height) {
+      return null;
+    }
+    let x = (clientX - rect.left) / rect.width;
+    let y = (clientY - rect.top) / rect.height;
+    if (!clampOutside && (x < 0 || y < 0 || x > 1 || y > 1)) {
+      return null;
+    }
+    if (clampOutside) {
+      x = Math.min(1, Math.max(0, x));
+      y = Math.min(1, Math.max(0, y));
+    }
+    return { x, y };
+  }
+
+  function renderTopCameraLocalView() {
+    if (!topCameraCanvas || !topCameraCtx || !latestTopCameraBitmap) {
       return;
     }
-    const px = (sx / rect.width) * cameraFrame.width;
-    const py = (sy / rect.height) * cameraFrame.height;
-    const world = correctTopCameraPickWorld(cameraPixelToWorld(px, py));
+    clampTopCameraLocalView();
+    const vw = topCameraCanvas.clientWidth || latestTopCameraBitmap.width;
+    const vh = topCameraCanvas.clientHeight || latestTopCameraBitmap.height;
+    const sourceWidth = latestTopCameraBitmap.width / topCameraViewScale;
+    const sourceHeight = latestTopCameraBitmap.height / topCameraViewScale;
+    const sourceX =
+      topCameraViewCenterX * latestTopCameraBitmap.width - sourceWidth / 2;
+    const sourceY =
+      topCameraViewCenterY * latestTopCameraBitmap.height - sourceHeight / 2;
+    topCameraCtx.fillStyle = "#ffffff";
+    topCameraCtx.fillRect(0, 0, vw, vh);
+    topCameraCtx.drawImage(
+      latestTopCameraBitmap,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      vw,
+      vh
+    );
+  }
+
+  function cameraImagePointFromClient(clientX, clientY) {
+    if (!topCameraCanvas || !cameraFrame.width || !cameraFrame.height) {
+      return null;
+    }
+    const canvasPoint = cameraCanvasNormalizedPoint(clientX, clientY);
+    if (!canvasPoint) {
+      return null;
+    }
+    return {
+      x:
+        (topCameraViewCenterX + (canvasPoint.x - 0.5) / topCameraViewScale) *
+        cameraFrame.width,
+      y:
+        (topCameraViewCenterY + (canvasPoint.y - 0.5) / topCameraViewScale) *
+        cameraFrame.height,
+    };
+  }
+
+  function handleTopCameraPick(ev) {
+    const imagePoint = cameraImagePointFromClient(ev.clientX, ev.clientY);
+    if (!imagePoint) {
+      return;
+    }
+    const world = correctTopCameraPickWorld(
+      cameraPixelToWorld(imagePoint.x, imagePoint.y)
+    );
     if (!world) {
       if (gazeboMessage) {
         gazeboMessage.textContent = "当前相机参数不足，无法从画面换算 world 坐标";
@@ -5746,6 +6056,176 @@ function initGazeboPage() {
       return;
     }
     fillGazeboTargetFromWorld(world);
+  }
+
+  function beginTopCameraPinch() {
+    if (cameraPointers.size < 2) {
+      cameraPinch = null;
+      return;
+    }
+    const pair = Array.from(cameraPointers.values()).slice(0, 2);
+    const centerX = (pair[0].x + pair[1].x) / 2;
+    const centerY = (pair[0].y + pair[1].y) / 2;
+    const imagePoint = cameraImagePointFromClient(centerX, centerY);
+    cameraPinch = {
+      initialDistance: Math.max(1, Math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y)),
+      initialScale: topCameraViewScale,
+      anchorX: imagePoint ? imagePoint.x / cameraFrame.width : topCameraViewCenterX,
+      anchorY: imagePoint ? imagePoint.y / cameraFrame.height : topCameraViewCenterY,
+    };
+    cameraDrag = null;
+    gazeboCameraWrap?.classList.add("is-pinching");
+    gazeboCameraWrap?.classList.remove("is-dragging");
+  }
+
+  function updateTopCameraPinch() {
+    if (!cameraPinch || cameraPointers.size < 2) {
+      return;
+    }
+    const pair = Array.from(cameraPointers.values()).slice(0, 2);
+    const distance = Math.max(1, Math.hypot(pair[1].x - pair[0].x, pair[1].y - pair[0].y));
+    const centerX = (pair[0].x + pair[1].x) / 2;
+    const centerY = (pair[0].y + pair[1].y) / 2;
+    const canvasPoint = cameraCanvasNormalizedPoint(centerX, centerY, true);
+    if (!canvasPoint) {
+      return;
+    }
+    topCameraViewScale = Math.min(
+      TOP_CAMERA_VIEW_SCALE_MAX,
+      Math.max(
+        1,
+        cameraPinch.initialScale * distance / cameraPinch.initialDistance
+      )
+    );
+    topCameraViewCenterX =
+      cameraPinch.anchorX - (canvasPoint.x - 0.5) / topCameraViewScale;
+    topCameraViewCenterY =
+      cameraPinch.anchorY - (canvasPoint.y - 0.5) / topCameraViewScale;
+    clampTopCameraLocalView();
+    renderTopCameraLocalView();
+    updateCameraControlReadout();
+  }
+
+  function handleTopCameraPointerDown(ev) {
+    if (ev.pointerType === "mouse" && ev.button !== 0) {
+      return;
+    }
+    ev.preventDefault();
+    topCameraCanvas?.setPointerCapture?.(ev.pointerId);
+    cameraPointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (cameraPointers.size >= 2) {
+      beginTopCameraPinch();
+      return;
+    }
+    cameraDrag = {
+      pointerId: ev.pointerId,
+      startX: ev.clientX,
+      startY: ev.clientY,
+      lastX: ev.clientX,
+      lastY: ev.clientY,
+      moved: false,
+    };
+  }
+
+  function handleTopCameraPointerMove(ev) {
+    if (!cameraPointers.has(ev.pointerId)) {
+      return;
+    }
+    ev.preventDefault();
+    cameraPointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (cameraPointers.size >= 2) {
+      if (!cameraPinch) {
+        beginTopCameraPinch();
+      }
+      updateTopCameraPinch();
+      return;
+    }
+    if (!cameraDrag || cameraDrag.pointerId !== ev.pointerId) {
+      return;
+    }
+    const totalDistance = Math.hypot(
+      ev.clientX - cameraDrag.startX,
+      ev.clientY - cameraDrag.startY
+    );
+    if (!cameraDrag.moved && totalDistance < 5) {
+      return;
+    }
+    if (!cameraDrag.moved) {
+      cameraDrag.moved = true;
+      gazeboCameraWrap?.classList.add("is-dragging");
+    }
+    const rect = topCameraCanvas?.getBoundingClientRect();
+    if (rect && rect.width && rect.height) {
+      topCameraViewCenterX -=
+        (ev.clientX - cameraDrag.lastX) / rect.width / topCameraViewScale;
+      topCameraViewCenterY -=
+        (ev.clientY - cameraDrag.lastY) / rect.height / topCameraViewScale;
+      clampTopCameraLocalView();
+      renderTopCameraLocalView();
+      updateCameraControlReadout();
+    }
+    cameraDrag.lastX = ev.clientX;
+    cameraDrag.lastY = ev.clientY;
+  }
+
+  function finishTopCameraPointer(ev, allowPick) {
+    if (!cameraPointers.has(ev.pointerId)) {
+      return;
+    }
+    const wasPinching = !!cameraPinch || cameraPointers.size > 1;
+    const wasDragging = !!(cameraDrag && cameraDrag.moved);
+    cameraPointers.delete(ev.pointerId);
+    if (cameraPointers.size >= 2) {
+      beginTopCameraPinch();
+      return;
+    }
+    if (cameraPointers.size === 1) {
+      const [pointerId, point] = cameraPointers.entries().next().value;
+      cameraPinch = null;
+      cameraDrag = {
+        pointerId,
+        startX: point.x,
+        startY: point.y,
+        lastX: point.x,
+        lastY: point.y,
+        moved: true,
+      };
+      gazeboCameraWrap?.classList.remove("is-pinching");
+      gazeboCameraWrap?.classList.add("is-dragging");
+      return;
+    }
+    cameraPinch = null;
+    cameraDrag = null;
+    gazeboCameraWrap?.classList.remove("is-pinching", "is-dragging");
+    if (!wasPinching && !wasDragging && allowPick) {
+      handleTopCameraPick(ev);
+    }
+  }
+
+  function handleTopCameraWheel(ev) {
+    const canvasPoint = cameraCanvasNormalizedPoint(ev.clientX, ev.clientY);
+    const imagePoint = cameraImagePointFromClient(ev.clientX, ev.clientY);
+    if (!canvasPoint || !imagePoint) {
+      return;
+    }
+    ev.preventDefault();
+    const modeScale = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 240 : 1;
+    const delta = Math.min(240, Math.max(-240, ev.deltaY * modeScale));
+    const nextScale = Math.min(
+      TOP_CAMERA_VIEW_SCALE_MAX,
+      Math.max(1, topCameraViewScale * Math.exp(-delta * 0.0018))
+    );
+    if (Math.abs(nextScale - topCameraViewScale) < 1e-6) {
+      return;
+    }
+    const anchorX = imagePoint.x / cameraFrame.width;
+    const anchorY = imagePoint.y / cameraFrame.height;
+    topCameraViewScale = nextScale;
+    topCameraViewCenterX = anchorX - (canvasPoint.x - 0.5) / topCameraViewScale;
+    topCameraViewCenterY = anchorY - (canvasPoint.y - 0.5) / topCameraViewScale;
+    clampTopCameraLocalView();
+    renderTopCameraLocalView();
+    updateCameraControlReadout();
   }
 
   async function refreshTopCameraFrame(status) {
@@ -5773,6 +6253,10 @@ function initGazeboPage() {
       }
       const blob = await response.blob();
       const bitmap = await createImageBitmap(blob);
+      if (!gazeboViewActive()) {
+        bitmap.close?.();
+        return;
+      }
       const width = Number((status && status.width) || bitmap.width || 0);
       const height = Number((status && status.height) || bitmap.height || 0);
       if (!width || !height) {
@@ -5781,12 +6265,10 @@ function initGazeboPage() {
       }
       cameraFrame.width = width;
       cameraFrame.height = height;
+      const previousBitmap = latestTopCameraBitmap;
+      latestTopCameraBitmap = bitmap;
       fitTopCameraCanvas();
-      const vw = topCameraCanvas.clientWidth || width;
-      const vh = topCameraCanvas.clientHeight || height;
-      topCameraCtx.clearRect(0, 0, vw, vh);
-      topCameraCtx.drawImage(bitmap, 0, 0, vw, vh);
-      bitmap.close?.();
+      previousBitmap?.close?.();
       if (Number.isFinite(frameSeq)) {
         lastRenderedTopCameraFrameSeq = frameSeq;
       }
@@ -5854,7 +6336,7 @@ function initGazeboPage() {
       }
       const modelName = modelNameEl?.value?.trim();
       if (!modelName) {
-        gazeboMessage.textContent = "请填写 Gazebo 模型名（与 spawn -entity 一致，如 robot2）";
+        gazeboMessage.textContent = "暂无在线机器人，无法移动模型";
         return;
       }
       const x = parseFloat((gazeboX && gazeboX.value) || "");
@@ -5891,63 +6373,97 @@ function initGazeboPage() {
     if (!btn) {
       return;
     }
-    const stop = () => {
+    let activePointerId = null;
+    const stop = (ev) => {
+      if (
+        activePointerId == null ||
+        (ev && ev.pointerId != null && ev.pointerId !== activePointerId)
+      ) {
+        return;
+      }
+      activePointerId = null;
+      btn.classList.remove("is-active");
       if (onStop) {
         onStop();
       }
     };
     btn.addEventListener("pointerdown", (ev) => {
+      if (ev.pointerType === "mouse" && ev.button !== 0) {
+        return;
+      }
       ev.preventDefault();
+      activePointerId = ev.pointerId;
       btn.setPointerCapture?.(ev.pointerId);
+      btn.classList.add("is-active");
       onStart();
     });
     btn.addEventListener("pointerup", stop);
     btn.addEventListener("pointercancel", stop);
-    btn.addEventListener("pointerleave", stop);
+    btn.addEventListener("lostpointercapture", stop);
+    btn.addEventListener("contextmenu", (ev) => ev.preventDefault());
   }
 
-  bindHoldButton(btnGazeboCamUp, () => {
-    if (!camDriveKey.up) cameraPoseRevision += 1;
-    camDriveKey.up = true;
-  }, () => {
-    camDriveKey.up = false;
-    postTopdownCameraPoseQuiet(true);
-  });
-  bindHoldButton(btnGazeboCamDown, () => {
-    if (!camDriveKey.down) cameraPoseRevision += 1;
-    camDriveKey.down = true;
-  }, () => {
-    camDriveKey.down = false;
-    postTopdownCameraPoseQuiet(true);
-  });
-  bindHoldButton(btnGazeboCamLeft, () => {
-    if (!camDriveKey.left) cameraPoseRevision += 1;
-    camDriveKey.left = true;
-  }, () => {
-    camDriveKey.left = false;
-    postTopdownCameraPoseQuiet(true);
-  });
-  bindHoldButton(btnGazeboCamRight, () => {
-    if (!camDriveKey.right) cameraPoseRevision += 1;
-    camDriveKey.right = true;
-  }, () => {
-    camDriveKey.right = false;
-    postTopdownCameraPoseQuiet(true);
-  });
-  bindHoldButton(btnGazeboCamZoomIn, () => {
-    if (camZoomDir !== -1) cameraPoseRevision += 1;
-    camZoomDir = -1;
-  }, () => {
-    camZoomDir = 0;
-    postTopdownCameraPoseQuiet(true);
-  });
-  bindHoldButton(btnGazeboCamZoomOut, () => {
-    if (camZoomDir !== 1) cameraPoseRevision += 1;
-    camZoomDir = 1;
-  }, () => {
-    camZoomDir = 0;
-    postTopdownCameraPoseQuiet(true);
-  });
+  function bindCameraDirectionButton(btn, directions, screenRight, screenUp) {
+    bindHoldButton(
+      btn,
+      () => {
+        const wasActive = cameraDriveActive();
+        nudgeTopdownCamera(screenRight, screenUp);
+        directions.forEach((direction) => {
+          camDriveKey[direction] = true;
+        });
+        syncCameraDriveStartedAt(wasActive);
+      },
+      () => {
+        const wasActive = cameraDriveActive();
+        directions.forEach((direction) => {
+          camDriveKey[direction] = false;
+        });
+        syncCameraDriveStartedAt(wasActive);
+        postTopdownCameraPoseQuiet(true);
+      }
+    );
+  }
+
+  bindCameraDirectionButton(btnGazeboCamUp, ["up"], 0, 1);
+  bindCameraDirectionButton(btnGazeboCamDown, ["down"], 0, -1);
+  bindCameraDirectionButton(btnGazeboCamLeft, ["left"], -1, 0);
+  bindCameraDirectionButton(btnGazeboCamRight, ["right"], 1, 0);
+  bindCameraDirectionButton(btnGazeboCamUpLeft, ["up", "left"], -1, 1);
+  bindCameraDirectionButton(btnGazeboCamUpRight, ["up", "right"], 1, 1);
+  bindCameraDirectionButton(btnGazeboCamDownLeft, ["down", "left"], -1, -1);
+  bindCameraDirectionButton(btnGazeboCamDownRight, ["down", "right"], 1, -1);
+
+  bindHoldButton(
+    btnGazeboCamZoomIn,
+    () => {
+      const wasActive = cameraDriveActive();
+      nudgeTopdownCameraZoom(-1);
+      camZoomDir = -1;
+      syncCameraDriveStartedAt(wasActive);
+    },
+    () => {
+      const wasActive = cameraDriveActive();
+      camZoomDir = 0;
+      syncCameraDriveStartedAt(wasActive);
+      postTopdownCameraPoseQuiet(true);
+    }
+  );
+  bindHoldButton(
+    btnGazeboCamZoomOut,
+    () => {
+      const wasActive = cameraDriveActive();
+      nudgeTopdownCameraZoom(1);
+      camZoomDir = 1;
+      syncCameraDriveStartedAt(wasActive);
+    },
+    () => {
+      const wasActive = cameraDriveActive();
+      camZoomDir = 0;
+      syncCameraDriveStartedAt(wasActive);
+      postTopdownCameraPoseQuiet(true);
+    }
+  );
 
   if (btnGazeboCamHome) {
     btnGazeboCamHome.addEventListener("click", async () => {
@@ -5995,7 +6511,16 @@ function initGazeboPage() {
   }
 
   if (topCameraCanvas) {
-    topCameraCanvas.addEventListener("click", handleTopCameraPick);
+    topCameraCanvas.addEventListener("pointerdown", handleTopCameraPointerDown);
+    topCameraCanvas.addEventListener("pointermove", handleTopCameraPointerMove);
+    topCameraCanvas.addEventListener("pointerup", (ev) => {
+      finishTopCameraPointer(ev, true);
+    });
+    topCameraCanvas.addEventListener("pointercancel", (ev) => {
+      finishTopCameraPointer(ev, false);
+    });
+    topCameraCanvas.addEventListener("wheel", handleTopCameraWheel, { passive: false });
+    topCameraCanvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
     let gazeboCameraLoopsActive = false;
     function startGazeboCameraLoops() {
       if (gazeboCameraLoopsActive) {
@@ -6031,6 +6556,12 @@ function initGazeboPage() {
         clearInterval(cameraDriveTimer);
         cameraDriveTimer = null;
       }
+      latestTopCameraBitmap?.close?.();
+      latestTopCameraBitmap = null;
+      cameraPointers.clear();
+      cameraDrag = null;
+      cameraPinch = null;
+      gazeboCameraWrap?.classList.remove("is-pinching", "is-dragging");
       clearCamDriveKeys();
     }
     function syncGazeboCameraLoopsFromView() {
@@ -6050,6 +6581,7 @@ function initGazeboPage() {
         fitTopCameraCanvas();
       }
     });
+    updateCameraControlReadout();
   }
 }
 
@@ -6080,19 +6612,6 @@ bootstrap();
 
 function detailStatusValue(status, liveKey, persistedKey) {
   return String((status && (status[liveKey] || status[persistedKey])) || "—");
-}
-
-function robotDetailSettingsKey(rid) {
-  return `${SETTINGS_KEY}:${rid}`;
-}
-
-function loadRobotDetailSettings(rid) {
-  const defaults = { maxSpeed: 1.2, angularSpeed: 0.8, safetyDistance: 0.6, refreshInterval: 500 };
-  try {
-    return { ...defaults, ...(JSON.parse(localStorage.getItem(robotDetailSettingsKey(rid)) || "null") || {}) };
-  } catch {
-    return defaults;
-  }
 }
 
 function renderRobotQuickDock() {
@@ -6239,15 +6758,19 @@ function renderRobotDetailLogs(payload) {
 }
 
 function renderRobotDetailParams(payload) {
-  const p = loadRobotDetailSettings(payload.robot_id);
+  const envelope = payload.settings || {};
+  const p = settingsValuesFromEnvelope(envelope);
+  const lastApply = envelope.last_apply || {};
+  const sourceText = envelope.source === "saved" ? "服务器持久配置" : "系统默认值";
+  const applyText = lastApply.message || "保存后，在线机器人立即应用；离线机器人由本平台下次启动导航栈时加载。";
   return `<form id="robot-detail-params-form">
+    <p class="robot-detail-param-binding"><strong>${escapeHtml(payload.robot_id)}</strong> · ${escapeHtml(sourceText)}<br>${escapeHtml(applyText)}</p>
     <div class="robot-detail-params">
-      <label>最大速度 (m/s)<input name="maxSpeed" type="number" step="0.1" min="0" value="${p.maxSpeed}" required /></label>
-      <label>角速度 (rad/s)<input name="angularSpeed" type="number" step="0.1" min="0" value="${p.angularSpeed}" required /></label>
-      <label>避障距离 (m)<input name="safetyDistance" type="number" step="0.1" min="0" value="${p.safetyDistance}" required /></label>
-      <label>刷新间隔 (ms)<input name="refreshInterval" type="number" step="100" min="100" value="${p.refreshInterval}" required /></label>
+      <label>最大线速度 (m/s)<input name="maxLinearSpeed" type="number" step="0.01" min="0.05" max="2" value="${p.maxLinearSpeed}" required /></label>
+      <label>最大角速度 (rad/s)<input name="maxAngularSpeed" type="number" step="0.05" min="0.1" max="3" value="${p.maxAngularSpeed}" required /></label>
+      <label>障碍膨胀半径 (m)<input name="inflationRadius" type="number" step="0.01" min="0.22" max="3" value="${p.inflationRadius}" required /></label>
     </div>
-    <div class="robot-detail-param-actions"><button type="submit">保存 ${escapeHtml(payload.robot_id)} 参数</button><span id="robot-detail-param-message" class="message"></span></div>
+    <div class="robot-detail-param-actions"><button type="submit">保存并应用到 ${escapeHtml(payload.robot_id)}</button><span id="robot-detail-param-message" class="message"></span></div>
   </form>`;
 }
 
@@ -6347,20 +6870,40 @@ function initRobotDetailUi() {
     }
     closeRobotDetail();
   });
-  if (robotDetailBody) robotDetailBody.addEventListener("submit", (ev) => {
+  if (robotDetailBody) robotDetailBody.addEventListener("submit", async (ev) => {
     const form = ev.target.closest("#robot-detail-params-form");
     if (!form || !selectedDetailRobotId) return;
     ev.preventDefault();
+    const robotId = selectedDetailRobotId;
     const payload = {
-      maxSpeed: Number(form.elements.maxSpeed.value),
-      angularSpeed: Number(form.elements.angularSpeed.value),
-      safetyDistance: Number(form.elements.safetyDistance.value),
-      refreshInterval: Number(form.elements.refreshInterval.value),
+      robot_id: robotId,
+      settings: {
+        max_linear_speed: Number(form.elements.maxLinearSpeed.value),
+        max_angular_speed: Number(form.elements.maxAngularSpeed.value),
+        inflation_radius: Number(form.elements.inflationRadius.value),
+      },
     };
-    localStorage.setItem(robotDetailSettingsKey(selectedDetailRobotId), JSON.stringify(payload));
-    const message = document.getElementById("robot-detail-param-message");
-    if (message) message.textContent = `已保存 ${new Date().toLocaleTimeString()}`;
-    appendLog(`${selectedDetailRobotId} 参数已更新 ${JSON.stringify(payload)}`);
+    const button = form.querySelector('button[type="submit"]');
+    let message = document.getElementById("robot-detail-param-message");
+    if (button) button.disabled = true;
+    if (message) message.textContent = "正在保存并下发…";
+    try {
+      const envelope = await fetchJson(`${API_BASE_URL}/api/robot/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (robotId !== selectedDetailRobotId || !robotDetailPayload) return;
+      robotDetailPayload.settings = envelope;
+      renderRobotDetail();
+      message = document.getElementById("robot-detail-param-message");
+      if (message) message.textContent = envelope.runtime.message;
+      appendLog(`${robotId} 参数保存结果: ${envelope.runtime.state} ${JSON.stringify(payload.settings)}`);
+    } catch (err) {
+      message = document.getElementById("robot-detail-param-message");
+      if (message) message.textContent = `保存失败：${err.message || err}`;
+      if (button) button.disabled = false;
+    }
   });
 }
 

@@ -189,6 +189,12 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertGreater(html.index('id="standalone-map-editor"'), html.index('class="monitor-teleop-rail"'))
         self.assertIn('data-teleop="forward"', html)
         self.assertIn("syncOnlineRobotSelect", js)
+        self.assertIn("syncGazeboModelSelect", js)
+        self.assertIn("collectOnlineRobotOptions", js)
+        self.assertIn('mergePresenceRows().filter((row) => row.online)', js)
+        self.assertIn('<select id="gazebo-model-name" disabled>', html)
+        self.assertNotIn('<input id="gazebo-model-name"', html)
+        self.assertIn('moveButton.disabled = true', js)
         self.assertIn("/api/robot/relocalization/record", js)
         self.assertIn('type === "relocalization" ? "重定位点"', js)
         self.assertIn('point.type === "custom" || point.type === "relocalization" ? 5 : 7', js)
@@ -224,6 +230,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("backdrop-filter: blur(2.2px)", css)
         self.assertIn("height: calc(100vh - 36px)", css)
         self.assertIn("right: 278px", css)
+
         self.assertIn("position: fixed", css)
         self.assertIn("window.StandaloneMapEditor.open(activeFloor)", js)
         self.assertIn("window.OPEN_DELIVERY_API_BASE_URL = API_BASE_URL", js)
@@ -231,6 +238,34 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn('contentEl.classList.toggle("content--monitor", next === "monitor")', js)
         self.assertIn("max-width: 1400px", css)
         self.assertIn(".content.content--monitor", css)
+        self.assertNotIn("content--gazebo", js)
+        self.assertNotIn(".content.content--gazebo", css)
+        self.assertIn(
+            "grid-template-columns: minmax(0, 1.5fr) minmax(320px, 420px)",
+            css,
+        )
+        self.assertIn("grid-template-columns: minmax(0, 1fr) 220px", css)
+        self.assertIn(".gazebo-panel--move {\n  position: sticky;", css)
+        gazebo_section = html[html.index('id="view-gazebo"'):]
+        monitor_section = html[html.index('id="view-monitor"'):html.index('id="view-settings"')]
+        self.assertIn('class="view-header"', gazebo_section)
+        self.assertNotIn("gazebo-view-header", gazebo_section)
+        self.assertNotIn("gazebo-view-header", monitor_section)
+
+    def test_fresh_teleop_preempts_navigation_without_heartbeat_race(self):
+        source = (
+            ROOT
+            / "src"
+            / "driver"
+            / "chassis_state_machine"
+            / "src"
+            / "chassis_state_machine_node.cpp"
+        ).read_text(encoding="utf-8")
+        teleop_branch = 'if (fresh(advance_received_, advance_stamp_, current))'
+        navigation_branch = 'control_status_ == "AUTO" && fresh(navigation_received_'
+        self.assertIn(teleop_branch, source)
+        self.assertIn(navigation_branch, source)
+        self.assertLess(source.index(teleop_branch), source.index(navigation_branch))
 
     def test_web_console_supports_chinese_and_english(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
@@ -418,6 +453,8 @@ class WebMonitorFeatureTest(unittest.TestCase):
 
     def test_topdown_camera_uses_latest_pose_and_jpeg_frames(self):
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
         server_py = (ROOT / "backend" / "server.py").read_text(encoding="utf-8")
         bridge_py = (ROOT / "backend" / "ros_tf_bridge.py").read_text(encoding="utf-8")
         world = (
@@ -435,10 +472,39 @@ class WebMonitorFeatureTest(unittest.TestCase):
             "rotateVectorByQuaternion({ x: 0, y: 0, z: 1 }, orientation)", js
         )
         self.assertIn("revisionAtStart !== cameraPoseRevision", js)
+        self.assertIn("handleTopCameraPointerMove", js)
+        self.assertIn("handleTopCameraWheel", js)
+        self.assertIn("beginTopCameraPinch", js)
+        self.assertIn("cameraPointers.size >= 2", js)
+        self.assertIn("TOP_CAMERA_VIEW_SCALE_MAX", js)
+        self.assertIn("renderTopCameraLocalView", js)
+        self.assertIn("latestTopCameraBitmap = bitmap", js)
+        self.assertIn("previousBitmap?.close?.()", js)
         self.assertIn(
-            "camDriveKey.up = false;\n    postTopdownCameraPoseQuiet(true);", js
+            "(topCameraViewCenterX + (canvasPoint.x - 0.5) / topCameraViewScale)",
+            js,
         )
-        self.assertEqual(js.count("postTopdownCameraPoseQuiet(true);"), 9)
+        gesture_js = js[
+            js.index("function beginTopCameraPinch"):
+            js.index("async function refreshTopCameraFrame")
+        ]
+        self.assertNotIn("cameraModel.", gesture_js)
+        self.assertNotIn("cameraPoseRevision", gesture_js)
+        self.assertNotIn("postTopdownCameraPoseQuiet", gesture_js)
+        camera_control_js = js[
+            js.index("function nudgeTopdownCamera"):
+            js.index("const CAMERA_DRIVE_SEND_INTERVAL_MS")
+        ]
+        self.assertIn("cameraModel.x +=", camera_control_js)
+        self.assertIn("cameraModel.z =", camera_control_js)
+        self.assertIn("postTopdownCameraPoseQuiet(true)", camera_control_js)
+        self.assertIn("nudgeTopdownCamera(screenRight, screenUp)", js)
+        self.assertIn("heldSec * 1.2", js)
+        self.assertIn("btnGazeboCamUpLeft", js)
+        self.assertIn('type="range" step="0.5" min="0.5" max="16"', html)
+        self.assertIn("拖拽、滚轮和双指手势只调整本地图片视图", html)
+        self.assertIn("不会移动俯瞰相机", html)
+        self.assertIn("touch-action: none", css)
         self.assertIn("/api/gazebo/top_camera.jpg?frame_seq=", js)
         self.assertIn("frameSeq !== lastRenderedTopCameraFrameSeq", js)
         self.assertNotIn("topCameraImageSkip", js)

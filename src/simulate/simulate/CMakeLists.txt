@@ -8,6 +8,9 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(gazebo REQUIRED)
+find_package(gazebo_ros REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(rclcpp REQUIRED)
 
 add_library(ray_collision_filter_plugin SHARED
   src/ray_collision_filter_plugin.cpp
@@ -16,7 +19,19 @@ target_include_directories(ray_collision_filter_plugin PRIVATE ${GAZEBO_INCLUDE_
 target_link_libraries(ray_collision_filter_plugin ${GAZEBO_LIBRARIES})
 target_compile_options(ray_collision_filter_plugin PRIVATE ${GAZEBO_CXX_FLAGS})
 
-install(TARGETS ray_collision_filter_plugin
+add_library(topdown_camera_control_plugin SHARED
+  src/topdown_camera_control_plugin.cpp
+)
+target_include_directories(topdown_camera_control_plugin PRIVATE ${GAZEBO_INCLUDE_DIRS})
+ament_target_dependencies(topdown_camera_control_plugin
+  gazebo_ros
+  geometry_msgs
+  rclcpp
+)
+target_link_libraries(topdown_camera_control_plugin ${GAZEBO_LIBRARIES})
+target_compile_options(topdown_camera_control_plugin PRIVATE ${GAZEBO_CXX_FLAGS})
+
+install(TARGETS ray_collision_filter_plugin topdown_camera_control_plugin
   LIBRARY DESTINATION lib
 )
 

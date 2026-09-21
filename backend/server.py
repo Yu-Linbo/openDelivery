@@ -38,6 +38,7 @@ import bag_replay
 import ros_node_store
 import ros_task_store
 import openclaw_chat
+import robot_settings
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -46,6 +47,11 @@ if str(_BACKEND_DIR) not in sys.path:
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
 LOG_BAG_DIR = ROOT_DIR / "log_bag"
+ROBOT_SETTINGS_PATH = Path(
+    os.environ.get("OPEN_DELIVERY_ROBOT_SETTINGS_PATH")
+    or ROOT_DIR / "backend" / "data" / "robot_settings.json"
+)
+ROBOT_SETTINGS = robot_settings.RobotSettingsStore(ROBOT_SETTINGS_PATH)
 MAX_LOG_BAG_REPLAY_SELECTION = 24
 _LOG_BAG_DELETE_LOCK = threading.Lock()
 
@@ -106,6 +112,45 @@ def _rpy_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> Tuple[fl
     cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
     yaw = math.atan2(siny_cosp, cosy_cosp)
     return roll, pitch, yaw
+
+
+def try_publish_topdown_camera_pose(
+    model_name: str,
+    x: float,
+    y: float,
+    z: float,
+    reference_frame: str,
+    orientation: Optional[Tuple[float, float, float, float]],
+):
+    """Use the bridge-to-Gazebo topic for interactive overhead-camera motion."""
+    if (
+        model_name != "topdown_camera"
+        or reference_frame != "world"
+        or orientation is None
+    ):
+        return None
+    try:
+        import ros_command_queue
+
+        ox, oy, oz, ow = orientation
+        ros_command_queue.enqueue_command_and_wait(
+            {
+                "type": "topdown_camera_pose",
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "orientation": {
+                    "x": float(ox),
+                    "y": float(oy),
+                    "z": float(oz),
+                    "w": float(ow),
+                },
+            },
+            timeout=0.5,
+        )
+    except (RuntimeError, TimeoutError, queue.Full):
+        return None
+    return {"ok": True, "output": "topdown_camera_pose_topic"}
 
 
 def call_gazebo_set_model_state(
@@ -464,13 +509,13 @@ class RosNodeManager:
             "note": spec.get("note") or "",
         }
 
-    def _run_shell(self, cmd: str):
+    def _run_shell(self, cmd: str, timeout: float = 15.0):
         if not cmd:
             raise ValueError("empty command")
         full_cmd = self._bash_prefix() + cmd
         return run_shell_process_group(
             full_cmd,
-            timeout=15.0,
+            timeout=timeout,
             env=os.environ.copy(),
         )
 
@@ -1616,8 +1661,69 @@ def _robot_detail_payload(robot_id: str) -> dict:
         },
         "nodes": nodes, "processes": _robot_process_metrics(rid),
         "task": ros_task_store.get_status(rid),
-        "logs": logs, "timestamp": time.time(),
+        "logs": logs,
+        "settings": _robot_settings_payload(rid),
+        "timestamp": time.time(),
     }
+
+
+def _robot_navigation_nodes_ready(robot_id: str) -> bool:
+    rid = robot_settings.validate_robot_id(robot_id)
+    expected = {
+        f"/{rid}/navigation/controller_server",
+        f"/{rid}/navigation/recoveries_server",
+        f"/{rid}/navigation/local_costmap/local_costmap",
+        f"/{rid}/navigation/global_costmap/global_costmap",
+    }
+    try:
+        nodes = ROS_DEBUG_NODES_TABLE.snapshot().get("nodes") or []
+    except Exception:
+        return False
+    running = {
+        str((node or {}).get("name") or "")
+        for node in nodes
+        if bool((node or {}).get("running"))
+    }
+    return expected.issubset(running)
+
+
+def _robot_settings_payload(robot_id: str) -> dict:
+    record = ROBOT_SETTINGS.get(robot_id)
+    rid = record["robot_id"]
+    record["online"] = _robot_live_online(rid)
+    record["navigation_ready"] = _robot_navigation_nodes_ready(rid)
+    record["persistence"] = {
+        "state": "saved" if record["source"] == "saved" else "defaults",
+        "scope": "robot",
+        "restart_persistent": True,
+    }
+    return record
+
+
+def _save_robot_settings(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("body must be an object")
+    rid = robot_settings.validate_robot_id(data.get("robot_id"))
+    payload = data.get("settings") if isinstance(data.get("settings"), dict) else data
+    ROBOT_SETTINGS.save(rid, payload)
+    if not _robot_live_online(rid):
+        runtime = {
+            "state": "pending_restart",
+            "message": "配置已绑定并保存到该机器人；机器人离线，将在下次由本平台启动导航栈时加载",
+            "applied": [],
+            "errors": [],
+        }
+    else:
+        runtime = robot_settings.apply_runtime(
+            rid,
+            ROBOT_SETTINGS.get(rid)["settings"],
+            lambda command: ROS_NODE_MANAGER._run_shell(command, timeout=6.0),
+        )
+    ROBOT_SETTINGS.record_apply(rid, runtime)
+    result = _robot_settings_payload(rid)
+    result["ok"] = True
+    result["runtime"] = runtime
+    return result
 
 
 def _navigation_task_command(data: dict) -> dict:
@@ -2230,6 +2336,18 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/robot/settings":
+            data = self._read_json_body()
+            if data is None:
+                return
+            try:
+                self._send_json(_save_robot_settings(data))
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+            return
+
         if path == "/api/assistant/chat":
             data = self._read_json_body()
             if data is None:
@@ -2959,16 +3077,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                     )
                     return
             try:
-                out = call_gazebo_set_model_state(
-                    ROOT_DIR,
-                    model_name,
-                    x,
-                    y,
-                    z,
-                    yaw,
-                    reference_frame,
-                    orientation=orientation,
+                out = try_publish_topdown_camera_pose(
+                    model_name, x, y, z, reference_frame, orientation
                 )
+                if out is None:
+                    out = call_gazebo_set_model_state(
+                        ROOT_DIR,
+                        model_name,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        reference_frame,
+                        orientation=orientation,
+                    )
             except subprocess.TimeoutExpired:
                 self._send_json({"error": "set_model_state timeout"}, 504)
                 return
@@ -3261,6 +3383,17 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/robot/settings":
+            q = parse_qs(urlparse(self.path).query)
+            robot_id = (q.get("robot_id") or [""])[0].strip()
+            try:
+                self._send_json(_robot_settings_payload(robot_id))
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+            except Exception as err:  # noqa: BLE001
+                self._send_json({"error": str(err)}, 500)
+            return
+
         m_assistant_job = re.match(r"^/api/assistant/jobs/([a-f0-9]{32})$", path)
         if m_assistant_job:
             job = openclaw_chat.get_action_job(m_assistant_job.group(1))

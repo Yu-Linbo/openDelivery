@@ -19,6 +19,8 @@ backend/data/robot_status_last.json
 backend/data/.robot_status_last.json.*.tmp
 backend/data/sim_spawn_slots.json
 backend/data/.sim_spawn_slots.json.*.tmp
+backend/data/robot_settings.json
+backend/data/.robot_settings.json.*.tmp
 backend/logs/
 
 # ROS bag files

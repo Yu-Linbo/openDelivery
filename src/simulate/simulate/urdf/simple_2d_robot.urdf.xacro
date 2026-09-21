@@ -14,6 +14,8 @@
   <xacro:property name="lnk_imu" value="$(arg frame_prefix)imu_link"/>
   <xacro:property name="lnk_cam" value="$(arg frame_prefix)camera_link"/>
   <xacro:property name="lnk_down_cam" value="$(arg frame_prefix)front_down_camera_link"/>
+  <xacro:property name="lnk_top_marker" value="$(arg frame_prefix)top_marker_link"/>
+  <xacro:property name="lnk_heading_marker" value="$(arg frame_prefix)heading_marker_link"/>
   <xacro:property name="lnk_odom" value="$(arg frame_prefix)odom"/>
 
   <xacro:property name="base_length" value="0.40"/>
@@ -73,6 +75,39 @@
     <parent link="${lnk_base}"/>
     <child link="$(arg frame_prefix)outer_shell_link"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- High-visibility roof plate for the 32 m overhead Gazebo camera. It has
+       no collision geometry, so navigation, lidar and body footprint stay unchanged. -->
+  <link name="${lnk_top_marker}">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.38 0.27 0.012"/></geometry>
+      <material name="high_visibility_orange">
+        <color rgba="1.0 0.28 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="top_marker_joint" type="fixed">
+    <parent link="${lnk_base}"/>
+    <child link="${lnk_top_marker}"/>
+    <origin xyz="0 0 ${shell_height + 0.008}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Contrasting front stripe makes robot heading legible from directly above. -->
+  <link name="${lnk_heading_marker}">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.09 0.23 0.008"/></geometry>
+      <material name="heading_white">
+        <color rgba="1.0 1.0 1.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="heading_marker_joint" type="fixed">
+    <parent link="${lnk_base}"/>
+    <child link="${lnk_heading_marker}"/>
+    <origin xyz="0.135 0 ${shell_height + 0.020}" rpy="0 0 0"/>
   </joint>
 
   <link name="${lnk_lw}">
@@ -215,6 +250,12 @@
   <gazebo reference="${lnk_rw}">
     <mu1>2.0</mu1>
     <mu2>2.0</mu2>
+  </gazebo>
+  <gazebo reference="${lnk_top_marker}">
+    <material>Gazebo/Orange</material>
+  </gazebo>
+  <gazebo reference="${lnk_heading_marker}">
+    <material>Gazebo/White</material>
   </gazebo>
 
   <gazebo reference="${lnk_laser}">

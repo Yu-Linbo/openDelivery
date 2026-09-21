@@ -6,6 +6,8 @@
 # Navigation2 stack: costmap subscribes via remap to /<robot>/map or /<robot>/mapping
 # (see grid_mode). No relay to /map. TF from SLAM.
 
+import json
+import math
 import os
 import tempfile
 
@@ -35,6 +37,7 @@ def _materialize_params(
     allow_unknown: str,
     local_track_unknown_space: str,
     map_subscribe_transient_local: str,
+    robot_settings_file: str = "",
 ) -> str:
     template_path = os.path.join(pkg_share, "config", "nav2_params.yaml")
     with open(template_path, "r", encoding="utf-8") as f:
@@ -50,11 +53,51 @@ def _materialize_params(
     text = text.replace("@@LOCAL_TRACK_UNKNOWN_SPACE@@", local_track_unknown_space)
     text = text.replace("@@MAP_SUBSCRIBE_TRANSIENT_LOCAL@@", map_subscribe_transient_local)
     data = yaml.safe_load(text)
+    settings = _load_robot_settings(robot_settings_file, robot_name)
+    if settings:
+        controller = data["controller_server"]["ros__parameters"]["FollowPath"]
+        controller["max_vel_x"] = settings["max_linear_speed"]
+        controller["max_speed_xy"] = settings["max_linear_speed"]
+        controller["max_vel_theta"] = settings["max_angular_speed"]
+        data["recoveries_server"]["ros__parameters"]["max_rotational_vel"] = settings[
+            "max_angular_speed"
+        ]
+        for costmap_name in ("local_costmap", "global_costmap"):
+            data[costmap_name][costmap_name]["ros__parameters"]["inflation_layer"][
+                "inflation_radius"
+            ] = settings["inflation_radius"]
     # Top-level keys must be node names; RewrittenYaml adds the namespace wrapper.
     fd, path = tempfile.mkstemp(suffix=".yaml", prefix="nav2_params_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
     return path
+
+
+def _load_robot_settings(path: str, robot_name: str):
+    """Read validated Web settings without making launch depend on the backend package."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            raw = json.load(stream)
+        entry = (raw.get("robots") or {}).get(robot_name) or {}
+        settings = entry.get("settings") or {}
+        values = {
+            "max_linear_speed": float(settings["max_linear_speed"]),
+            "max_angular_speed": float(settings["max_angular_speed"]),
+            "inflation_radius": float(settings["inflation_radius"]),
+        }
+        limits = {
+            "max_linear_speed": (0.05, 2.0),
+            "max_angular_speed": (0.1, 3.0),
+            "inflation_radius": (0.22, 3.0),
+        }
+        if not all(math.isfinite(value) and limits[name][0] <= value <= limits[name][1]
+                   for name, value in values.items()):
+            return None
+        return values
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _launch_setup(context, *_args, **_kwargs):
@@ -63,6 +106,7 @@ def _launch_setup(context, *_args, **_kwargs):
     use_sim = _as_bool(LaunchConfiguration("use_sim_time").perform(context))
     use_sim_str = "true" if use_sim else "false"
     autostart = LaunchConfiguration("autostart").perform(context).strip() or "true"
+    robot_settings_file = LaunchConfiguration("robot_settings_file").perform(context).strip()
 
     occ_topic = (
         f"/{robot_name}/mapping" if grid_mode == "mapping" else f"/{robot_name}/map"
@@ -103,6 +147,7 @@ def _launch_setup(context, *_args, **_kwargs):
         allow_unknown=allow_unknown,
         local_track_unknown_space=local_track_unknown_space,
         map_subscribe_transient_local=map_subscribe_transient_local,
+        robot_settings_file=robot_settings_file,
     )
     bt_xml = os.path.join(
         get_package_share_directory("nav2_bt_navigator"),
@@ -175,6 +220,11 @@ def generate_launch_description():
                 "autostart",
                 default_value="true",
                 description="Nav2 lifecycle manager autostart flag",
+            ),
+            DeclareLaunchArgument(
+                "robot_settings_file",
+                default_value="",
+                description="Per-robot settings JSON written by the OpenDelivery Web backend",
             ),
             OpaqueFunction(function=_launch_setup),
         ]

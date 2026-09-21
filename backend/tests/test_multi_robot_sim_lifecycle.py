@@ -656,6 +656,13 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
 
         self.assertIn('outer_shell_link', model)
         self.assertIn('name="shell_height" value="0.22"', model)
+        self.assertIn('value="$(arg frame_prefix)top_marker_link"', model)
+        self.assertIn('value="$(arg frame_prefix)heading_marker_link"', model)
+        self.assertIn('name="top_marker_joint"', model)
+        self.assertIn('name="heading_marker_joint"', model)
+        self.assertIn('<material>Gazebo/Orange</material>', model)
+        self.assertIn('<material>Gazebo/White</material>', model)
+        self.assertIn('<box size="0.38 0.27 0.012"/>', model)
         self.assertIn('<min>0.10</min>', model)
         self.assertIn('<xacro:arg name="collision_filter_plugin"', model)
         self.assertIn('filename="$(arg collision_filter_plugin)"', model)

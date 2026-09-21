@@ -1,16 +1,21 @@
+import os
 import sys
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
+os.environ.setdefault("ROBOT_POSE_MODE", "none")
 
 import gazebo_set_state_client as gazebo_client  # noqa: E402
+import ros_command_queue  # noqa: E402
 import ros_sensor_store as sensor_store  # noqa: E402
+import server  # noqa: E402
 
 
 class TopdownCameraStoreTest(unittest.TestCase):
@@ -125,6 +130,61 @@ class GazeboLatestWinsQueueTest(unittest.TestCase):
         self.assertTrue(first_event.is_set())
         self.assertTrue(second_event.is_set())
         self.assertFalse(worker._pending)
+
+
+class TopdownCameraFastControlTest(unittest.TestCase):
+    def test_world_plugin_is_built_installed_and_wired_to_the_bridge_topic(self):
+        simulate_root = ROOT / "src" / "simulate" / "simulate"
+        plugin = (simulate_root / "src" / "topdown_camera_control_plugin.cpp").read_text(
+            encoding="utf-8"
+        )
+        cmake = (simulate_root / "CMakeLists.txt").read_text(encoding="utf-8")
+        world = (simulate_root / "worlds" / "drawn_model.world").read_text(
+            encoding="utf-8"
+        )
+        bridge = (ROOT / "backend" / "ros_tf_bridge.py").read_text(encoding="utf-8")
+
+        self.assertIn("add_library(topdown_camera_control_plugin SHARED", cmake)
+        self.assertIn("install(TARGETS ray_collision_filter_plugin topdown_camera_control_plugin", cmake)
+        self.assertIn('filename="libtopdown_camera_control_plugin.so"', world)
+        self.assertIn("/open_delivery/topdown_camera/pose", world)
+        self.assertIn("/open_delivery/topdown_camera/pose", bridge)
+        self.assertIn("world_->ModelByName(model_name_)", plugin)
+        self.assertIn("model->SetWorldPose(world_pose", plugin)
+
+    def test_topdown_pose_uses_bridge_command_topic(self):
+        orientation = (-0.5, 0.5, 0.5, 0.5)
+        with mock.patch.object(
+            ros_command_queue,
+            "enqueue_command_and_wait",
+            return_value={"ok": True},
+        ) as enqueue:
+            result = server.try_publish_topdown_camera_pose(
+                "topdown_camera", 1.5, -2.0, 24.0, "world", orientation
+            )
+
+        self.assertEqual(result["output"], "topdown_camera_pose_topic")
+        command = enqueue.call_args.args[0]
+        self.assertEqual(command["type"], "topdown_camera_pose")
+        self.assertEqual(command["x"], 1.5)
+        self.assertEqual(command["orientation"]["w"], 0.5)
+        self.assertEqual(enqueue.call_args.kwargs["timeout"], 0.5)
+
+    def test_fast_control_falls_back_when_plugin_is_not_ready(self):
+        with mock.patch.object(
+            ros_command_queue,
+            "enqueue_command_and_wait",
+            side_effect=RuntimeError("plugin not ready"),
+        ):
+            result = server.try_publish_topdown_camera_pose(
+                "topdown_camera",
+                0.0,
+                0.0,
+                32.0,
+                "world",
+                (-0.5, 0.5, 0.5, 0.5),
+            )
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

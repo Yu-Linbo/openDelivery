@@ -78,6 +78,31 @@ class RobotDetailPayloadTest(unittest.TestCase):
                 "robot_id": "robot2", "task_id": "web_nav_1", "command": "retry"
             })
 
+    def test_offline_robot_settings_are_saved_for_restart(self):
+        store = mock.Mock()
+        saved = {
+            "robot_id": "robot2",
+            "settings": dict(server.robot_settings.DEFAULT_SETTINGS),
+            "source": "saved",
+            "updated_at": "now",
+            "last_apply": None,
+        }
+        store.get.return_value = saved
+        with mock.patch.object(server, "ROBOT_SETTINGS", store), \
+                mock.patch.object(server, "_robot_live_online", return_value=False), \
+                mock.patch.object(server, "_robot_navigation_nodes_ready", return_value=False):
+            result = server._save_robot_settings({
+                "robot_id": "robot2",
+                "settings": {
+                    "max_linear_speed": 0.2,
+                    "max_angular_speed": 0.6,
+                    "inflation_radius": 0.55,
+                },
+            })
+        self.assertEqual(result["runtime"]["state"], "pending_restart")
+        store.save.assert_called_once()
+        store.record_apply.assert_called_once()
+
 
 class MultiRobotNavigationTest(unittest.TestCase):
     def test_each_robot_uses_its_own_lifecycle_and_action_namespace(self):
