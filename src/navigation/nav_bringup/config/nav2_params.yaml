@@ -132,7 +132,8 @@ local_costmap:
       height: 4
       resolution: 0.05
       transform_tolerance: 0.6
-      robot_radius: 0.22
+      # Covers the shell corners and both front camera housings.
+      robot_radius: 0.28
       track_unknown_space: @@LOCAL_TRACK_UNKNOWN_SPACE@@
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
@@ -173,7 +174,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: "@@ROBOT@@/base_footprint"
       use_sim_time: True
-      robot_radius: 0.22
+      # Covers the shell corners and both front camera housings.
+      robot_radius: 0.28
       resolution: 0.05
       transform_tolerance: 0.6
       rolling_window: @@GLOBAL_ROLLING_WINDOW@@

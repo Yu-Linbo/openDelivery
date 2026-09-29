@@ -1,0 +1,11 @@
+{
+"passed":true,
+"peer_range":1.56,
+"own_body_center_range":null,
+"own_body_clear":true,
+"motion_min_range":2.63847,
+"max_tilt_degrees":0.00248307,
+"distance":0.415178,
+"contact_stop_x":1.53,
+"camera_frames":3
+}

@@ -655,7 +655,7 @@ class MultiRobotSimulationLifecycleTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('outer_shell_link', model)
-        self.assertIn('name="shell_height" value="0.22"', model)
+        self.assertIn('name="shell_height" value="0.115"', model)
         self.assertIn('value="$(arg frame_prefix)top_marker_link"', model)
         self.assertIn('value="$(arg frame_prefix)heading_marker_link"', model)
         self.assertIn('name="top_marker_joint"', model)

@@ -354,7 +354,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "collision_bit",
                 default_value="4",
-                description="Unique power-of-two collision category used to hide only this robot shell from its own lidar.",
+                description="Unique power-of-two collision category (4..134217728) used to hide this robot body from its own lidar.",
             ),
             DeclareLaunchArgument(
                 "map_root",

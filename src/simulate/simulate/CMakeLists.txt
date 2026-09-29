@@ -4,6 +4,7 @@ project(simulate)
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_fake_elevator test/test_fake_elevator.py)
+  ament_add_pytest_test(test_robot_geometry test/test_robot_geometry.py)
 endif()
 
 find_package(ament_cmake REQUIRED)

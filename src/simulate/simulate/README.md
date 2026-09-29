@@ -50,3 +50,40 @@ odom 或上一楼层位姿。随后仅调用与 Web 手动 Gazebo 页面相同�
 切图时先更新 heartbeat，并等待本节点从 `robot_status` 实际观察到目标楼层；再等待
 订阅传播窗口后调用 map_server load_map，避免新 OccupancyGrid 早于楼层状态到达
 relocalization 后被重置。
+
+## 机器人几何与传感器约束
+
+`urdf/simple_2d_robot.urdf.xacro` 是机器人模型源文件。底盘离地 35 mm，
+前后低摩擦支撑球防止绕驱动轮轴俯仰；轮距仍为 260 mm，轮径仍为 120 mm。
+外壳下沿为 125 mm、上沿为 240 mm，避开轮顶并覆盖 170 mm 高的激光扫描面，
+使其他机器人仍可看到外壳。前视与下视相机左右分布，外壳位于各自镜头后方。
+
+自体激光过滤使用 Gazebo Classic / ODE：对全部自身碰撞体和每条实际射线设置
+碰撞掩码，同时处理射线空间与 ODE 双向 OR 判定。仅设置 multiray 父碰撞体无效。
+各机器人必须使用不同的 `collision_bit`（有效值为 4 到 134217728 之间的单一位；
+1、2 为引擎保留位）。过滤保留墙体、其他机器人和实体接触碰撞，不能用扩大
+`range/min` 替代。模型的激光扫描范围仍为前方 180°，不提供后方障碍覆盖。
+
+导航局部与全局 costmap 使用 0.28 m 半径，覆盖外壳角点和传感器，旧的 0.22 m
+半径不足以覆盖模型。修改尺寸时同步检查此半径与通道可通行性。
+
+验证：在工作区 source ROS 环境后运行
+`python3 -m pytest src/simulate/simulate/test/test_robot_geometry.py`，会展开 Xacro、
+转换为 SDF，检查双相机全部像素视线与机身外观包围盒、离地间隙、轮顶间隙和
+扫描面高度。修改插件后需 `colcon build --packages-select simulate nav_bringup`。
+Gazebo 已加载的实体不会热更新；重新启动仿真世界并重新生成机器人后生效，
+导航参数在导航节点重启后生效。
+
+原生动态回归（不依赖 ROS/DDS 发现，也不会向现有 ROS 图发布消息）：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source install/setup.bash
+DISPLAY=:99 python3 src/simulate/simulate/test/verify_robot_runtime.py
+```
+
+需要已有可用的 X 显示服务（`:99` 是本项目默认 Xvfb 显示号），以及 Gazebo 开发库、
+`pkg-config` 和 C++ 编译器。脚本创建独立 Gazebo master 和临时世界，运行 27 秒仿真，
+验证朝后穿过自身的激光、其他机器人可见性、前进／倒退／转向、实体接触和相机输出。
+结束后自动关闭测试进程，报告与三张 PNG 保存在输出的临时目录。该测试直接驱动轮子，
+不替代完整导航任务或 ROS 相机话题链路测试。
