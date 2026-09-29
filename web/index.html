@@ -653,13 +653,17 @@
           </dl>
           <h3>bag 信息</h3>
           <p id="bag-replay-summary" class="bag-replay-summary">—</p>
+          <div id="bag-replay-skipped" class="bag-replay-skipped" role="status" aria-live="polite" hidden></div>
           <div id="bag-replay-topics" class="bag-replay-topics"></div>
         </aside>
       </div>
       <footer class="bag-replay-controls">
         <button id="btn-bag-replay-toggle" type="button" class="bag-replay-toggle">▶ 播放</button>
         <span id="bag-replay-current-time" class="bag-replay-time">00:00.000</span>
-        <input id="bag-replay-progress" type="range" min="0" max="0" step="0.01" value="0" aria-label="回放进度" />
+        <div class="bag-replay-progress-wrap">
+          <div id="bag-replay-image-markers" class="bag-replay-image-markers" role="group" aria-label="图像记录位置，使用左右方向键选择，按回车查看"></div>
+          <input id="bag-replay-progress" type="range" min="0" max="0" step="0.001" value="0" aria-label="回放进度" />
+        </div>
         <span id="bag-replay-duration" class="bag-replay-time">00:00.000</span>
         <label class="bag-replay-speed">倍速
           <select id="bag-replay-speed">

@@ -5,10 +5,13 @@
 #include <rosbag2_cpp/writer.hpp>
 #include <rosbag2_cpp/writers/sequential_writer.hpp>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace log_bag {
 
@@ -25,6 +28,8 @@ class PersistentRecorder {
     std::shared_ptr<rcpputils::SharedLibrary> library;
     rclcpp::Subscription<Serialized>::SharedPtr subscription;
     std::map<std::string, std::shared_ptr<Serialized>> retained;
+    std::shared_ptr<Serialized> latest_image;
+    std::chrono::steady_clock::time_point latest_image_received{};
   };
 
 public:
@@ -33,6 +38,25 @@ public:
 
   bool active() const {return bool(writer_);}
   void close() {writer_.reset();}
+
+  // Callbacks share one SingleThreadedExecutor, so each cached frame stays
+  // stable while a task boundary writes it. Missing frames are simply skipped.
+  std::size_t snapshot_images() {
+    if (!writer_) {return 0;}
+    const auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto now = std::chrono::steady_clock::now();
+    std::size_t written = 0;
+    for (const auto & entry : topics_) {
+      if (entry.second.latest_image &&
+        now - entry.second.latest_image_received <= std::chrono::seconds(2))
+      {
+        write(entry.first, entry.second.latest_image, timestamp);
+        ++written;
+      }
+    }
+    return written;
+  }
 
   void open(const std::string & path) {
     auto writer = std::make_unique<rosbag2_cpp::Writer>(
@@ -47,7 +71,23 @@ public:
     writer_ = std::move(writer);
     // Every standalone bag needs latched TF/task context, even when the
     // publisher sent it only once before this rotation.
-    for (const auto & entry : topics_) {
+    for (auto & entry : topics_) {
+      if (entry.second.metadata.type == "custom_msgs_srvs/msg/TaskStatus") {
+        // A restarted task manager has a new publisher GID. Its old retained
+        // status must not be copied into later bags beside the new one.
+        std::set<std::string> live_publishers;
+        for (const auto & publisher : node_->get_publishers_info_by_topic(entry.first)) {
+          const auto & gid = publisher.endpoint_gid();
+          live_publishers.emplace(reinterpret_cast<const char *>(gid.data()), gid.size());
+        }
+        for (auto it = entry.second.retained.begin(); it != entry.second.retained.end();) {
+          if (live_publishers.count(it->first) == 0) {
+            it = entry.second.retained.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
       for (const auto & sample : entry.second.retained) {
         write(entry.first, sample.second);
       }
@@ -65,6 +105,7 @@ public:
       // Match reliable publishers; accept best-effort sensor streams. Request
       // transient-local only when every current publisher offers it.
       auto qos = rclcpp::QoS(100);
+      const bool image_topic = is_snapshot_image_topic(name);
       bool reliable = true;
       bool retained = true;
       std::ostringstream offered;
@@ -98,11 +139,23 @@ public:
         topic.metadata.type, "rosidl_typesupport_cpp", topic.library);
       rclcpp::AnySubscriptionCallback<Serialized, std::allocator<void>> callback(
         std::make_shared<std::allocator<void>>());
-      callback.set([this, name, retained](
+      callback.set([this, name, retained, image_topic](
         std::shared_ptr<Serialized> message, const rclcpp::MessageInfo & info) {
+          if (image_topic) {
+            auto & topic = topics_.at(name);
+            topic.latest_image = std::move(message);
+            topic.latest_image_received = std::chrono::steady_clock::now();
+            return;
+          }
           if (retained) {
+            auto & topic = topics_.at(name);
+            // Root TaskStatus is a single current state. A restarted manager
+            // has a different GID; its new state supersedes every old one.
+            if (topic.metadata.type == "custom_msgs_srvs/msg/TaskStatus") {
+              topic.retained.clear();
+            }
             const auto & gid = info.get_rmw_message_info().publisher_gid;
-            topics_.at(name).retained[std::string(
+            topic.retained[std::string(
               reinterpret_cast<const char *>(gid.data), sizeof(gid.data))] = message;
           }
           write(name, message);
@@ -118,14 +171,29 @@ public:
   }
 
 private:
-  void write(const std::string & topic, const std::shared_ptr<Serialized> & message) {
+  static bool is_snapshot_image_topic(const std::string & name) {
+    for (const char * suffix : {
+        "/front_camera/image_raw", "/front_down_camera/image_raw"})
+    {
+      const std::string ending(suffix);
+      if (name.size() >= ending.size() &&
+        name.compare(name.size() - ending.size(), ending.size(), ending) == 0)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void write(const std::string & topic, const std::shared_ptr<Serialized> & message,
+    std::int64_t timestamp = 0) {
     if (!writer_) {return;}
     auto bag = std::make_shared<rosbag2_storage::SerializedBagMessage>();
     // Alias the buffer while keeping the owning SerializedMessage alive.
     bag->serialized_data = std::shared_ptr<rcutils_uint8_array_t>(
       message, &message->get_rcl_serialized_message());
     bag->topic_name = topic;
-    bag->time_stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    bag->time_stamp = timestamp ? timestamp : std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
     writer_->write(bag);
   }

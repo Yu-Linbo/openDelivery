@@ -2253,6 +2253,48 @@ def _zip_log_bag_files(raw_files: list) -> Tuple[bytes, str]:
     return buf.getvalue(), f"openDelivery_logs_{int(time.time())}.zip"
 
 
+def _extract_log_bag_selection(bag_values: List[str]) -> dict:
+    """Keep a multi-bag replay usable when retention removes one selected bag."""
+    replays = []
+    skipped = []
+    for value in bag_values:
+        bag_path = _safe_log_bag_path(value)
+        relative = bag_path.relative_to(LOG_BAG_DIR.resolve())
+        robot_name = relative.parts[0] if relative.parts else ""
+        display = _log_bag_display_path(bag_path)
+        try:
+            if not bag_path.exists():
+                raise FileNotFoundError(f"bag 已被清理或不存在: {display}")
+            replay = bag_replay.extract_replay(bag_path, robot_name=robot_name)
+        except (FileNotFoundError, bag_replay.BagReplayError, OSError) as exc:
+            if len(bag_values) == 1:
+                if isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+                    raise bag_replay.BagReplayError(f"读取 bag 失败: {exc}") from exc
+                raise
+            skipped.append({"bag": display, "error": str(exc)})
+            continue
+        replay["bag"] = display
+        replays.append(replay)
+
+    if not replays:
+        summary = "; ".join(
+            f"{Path(row['bag']).name}: {row['error']}" for row in skipped[:3]
+        )
+        if skipped and all("bag 已被清理或不存在" in row["error"] for row in skipped):
+            raise FileNotFoundError(f"所选 bag 均已被清理或不存在: {summary}")
+        raise bag_replay.BagReplayError(f"所选 bag 均不可回放: {summary}")
+
+    out = bag_replay.merge_replays(replays)
+    out["skipped_bags"] = skipped
+    if skipped:
+        out["warnings"] = (
+            out["warnings"] + [
+                f"跳过 {Path(row['bag']).name}: {row['error']}" for row in skipped
+            ]
+        )[:48]
+    return out
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     def _send_json(self, payload, status=200, *, content_length=True):
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -2508,17 +2550,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         f"at most {MAX_LOG_BAG_REPLAY_SELECTION} bags can be replayed together"
                     )
 
-                replays = []
-                for value in bag_values:
-                    bag_path = _safe_log_bag_path(value)
-                    if not bag_path.exists():
-                        raise FileNotFoundError(f"bag does not exist: {value}")
-                    relative = bag_path.resolve().relative_to(LOG_BAG_DIR.resolve())
-                    robot_name = relative.parts[0] if relative.parts else ""
-                    replay = bag_replay.extract_replay(bag_path, robot_name=robot_name)
-                    replay["bag"] = _log_bag_display_path(bag_path)
-                    replays.append(replay)
-                out = bag_replay.merge_replays(replays)
+                out = _extract_log_bag_selection(bag_values)
                 out["available_maps"] = list_floors()
             except FileNotFoundError as err:
                 self._send_json({"error": str(err)}, 404)

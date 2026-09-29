@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -286,6 +288,212 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn('window.OpenDeliveryI18n', i18n)
         self.assertIn('.language-picker', css)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the playback UI test")
+    def test_bag_replay_image_markers_group_and_seek(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        group_start = source.index("function groupBagReplayImageMarkers(")
+        group_end = source.index("\nfunction renderBagReplayImageMarkers()", group_start)
+        seek_start = source.index("function seekBagReplayImageMarker(")
+        seek_end = source.index("\nfunction bagReplaySegmentAt(", seek_start)
+        camera_start = source.index("function bagReplayCameraAt(")
+        camera_end = source.index("\nfunction updateBagReplayCamera(", camera_start)
+        script = "\n".join((
+            source[group_start:group_end],
+            "const assert = require('node:assert/strict');",
+            "const rows = [",
+            "  {t: 10, camera: 'front', segment_index: 0},",
+            "  {t: 10, camera: 'front_down', segment_index: 0},",
+            "  {t: 10.25, camera: 'front_down', segment_index: 0},",
+            "  {t: 11, camera: 'front', segment_index: 0},",
+            "  {t: 11.1, camera: 'front', segment_index: 0},",
+            "  {t: 11.2, camera: 'front_down', segment_index: 1},",
+            "];",
+            "const groups = groupBagReplayImageMarkers(rows, 20);",
+            "assert.equal(groups.length, 5);",
+            "assert.deepEqual(groups[0].cameras, ['front', 'front_down']);",
+            "assert.equal(groups[0].t, 10);",
+            "assert.equal(groups[1].t, 10.25);",
+            "assert.equal(groups[4].segmentIndex, 1);",
+            "assert.deepEqual(bagReplayImageMarkerLanes([{t: 1}, {t: 1.000001}], 2, 200), [0, 1]);",
+            "assert.equal(groupBagReplayImageMarkers([",
+            "  {t: 1, camera: 'front', segment_index: 0},",
+            "  {t: 1.000001, camera: 'front_down', segment_index: 0}], 2).length, 2);",
+            "const bagReplayState = {imageMarkerGroups: groups, data: {duration: 20}, currentTime: 0};",
+            "function bagReplayTimeline(name) { return name === 'images' ? rows : []; }",
+            "function bagReplaySegmentAt() { return {index: 0}; }",
+            "function bagReplaySegmentsCompatible() { return true; }",
+            source[camera_start:camera_end],
+            "assert.equal(bagReplayCameraAt('front', 10.24).t, 10);",
+            "assert.equal(bagReplayCameraAt('front_down', 10.24).t, 10);",
+            "assert.equal(bagReplayCameraAt('front_down', 10.5).t, 10.25);",
+            "const calls = [];",
+            "function setBagReplayPlaying(value) { calls.push(['playing', value]); }",
+            "function renderBagReplayFrame() { calls.push(['render', bagReplayState.currentTime]); }",
+            source[seek_start:seek_end],
+            "seekBagReplayImageMarker(0);",
+            "assert.equal(bagReplayState.currentTime, 10);",
+            "assert.deepEqual(calls, [['playing', false], ['render', 10]]);",
+        ))
+        result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the playback UI test")
+    def test_bag_replay_progress_seek_preserves_playback_state(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        seek_start = source.index("function seekBagReplayProgress(")
+        seek_end = source.index("\nfunction formatBagReplaySkippedBag(", seek_start)
+        self.assertIn('bagReplayProgress.addEventListener("pointerdown", beginBagReplayProgressScrub)', source)
+        self.assertIn('window.addEventListener("pointerup", endBagReplayProgressScrub)', source)
+        script = "\n".join((
+            "const assert = require('node:assert/strict');",
+            "let now = 1000;",
+            "const performance = {now: () => now};",
+            "const frames = new Map();",
+            "let nextFrame = 1;",
+            "function requestAnimationFrame(callback) {",
+            "  const id = nextFrame++; frames.set(id, callback); return id;",
+            "}",
+            "function cancelAnimationFrame(id) { frames.delete(id); }",
+            "const bagReplayState = {data: {duration: 10}, currentTime: 2, speed: 1,",
+            "  playing: false, scrubbing: false, animationFrame: 0, lastAnimationTime: 0};",
+            "const btnBagReplayToggle = {textContent: ''};",
+            "const renders = [];",
+            "function renderBagReplayFrame() { renders.push(bagReplayState.currentTime); }",
+            "function runFrame(at) {",
+            "  const id = bagReplayState.animationFrame;",
+            "  assert.ok(frames.has(id));",
+            "  const callback = frames.get(id); frames.delete(id); callback(at);",
+            "}",
+            source[seek_start:seek_end],
+            "setBagReplayPlaying(true);",
+            "assert.equal(bagReplayState.playing, true);",
+            "assert.equal(btnBagReplayToggle.textContent, '❚❚ 暂停');",
+            "assert.ok(bagReplayState.animationFrame);",
+            "beginBagReplayProgressScrub();",
+            "assert.equal(bagReplayState.animationFrame, 0);",
+            "assert.equal(frames.size, 0);",
+            "seekBagReplayProgress(7);",
+            "assert.equal(bagReplayState.currentTime, 7);",
+            "assert.equal(bagReplayState.playing, true);",
+            "assert.equal(bagReplayState.animationFrame, 0);",
+            "assert.deepEqual(renders, [7]);",
+            "endBagReplayProgressScrub();",
+            "assert.ok(bagReplayState.animationFrame);",
+            "runFrame(1200);",
+            "assert.ok(Math.abs(bagReplayState.currentTime - 7.2) < 1e-9);",
+            "seekBagReplayProgress(10);",
+            "runFrame(1300);",
+            "assert.equal(bagReplayState.currentTime, 10);",
+            "assert.equal(bagReplayState.playing, true);",
+            "assert.equal(bagReplayState.animationFrame, 0);",
+            "assert.equal(btnBagReplayToggle.textContent, '❚❚ 暂停');",
+            "seekBagReplayProgress(4);",
+            "assert.ok(bagReplayState.animationFrame);",
+            "runFrame(1400);",
+            "assert.equal(bagReplayState.currentTime, 4.25);",
+            "setBagReplayPlaying(false);",
+            "beginBagReplayProgressScrub();",
+            "seekBagReplayProgress(8);",
+            "endBagReplayProgressScrub();",
+            "assert.equal(bagReplayState.currentTime, 8);",
+            "assert.equal(bagReplayState.playing, false);",
+            "assert.equal(bagReplayState.animationFrame, 0);",
+            "assert.equal(btnBagReplayToggle.textContent, '▶ 播放');",
+            "setBagReplayPlaying(true);",
+            "seekBagReplayProgress(9.95);",
+            "runFrame(1300);",
+            "assert.equal(bagReplayState.currentTime, 10);",
+            "assert.equal(bagReplayState.playing, false);",
+        ))
+        result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the playback UI test")
+    def test_bag_replay_camera_keeps_previous_frame_across_map_change(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        compatible_start = source.index("function bagReplaySegmentsCompatible(")
+        compatible_end = source.index("\nfunction latestBagReplaySample(", compatible_start)
+        camera_start = source.index("function bagReplayCameraAt(")
+        camera_end = source.index("\nfunction updateBagReplayCamera(", camera_start)
+        script = "\n".join((
+            "const assert = require('node:assert/strict');",
+            "const segments = [",
+            "  {index: 0, start: 0, end: 1, robot_name: 'r1', map_name: 'A'},",
+            "  {index: 1, start: 1.000001, end: 2, robot_name: 'r1', map_name: 'B'},",
+            "  {index: 2, start: 2.000001, end: 3, robot_name: 'r2', map_name: 'C'},",
+            "];",
+            "const images = [{t: 1, camera: 'front', segment_index: 0}];",
+            "const bagReplayState = {data: {segments, timeline: {images}}};",
+            "function bagReplayTimeline(name) { return bagReplayState.data.timeline[name] || []; }",
+            "function bagReplaySegmentAt(time) {",
+            "  return [...segments].reverse().find(segment => segment.start <= time) || segments[0];",
+            "}",
+            "function bagReplayRecordedMapAt(time) { return time < 1.000001 ? 'A' : 'B'; }",
+            source[compatible_start:compatible_end],
+            source[camera_start:camera_end],
+            "assert.equal(bagReplayCameraAt('front', 1).t, 1);",
+            "assert.equal(bagReplayCameraAt('front', 1.5).t, 1);",
+            "assert.equal(bagReplayCameraAt('front', 2.5), null);",
+        ))
+        result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the playback UI test")
+    def test_bag_replay_lists_skipped_bags_and_reasons(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="bag-replay-skipped"', html)
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function formatBagReplaySkippedBag(")
+        end = source.index("\nfunction renderBagReplayMetadata()", start)
+        script = "\n".join((
+            "const assert = require('node:assert/strict');",
+            "const bagReplaySkipped = {hidden: true, children: [],",
+            "  replaceChildren() { this.children = []; },",
+            "  append(...children) { this.children.push(...children); }};",
+            "const document = {createElement(tag) { return {tag, textContent: '', children: [],",
+            "  appendChild(child) { this.children.push(child); }}; }};",
+            "function basenameOfLogPath(path) { return String(path).split('/').pop(); }",
+            source[start:end],
+            "renderBagReplaySkippedBags([{bag: 'log_bag/r/first_terminal_bag', error: '已清理'},",
+            "  {bag: 'log_bag/r/second_terminal_bag', error: '数据库损坏'}]);",
+            "assert.equal(bagReplaySkipped.hidden, false);",
+            "assert.equal(bagReplaySkipped.children[0].textContent, '跳过 2 个 bag');",
+            "assert.deepEqual(bagReplaySkipped.children[1].children.map(row => row.textContent),",
+            "  ['first_terminal_bag：已清理', 'second_terminal_bag：数据库损坏']);",
+            "renderBagReplaySkippedBags([]);",
+            "assert.equal(bagReplaySkipped.hidden, true);",
+            "assert.equal(bagReplaySkipped.children.length, 0);",
+        ))
+        result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the playback UI test")
+    def test_bag_replay_subtitle_uses_only_successfully_replayed_bags(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function formatBagReplaySelectionLabel(")
+        end = source.index("\nasync function openSelectedLogBagReplay()", start)
+        script = "\n".join((
+            "const assert = require('node:assert/strict');",
+            "function basenameOfLogPath(path) { return String(path).split('/').pop(); }",
+            source[start:end],
+            "const entries = [",
+            "  {bag: 'r/first_terminal_bag', tags: ['task-first']},",
+            "  {bag: 'r/second_terminal_bag', tags: ['task-skipped']},",
+            "  {bag: 'r/third_terminal_bag', tags: ['task-third']},",
+            "];",
+            "assert.equal(formatBagReplaySelectionLabel(entries.map(entry => entry.bag)),",
+            "  '3 个 bag · 按录制时间连续播放');",
+            "assert.equal(formatBagReplaySuccessfulSubtitle(entries,",
+            "  ['r/first_terminal_bag', 'r/third_terminal_bag']),",
+            "  '2 个 bag · 按录制时间连续播放 · tag: task-first, task-third');",
+            "assert.equal(formatBagReplaySuccessfulSubtitle(entries, ['r/third_terminal_bag']),",
+            "  'third_terminal_bag · tag: task-third');",
+            "assert.equal(formatBagReplaySuccessfulSubtitle(entries, ['r/unknown_terminal_bag']),",
+            "  'unknown_terminal_bag');",
+        ))
+        result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_log_bag_player_is_offline_and_complete(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -313,6 +521,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
             "bag-replay-dialog",
             "bag-replay-canvas",
             "bag-replay-progress",
+            "bag-replay-image-markers",
             "bag-replay-speed",
             "bag-replay-semantic-toggle",
             "bag-replay-points-toggle",

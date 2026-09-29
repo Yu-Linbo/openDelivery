@@ -1016,6 +1016,17 @@ private:
     return true;
   }
 
+  void finish_active_task(const std::string & reason) {
+    if (active_task_ids_.empty()) {
+      return;
+    }
+    const std::string task_id = active_task_ids_.front();
+    active_task_ids_.clear();
+    completed_task_ids_.insert(task_id);
+    const auto frames = recorder_->snapshot_images();
+    write_line("task ended id=" + task_id + " reason=" + reason +
+      " camera_frames=" + std::to_string(frames));
+  }
 
   void on_robot_status(const custom_msgs_srvs::msg::RobotStatus & msg) {
     latest_robot_status_ = record_robot_status(msg);
@@ -1027,6 +1038,7 @@ private:
     }
     if (msg.robot_status == "shutdown" || msg.robot_status == "initializing") {
       recording_enabled_ = false;
+      finish_active_task("robot_" + msg.robot_status);
       stop_current_bag("robot_" + msg.robot_status);
     }
     if (!current_bag_path_.empty()) {
@@ -1039,23 +1051,69 @@ private:
   void on_task_status(const custom_msgs_srvs::msg::TaskStatus & msg) {
     const std::string task_id = trim(msg.task_id);
     if (task_id.empty()) {
+      // A new task manager publishes Waiting with an empty ID when it has no
+      // current task. Do not carry the previous manager's task into new bags.
+      finish_active_task("manager_idle");
       return;
     }
 
     if (terminal_task_status(msg.task_status)) {
+      // TaskStatus may repeat a terminal value. A previously superseded task
+      // must not reappear in a later bag when its delayed terminal arrives.
+      if (!completed_task_ids_.insert(task_id).second) {
+        return;
+      }
+      const bool was_active = !active_task_ids_.empty() &&
+        active_task_ids_.front() == task_id;
+      const bool seen_in_bag = std::find(current_tags_.begin(), current_tags_.end(),
+        task_id) != current_tags_.end();
+      if (!was_active && !seen_in_bag) {
+        if (msg.task_status == custom_msgs_srvs::msg::TaskStatus::STATUS_FAILED) {
+          // The manager replaces its active task before validating a new
+          // TaskInfo. A rejected task publishes Failed without Waiting.
+          finish_active_task("replaced_by_failed_task:" + task_id);
+        }
+        // An unrelated or retained terminal message does not prove this task
+        // belongs to the currently open bag.
+        return;
+      }
+      if (!was_active && !active_task_ids_.empty()) {
+        return;
+      }
+      if (was_active) {
+        active_task_ids_.clear();
+      }
       append_unique(current_tags_, task_id);
-      active_task_ids_.erase(
-        std::remove(active_task_ids_.begin(), active_task_ids_.end(), task_id),
-        active_task_ids_.end());
-      write_line("task terminal tag id=" + task_id + " status=" + msg.task_status);
+      const auto frames = recorder_->snapshot_images();
+      write_line("task terminal tag id=" + task_id + " status=" + msg.task_status +
+        " camera_frames=" + std::to_string(frames));
       return;
     }
 
-    const bool inserted = append_unique(active_task_ids_, task_id);
-    append_unique(current_tags_, task_id);
-    if (inserted) {
-      write_line("task active tag id=" + task_id + " status=" + msg.task_status);
+    if (!active_task_ids_.empty() && active_task_ids_.front() == task_id) {
+      return;
     }
+    if (msg.task_status != custom_msgs_srvs::msg::TaskStatus::STATUS_WAITING &&
+      completed_task_ids_.count(task_id))
+    {
+      // A new generation of an existing ID starts with Waiting. Ignore
+      // delayed progress from the completed generation until that happens.
+      return;
+    }
+    completed_task_ids_.erase(task_id);
+    if (!active_task_ids_.empty()) {
+      // The task manager accepts a new task ID without publishing a terminal
+      // status for the old one. Keep its tag in this bag, but do not carry it
+      // into future bags or revive it on a delayed status message.
+      completed_task_ids_.insert(active_task_ids_.front());
+      write_line("task replaced old_id=" + active_task_ids_.front() + " new_id=" + task_id);
+      active_task_ids_.clear();
+    }
+    active_task_ids_.push_back(task_id);
+    append_unique(current_tags_, task_id);
+    const auto frames = recorder_->snapshot_images();
+    write_line("task active tag id=" + task_id + " status=" + msg.task_status +
+      " camera_frames=" + std::to_string(frames));
   }
 
   void log_recovery(const std::string & line) const {
@@ -1565,7 +1623,8 @@ private:
   bool has_latest_robot_status_{false};
   std::chrono::steady_clock::time_point last_robot_status_received_steady_{};
   std::vector<RecordedRobotStatus> current_status_samples_;
-  std::vector<std::string> active_task_ids_;
+  std::vector<std::string> active_task_ids_;  // At most one root task.
+  std::set<std::string> completed_task_ids_;
   std::string text_log_real_path_;
   std::string text_log_link_path_;
   std::string archived_text_log_path_;

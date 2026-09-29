@@ -141,7 +141,8 @@ These endpoints are used by `web/app.js`.
 - `POST /api/log_bag/replay`
   - Multi-bag body: `{ "bags": ["log_bag/robot2/backup/bags/first_terminal_bag", "log_bag/robot2/backup/bags/second_terminal_bag"] }` (up to 24).
   - Legacy single-bag body remains supported: `{ "bag": "log_bag/robot2/backup/bags/first_terminal_bag" }`.
-  - Purpose: read rosbag2 SQLite directories in read-only mode, sort them by recorded start time, and concatenate them into one gap-free offline timeline.
+  - Purpose: read rosbag2 SQLite directories in read-only mode, sort them by recorded start time, and concatenate them into one offline timeline with a 1 µs boundary between bags so the final frame of one bag remains selectable.
+  - Multi-bag requests skip a bag that has been removed by retention or cannot be parsed when at least one other bag can play; HTTP 200 includes `skipped_bags: [{"bag": "...", "error": "..."}]` and corresponding `warnings`. A single invalid bag returns 400 (or 404 if missing); if every selected bag fails, the request returns 400 (or 404 when all are missing). Paths outside `log_bag` still reject the whole request.
   - Returns: bag segments/topic metadata plus decoded pose, scan, path, `RobotStatus`, `TaskStatus`, velocity, a deduplicated `timeline.maps` derived from `RobotStatus.current_map`, and bounded aspect-preserving JPEG preview samples from `/<robot>/front_camera/image_raw` and `/<robot>/front_down_camera/image_raw`. Each sample identifies its segment and source bag. This endpoint never starts a ROS node or publishes a topic.
 
 ## Web And AI Shared APIs

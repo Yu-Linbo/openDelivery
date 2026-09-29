@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -46,9 +47,9 @@ class CdrWriter:
         self.u32(len(raw))
         self.data.extend(raw)
 
-    def header(self, frame_id="map"):
-        self.i32(1)
-        self.u32(2)
+    def header(self, frame_id="map", stamp_sec=1, stamp_nanosec=2):
+        self.i32(stamp_sec)
+        self.u32(stamp_nanosec)
         self.string(frame_id)
     def octets(self, value):
         raw = bytes(value)
@@ -126,11 +127,12 @@ def image_payload(encoding, pixels, step, width=2, height=2):
     return out.bytes()
 
 
-def tf_payload(transforms):
+def tf_payload(transforms, stamp_sec=1):
     out = CdrWriter()
     out.u32(len(transforms))
     for parent, child, x, y, yaw in transforms:
-        out.header(parent)
+        out.header(parent, stamp_sec=stamp_sec,
+                   stamp_nanosec=0 if stamp_sec == 0 else 2)
         out.string(child)
         for value in (x, y, 0.0):
             out.f64(value)
@@ -139,14 +141,27 @@ def tf_payload(transforms):
     return out.bytes()
 
 
-def laser_scan_payload(frame_id="robot2/laser_link"):
+def laser_scan_payload(frame_id="robot2/laser_link", stamp_sec=1):
     out = CdrWriter()
-    out.header(frame_id)
+    out.header(frame_id, stamp_sec=stamp_sec,
+               stamp_nanosec=0 if stamp_sec == 0 else 2)
     for value in (0.0, 0.0, 1.0, 0.0, 0.1, 0.1, 10.0):
         out.f32(value)
     out.u32(1)
     out.f32(1.0)
     out.u32(0)
+    return out.bytes()
+
+
+def map_pose_payload(x, y, yaw=0.0, stamp_sec=1, frame_id="map"):
+    out = CdrWriter()
+    out.header(frame_id, stamp_sec=stamp_sec)
+    for value in (x, y, 0.0):
+        out.f64(value)
+    for value in (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2)):
+        out.f64(value)
+    for _ in range(36):
+        out.f64(0.0)
     return out.bytes()
 
 
@@ -260,6 +275,56 @@ class BagReplayTest(unittest.TestCase):
         )
         self.assertEqual(images[1]["encoding"], "mono8")
 
+    def test_live_wal_reader_keeps_a_stable_snapshot(self):
+        database = self.bag / "sample_0.db3"
+        from bag_replay import _open_database
+
+        with sqlite3.connect(str(database)) as writer:
+            self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        reader = _open_database(database)
+        try:
+            original_count = reader.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            with sqlite3.connect(str(database)) as writer:
+                writer.execute(
+                    "INSERT INTO messages VALUES(8, 1, 1900000000, ?)",
+                    (odometry_payload(),),
+                )
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM messages").fetchone()[0], original_count)
+        finally:
+            reader.close()
+        with sqlite3.connect(str(database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0], original_count + 1)
+
+    def test_database_removed_after_open_still_replays_images(self):
+        database = self.bag / "sample_0.db3"
+        from bag_replay import _open_database
+
+        def open_then_remove(path):
+            connection = _open_database(path)
+            path.unlink()
+            return connection
+
+        with mock.patch("bag_replay._open_database", side_effect=open_then_remove):
+            result = extract_replay(self.bag, robot_name="robot2")
+
+        self.assertFalse(database.exists())
+        self.assertEqual(len(result["timeline"]["images"]), 2)
+        self.assertEqual(len(result["timeline"]["poses"]), 1)
+
+    def test_corrupt_image_does_not_fail_other_replay_data(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.execute(
+                "INSERT INTO messages VALUES(7, 4, 1800000000, ?)",
+                (b"bad image",),
+            )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        self.assertEqual(len(result["timeline"]["images"]), 2)
+        self.assertTrue(result["timeline"]["poses"])
+        self.assertTrue(any("/robot2/front_camera/image_raw" in warning for warning in result["warnings"]))
+
     def test_uses_recorder_status_sidecar_when_rosbag_misses_status_topic(self):
         database = self.bag / "sample_0.db3"
         with sqlite3.connect(str(database)) as connection:
@@ -352,6 +417,142 @@ class BagReplayTest(unittest.TestCase):
         self.assertAlmostEqual(scan["points"][0], 1.0, places=4)
         self.assertAlmostEqual(scan["points"][1], 3.2, places=4)
 
+    def test_uses_recorded_map_localization_pose_at_scan_time(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.executemany(
+                "INSERT INTO topics VALUES(?, ?, ?, 'cdr')",
+                [
+                    (6, "/robot2/tf_static", "tf2_msgs/msg/TFMessage"),
+                    (7, "/robot2/amcl_pose", "geometry_msgs/msg/PoseWithCovarianceStamped"),
+                    (8, "/robot2/scan_2d", "sensor_msgs/msg/LaserScan"),
+                    (9, "/robot2/initialpose", "geometry_msgs/msg/PoseWithCovarianceStamped"),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO messages VALUES(?, ?, ?, ?)",
+                [
+                    (7, 6, 1900000000, tf_payload([
+                        ("robot2/base_footprint", "robot2/laser_link", 0.2, 0.0, 0.0)
+                    ])),
+                    (8, 7, 1950000000, map_pose_payload(1.0, 2.0, math.pi / 2, stamp_sec=10)),
+                    (9, 8, 2000000000, laser_scan_payload(stamp_sec=10)),
+                    # A future pose must not pull the scan ahead in playback.
+                    (10, 7, 2100000000, map_pose_payload(9.0, 9.0, stamp_sec=11)),
+                    (11, 9, 1920000000, map_pose_payload(99.0, 99.0, stamp_sec=10)),
+                ],
+            )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        scan = result["timeline"]["scans"][0]
+        self.assertEqual(scan["coordinates"], "map")
+        self.assertEqual(scan["frame_id"], "map")
+        self.assertAlmostEqual(scan["points"][0], 1.0, places=4)
+        self.assertAlmostEqual(scan["points"][1], 3.2, places=4)
+        poses = result["timeline"]["poses"]
+        self.assertEqual([pose["x"] for pose in poses], [1.0, 9.0])
+        self.assertLess(poses[0]["t"], scan["t"])
+        self.assertGreater(poses[1]["t"], scan["t"])
+
+    def test_matches_localization_received_just_after_same_stamped_scan(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.executemany(
+                "INSERT INTO topics VALUES(?, ?, ?, 'cdr')",
+                [
+                    (6, "/robot2/tf_static", "tf2_msgs/msg/TFMessage"),
+                    (7, "/robot2/amcl_pose", "geometry_msgs/msg/PoseWithCovarianceStamped"),
+                    (8, "/robot2/scan_2d", "sensor_msgs/msg/LaserScan"),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO messages VALUES(?, ?, ?, ?)",
+                [
+                    (7, 6, 1900000000, tf_payload([
+                        ("robot2/base_footprint", "robot2/laser_link", 0.2, 0.0, 0.0)
+                    ])),
+                    (8, 7, 1950000000, map_pose_payload(0.0, 0.0, stamp_sec=9)),
+                    (9, 8, 2000000000, laser_scan_payload(stamp_sec=10)),
+                    (10, 7, 2050000000, map_pose_payload(1.0, 2.0, stamp_sec=10)),
+                ],
+            )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        scan = result["timeline"]["scans"][0]
+        self.assertEqual(scan["coordinates"], "map")
+        self.assertAlmostEqual(scan["points"][0], 2.2, places=4)
+        self.assertAlmostEqual(scan["points"][1], 2.0, places=4)
+        self.assertLess(result["timeline"]["poses"][0]["t"], scan["t"])
+        self.assertGreater(result["timeline"]["poses"][1]["t"], scan["t"])
+
+    def test_uses_late_tf_with_matching_scan_ros_stamp_without_amcl(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.executemany(
+                "INSERT INTO topics VALUES(?, ?, ?, 'cdr')",
+                [
+                    (6, "/robot2/tf_static", "tf2_msgs/msg/TFMessage"),
+                    (7, "/robot2/tf", "tf2_msgs/msg/TFMessage"),
+                    (8, "/robot2/scan_2d", "sensor_msgs/msg/LaserScan"),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO messages VALUES(?, ?, ?, ?)",
+                [
+                    (7, 6, 1900000000, tf_payload([
+                        ("robot2/base_footprint", "robot2/laser_link", 0.2, 0.0, 0.0)
+                    ])),
+                    (8, 8, 2000000000, laser_scan_payload(stamp_sec=10)),
+                    (9, 7, 3000000000, tf_payload([
+                        ("map", "robot2/odom", 1.0, 2.0, math.pi / 2),
+                        ("robot2/odom", "robot2/base_footprint", 0.0, 0.0, 0.0),
+                    ], stamp_sec=10)),
+                    # The same ROS time after a clock reset must not win.
+                    (10, 7, 100000000000, tf_payload([
+                        ("map", "robot2/odom", 99.0, 99.0, 0.0),
+                        ("robot2/odom", "robot2/base_footprint", 0.0, 0.0, 0.0),
+                    ], stamp_sec=10)),
+                ],
+            )
+
+        result = extract_replay(self.bag, robot_name="robot2")
+
+        scan = result["timeline"]["scans"][0]
+        self.assertEqual(scan["coordinates"], "map")
+        self.assertAlmostEqual(scan["points"][0], 1.0, places=4)
+        self.assertAlmostEqual(scan["points"][1], 3.2, places=4)
+
+    def test_falls_back_to_receive_order_when_scan_has_zero_ros_stamp(self):
+        database = self.bag / "sample_0.db3"
+        with sqlite3.connect(str(database)) as connection:
+            connection.executemany(
+                "INSERT INTO topics VALUES(?, ?, ?, 'cdr')",
+                [
+                    (6, "/robot2/tf_static", "tf2_msgs/msg/TFMessage"),
+                    (7, "/robot2/tf", "tf2_msgs/msg/TFMessage"),
+                    (8, "/robot2/scan_2d", "sensor_msgs/msg/LaserScan"),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO messages VALUES(?, ?, ?, ?)",
+                [
+                    (7, 6, 1900000000, tf_payload([
+                        ("robot2/base_footprint", "robot2/laser_link", 0.2, 0.0, 0.0)
+                    ])),
+                    (8, 7, 1950000000, tf_payload([
+                        ("map", "robot2/base_footprint", 1.0, 2.0, math.pi / 2)
+                    ], stamp_sec=0)),
+                    (9, 8, 2000000000, laser_scan_payload(stamp_sec=0)),
+                ],
+            )
+
+        scan = extract_replay(self.bag, robot_name="robot2")["timeline"]["scans"][0]
+        self.assertEqual(scan["coordinates"], "map")
+        self.assertAlmostEqual(scan["points"][0], 1.0, places=4)
+        self.assertAlmostEqual(scan["points"][1], 3.2, places=4)
+
     def test_merges_multiple_bags_in_recording_order(self):
         first = extract_replay(self.bag, robot_name="robot2")
         second = extract_replay(self.bag, robot_name="robot2")
@@ -364,14 +565,15 @@ class BagReplayTest(unittest.TestCase):
         self.assertEqual(merged["bags"], [first["bag"], second["bag"]])
         self.assertEqual(len(merged["segments"]), 2)
         self.assertAlmostEqual(merged["segments"][0]["start"], 0.0)
-        self.assertAlmostEqual(merged["segments"][1]["start"], first["duration"])
-        self.assertAlmostEqual(merged["duration"], first["duration"] + second["duration"])
+        next_start = round(first["duration"] + 0.000001, 6)
+        self.assertEqual(merged["segments"][1]["start"], next_start)
+        self.assertEqual(merged["duration"], round(next_start + second["duration"], 6))
         self.assertEqual(merged["message_count"], 12)
         self.assertEqual(merged["database_count"], 2)
         poses = merged["timeline"]["poses"]
         self.assertEqual([row["segment_index"] for row in poses], [0, 1])
         self.assertEqual([row["bag"] for row in poses], [first["bag"], second["bag"]])
-        self.assertAlmostEqual(poses[1]["t"], first["duration"])
+        self.assertEqual(poses[1]["t"], next_start)
         odom_topic = next(topic for topic in merged["topics"] if topic["name"] == "/robot2/odom")
         self.assertEqual(odom_topic["count"], 2)
         images = merged["timeline"]["images"]
@@ -384,10 +586,41 @@ class BagReplayTest(unittest.TestCase):
             [row["current_map"] for row in maps],
             ["test_101", "test_102", "test_101", "test_102"],
         )
-        self.assertAlmostEqual(maps[2]["t"], first["duration"])
+        self.assertEqual(maps[2]["t"], next_start)
         self.assertEqual(merged["map_names"], ["test_101", "test_102"])
         self.assertEqual(merged["initial_map_name"], "test_101")
         self.assertEqual(merged["map_name"], "test_101")
+
+    def test_last_image_of_one_bag_precedes_first_image_of_next_bag(self):
+        def replay(name, robot, start_ns, image_time):
+            return {
+                "bag": name,
+                "robot_name": robot,
+                "start_time_ns": start_ns,
+                "duration": 1.0,
+                "message_count": 1,
+                "database_count": 1,
+                "topics": [],
+                "timeline": {
+                    "images": [{"t": image_time, "camera": "front", "data_url": name}],
+                },
+                "warnings": [],
+                "initial_map_name": robot,
+                "map_name": robot,
+            }
+
+        first = replay("first", "robot1", 1, 1.0)
+        second = replay("second", "robot2", 2, 0.0)
+        merged = merge_replays([second, first])
+        segments = merged["segments"]
+        images = merged["timeline"]["images"]
+
+        self.assertEqual([row["bag"] for row in images], ["first", "second"])
+        self.assertEqual(images[0]["t"], segments[0]["end"])
+        self.assertEqual(images[1]["t"], segments[1]["start"])
+        self.assertAlmostEqual(images[1]["t"] - images[0]["t"], 0.000001, places=10)
+        self.assertEqual(segments[1]["start"], 1.000001)
+        self.assertEqual(merged["duration"], segments[1]["end"])
 
     def test_rejects_empty_multi_bag_merge(self):
         with self.assertRaisesRegex(BagReplayError, "至少需要"):

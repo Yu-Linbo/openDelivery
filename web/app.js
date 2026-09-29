@@ -121,6 +121,7 @@ const btnBagReplayResetView = document.getElementById("btn-bag-replay-reset-view
 const btnBagReplayClose = document.getElementById("btn-bag-replay-close");
 const btnBagReplayToggle = document.getElementById("btn-bag-replay-toggle");
 const bagReplayProgress = document.getElementById("bag-replay-progress");
+const bagReplayImageMarkers = document.getElementById("bag-replay-image-markers");
 const bagReplayCurrentTime = document.getElementById("bag-replay-current-time");
 const bagReplayDuration = document.getElementById("bag-replay-duration");
 const bagReplaySpeed = document.getElementById("bag-replay-speed");
@@ -138,6 +139,7 @@ const bagReplayControlStatus = document.getElementById("bag-replay-control-statu
 const bagReplayLocalization = document.getElementById("bag-replay-localization");
 const bagReplayPosition = document.getElementById("bag-replay-position");
 const bagReplaySummary = document.getElementById("bag-replay-summary");
+const bagReplaySkipped = document.getElementById("bag-replay-skipped");
 const bagReplayTopics = document.getElementById("bag-replay-topics");
 const btnResetView = document.getElementById("btn-reset-view");
 const scan2dToggle = document.getElementById("scan-2d-toggle");
@@ -3864,6 +3866,7 @@ const bagReplayState = {
   currentTime: 0,
   speed: 1,
   playing: false,
+  scrubbing: false,
   animationFrame: 0,
   lastAnimationTime: 0,
   viewScale: 1,
@@ -3875,6 +3878,10 @@ const bagReplayState = {
   dragPanX: 0,
   dragPanY: 0,
   loadToken: 0,
+  imageMarkerGroups: [],
+  imageMarkerButtons: [],
+  activeImageMarkerIndex: -1,
+  focusImageMarkerIndex: -1,
 };
 const bagReplayCtx = bagReplayCanvas ? bagReplayCanvas.getContext("2d") : null;
 
@@ -3883,6 +3890,149 @@ function formatBagReplayTime(value) {
   const minutes = Math.floor(seconds / 60);
   const remaining = seconds - minutes * 60;
   return String(minutes).padStart(2, "0") + ":" + remaining.toFixed(3).padStart(6, "0");
+}
+
+function groupBagReplayImageMarkers(rows, duration) {
+  if (!Array.isArray(rows) || duration < 0) return [];
+  const samples = rows
+    .map((row) => ({
+      t: Number(row && row.t),
+      camera: row && row.camera,
+      segmentIndex: Number(row && row.segment_index) || 0,
+    }))
+    .filter((row) => Number.isFinite(row.t) && row.t >= 0 &&
+      row.t <= duration + 0.000001 && (row.camera === "front" || row.camera === "front_down"))
+    .sort((a, b) => a.t - b.t || a.segmentIndex - b.segmentIndex);
+  const groups = [];
+  for (const sample of samples) {
+    const previous = groups[groups.length - 1];
+    // One task boundary gives both cameras the same bag timestamp. Keep
+    // nearby but different timestamps as separate, clickable captures.
+    if (previous && previous.segmentIndex === sample.segmentIndex &&
+      Math.round(sample.t * 1_000_000) === Math.round(previous.firstTime * 1_000_000) &&
+      !previous.cameras.includes(sample.camera)) {
+      previous.t = sample.t;
+      previous.cameras.push(sample.camera);
+    } else {
+      groups.push({
+        t: sample.t,
+        firstTime: sample.t,
+        segmentIndex: sample.segmentIndex,
+        cameras: [sample.camera],
+      });
+    }
+  }
+  return groups;
+}
+
+function bagReplayImageMarkerLanes(groups, duration, width) {
+  const laneLastPixel = [-Infinity, -Infinity, -Infinity];
+  return groups.map((group) => {
+    const pixel = duration > 0 ? group.t / duration * width : 0;
+    let lane = laneLastPixel.findIndex((last) => pixel - last >= 16);
+    if (lane < 0) lane = laneLastPixel.indexOf(Math.min(...laneLastPixel));
+    laneLastPixel[lane] = pixel;
+    return lane;
+  });
+}
+
+function layoutBagReplayImageMarkers() {
+  if (!bagReplayImageMarkers || !bagReplayState.data) return;
+  const groups = bagReplayState.imageMarkerGroups;
+  const duration = Math.max(0, Number(bagReplayState.data.duration) || 0);
+  const lanes = bagReplayImageMarkerLanes(
+    groups, duration, bagReplayImageMarkers.clientWidth || 600);
+  let maxLane = 0;
+  lanes.forEach((lane, index) => {
+    const button = bagReplayState.imageMarkerButtons[index];
+    if (button) button.style.top = (1 + lane * 17) + "px";
+    maxLane = Math.max(maxLane, lane);
+  });
+  bagReplayImageMarkers.style.height = (18 + maxLane * 17) + "px";
+}
+
+function renderBagReplayImageMarkers() {
+  if (!bagReplayImageMarkers) return;
+  bagReplayImageMarkers.replaceChildren();
+  bagReplayState.imageMarkerGroups = [];
+  bagReplayState.imageMarkerButtons = [];
+  bagReplayState.activeImageMarkerIndex = -1;
+  bagReplayState.focusImageMarkerIndex = -1;
+  const data = bagReplayState.data;
+  if (!data) return;
+  const duration = Math.max(0, Number(data.duration) || 0);
+  const groups = groupBagReplayImageMarkers(bagReplayTimeline("images"), duration);
+  bagReplayState.imageMarkerGroups = groups;
+  const fragment = document.createDocumentFragment();
+  groups.forEach((group, index) => {
+    const button = document.createElement("button");
+    const cameras = group.cameras.map((camera) =>
+      camera === "front_down" ? "下视" : "前视").join(" / ");
+    const segment = Array.isArray(data.segments)
+      ? data.segments.find((row) => Number(row.index) === group.segmentIndex)
+      : null;
+    const bagName = segment ? basenameOfLogPath(segment.bag) : "";
+    const label = `图像记录 ${formatBagReplayTime(group.t)} · ${cameras}` +
+      (bagName ? ` · ${bagName}` : "") + "，按回车查看";
+    button.type = "button";
+    button.className = "bag-replay-image-marker";
+    button.style.left = (duration > 0 ? 100 * group.t / duration : 0) + "%";
+    button.dataset.markerIndex = String(index);
+    button.tabIndex = index === 0 ? 0 : -1;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.textContent = "●";
+    fragment.appendChild(button);
+    bagReplayState.imageMarkerButtons.push(button);
+  });
+  bagReplayImageMarkers.appendChild(fragment);
+  if (groups.length) bagReplayState.focusImageMarkerIndex = 0;
+  layoutBagReplayImageMarkers();
+  updateBagReplayImageMarkerActive();
+}
+
+function updateBagReplayImageMarkerActive() {
+  const groups = bagReplayState.imageMarkerGroups;
+  let low = 0;
+  let high = groups.length - 1;
+  let active = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (groups[middle].t <= bagReplayState.currentTime) {
+      active = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const previous = bagReplayState.activeImageMarkerIndex;
+  if (previous === active) return;
+  for (const index of [previous, active]) {
+    const button = bagReplayState.imageMarkerButtons[index];
+    if (!button) continue;
+    button.classList.toggle("is-active", index === active);
+    if (index === active) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+  }
+  bagReplayState.activeImageMarkerIndex = active;
+}
+
+function focusBagReplayImageMarker(index, focus) {
+  const buttons = bagReplayState.imageMarkerButtons;
+  if (!buttons[index]) return;
+  const previous = buttons[bagReplayState.focusImageMarkerIndex];
+  if (previous) previous.tabIndex = -1;
+  buttons[index].tabIndex = 0;
+  bagReplayState.focusImageMarkerIndex = index;
+  if (focus) buttons[index].focus();
+}
+
+function seekBagReplayImageMarker(index) {
+  const group = bagReplayState.imageMarkerGroups[index];
+  if (!group || !bagReplayState.data) return;
+  setBagReplayPlaying(false);
+  bagReplayState.currentTime = group.t;
+  renderBagReplayFrame();
 }
 
 function bagReplaySegmentAt(time) {
@@ -3921,7 +4071,7 @@ function bagReplayRecordedMapAt(time) {
   return found >= 0 ? String(rows[found].current_map || "") : "";
 }
 
-function bagReplaySegmentsCompatible(sample, activeSegment, time) {
+function bagReplaySegmentsCompatible(sample, activeSegment, time, allowMapChange = false) {
   if (!activeSegment || !sample || sample.segment_index == null) return true;
   const sampleIndex = Number(sample.segment_index);
   const segments = bagReplayState.data && bagReplayState.data.segments;
@@ -3932,6 +4082,7 @@ function bagReplaySegmentsCompatible(sample, activeSegment, time) {
   const sampleRobot = String(sampleSegment.robot_name || "");
   const activeRobot = String(activeSegment.robot_name || "");
   if (sampleRobot && activeRobot && sampleRobot !== activeRobot) return false;
+  if (allowMapChange) return true;
   const sampleMap = bagReplayRecordedMapAt(Number(sample.t)) ||
     String(sampleSegment.map_name || sampleSegment.initial_map_name || "");
   const activeMap = bagReplayRecordedMapAt(Number(time)) ||
@@ -4035,7 +4186,9 @@ function bagReplayCameraAt(camera, time) {
   for (let index = found; index >= 0; index -= 1) {
     const row = rows[index];
     if (row.camera !== camera) continue;
-    if (!bagReplaySegmentsCompatible(row, segment, time)) continue;
+    // A snapshot remains the latest view after a map change. Only a different
+    // robot's segment clears it until that robot has an image.
+    if (!bagReplaySegmentsCompatible(row, segment, time, true)) continue;
     return row;
   }
   return null;
@@ -4434,6 +4587,7 @@ function renderBagReplayFrame() {
     bagReplayCtx.textAlign = "start";
   }
   if (bagReplayProgress) bagReplayProgress.value = String(bagReplayState.currentTime);
+  updateBagReplayImageMarkerActive();
   setBagReplayText(bagReplayCurrentTime, formatBagReplayTime(bagReplayState.currentTime));
   updateBagReplayCamera(
     bagReplayFrontCamera,
@@ -4452,6 +4606,37 @@ function renderBagReplayFrame() {
   updateBagReplayStatePanel();
 }
 
+function seekBagReplayProgress(value) {
+  if (!bagReplayState.data) return;
+  const duration = Math.max(0, Number(bagReplayState.data.duration) || 0);
+  bagReplayState.currentTime = Math.max(0, Math.min(duration, Number(value) || 0));
+  bagReplayState.lastAnimationTime = performance.now();
+  renderBagReplayFrame();
+  if (bagReplayState.playing && !bagReplayState.scrubbing &&
+      bagReplayState.currentTime < duration && !bagReplayState.animationFrame) {
+    bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
+  }
+}
+
+function beginBagReplayProgressScrub() {
+  bagReplayState.scrubbing = true;
+  if (bagReplayState.animationFrame) {
+    cancelAnimationFrame(bagReplayState.animationFrame);
+    bagReplayState.animationFrame = 0;
+  }
+}
+
+function endBagReplayProgressScrub() {
+  if (!bagReplayState.scrubbing) return;
+  bagReplayState.scrubbing = false;
+  bagReplayState.lastAnimationTime = performance.now();
+  const duration = Number(bagReplayState.data && bagReplayState.data.duration) || 0;
+  if (bagReplayState.playing && bagReplayState.currentTime < duration &&
+      !bagReplayState.animationFrame) {
+    bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
+  }
+}
+
 function setBagReplayPlaying(playing) {
   bagReplayState.playing = Boolean(playing && bagReplayState.data);
   bagReplayState.lastAnimationTime = performance.now();
@@ -4462,17 +4647,20 @@ function setBagReplayPlaying(playing) {
     cancelAnimationFrame(bagReplayState.animationFrame);
     bagReplayState.animationFrame = 0;
   }
-  if (bagReplayState.playing && !bagReplayState.animationFrame) {
+  if (bagReplayState.playing && !bagReplayState.scrubbing && !bagReplayState.animationFrame) {
     bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
   }
 }
 
 function tickBagReplay(now) {
   bagReplayState.animationFrame = 0;
-  if (!bagReplayState.playing || !bagReplayState.data) return;
+  if (!bagReplayState.playing || !bagReplayState.data || bagReplayState.scrubbing) return;
+  const duration = Number(bagReplayState.data.duration) || 0;
+  // A user can seek to the end while playback is on. Hold that position and
+  // keep the play control unchanged until they seek back or press pause.
+  if (bagReplayState.currentTime >= duration) return;
   const delta = Math.max(0, Math.min(0.25, (now - bagReplayState.lastAnimationTime) / 1000));
   bagReplayState.lastAnimationTime = now;
-  const duration = Number(bagReplayState.data.duration) || 0;
   bagReplayState.currentTime = Math.min(duration, bagReplayState.currentTime + delta * bagReplayState.speed);
   renderBagReplayFrame();
   if (bagReplayState.currentTime >= duration) {
@@ -4482,11 +4670,37 @@ function tickBagReplay(now) {
   bagReplayState.animationFrame = requestAnimationFrame(tickBagReplay);
 }
 
+function formatBagReplaySkippedBag(item) {
+  const path = String(item && item.bag || "");
+  const name = basenameOfLogPath(path) || "未知 bag";
+  const error = String(item && item.error || "读取失败");
+  return name + "：" + error;
+}
+
+function renderBagReplaySkippedBags(skipped) {
+  if (!bagReplaySkipped) return;
+  bagReplaySkipped.replaceChildren();
+  bagReplaySkipped.hidden = !skipped.length;
+  if (!skipped.length) return;
+  const heading = document.createElement("strong");
+  heading.textContent = "跳过 " + skipped.length + " 个 bag";
+  const list = document.createElement("ul");
+  skipped.forEach((item) => {
+    const row = document.createElement("li");
+    row.textContent = formatBagReplaySkippedBag(item);
+    list.appendChild(row);
+  });
+  bagReplaySkipped.append(heading, list);
+}
+
 function renderBagReplayMetadata() {
   const data = bagReplayState.data;
   if (!data) return;
   const timeline = data.timeline || {};
   const replayBagCount = Array.isArray(data.segments) ? data.segments.length : 1;
+  const skipped = Array.isArray(data.skipped_bags) ? data.skipped_bags : [];
+  renderBagReplaySkippedBags(skipped);
+  const skippedText = skipped.length ? " · 跳过 " + skipped.length + " 个 bag" : "";
   const warning = Array.isArray(data.warnings) && data.warnings.length
     ? " · " + data.warnings.length + " 条解析提示"
     : "";
@@ -4498,7 +4712,7 @@ function renderBagReplayMetadata() {
       " · 激光 " + (timeline.scans || []).length +
       " · 图像 " + (timeline.images || []).length +
       " · 状态 " + (timeline.statuses || []).length +
-      " · 任务 " + (timeline.tasks || []).length + warning
+      " · 任务 " + (timeline.tasks || []).length + skippedText + warning
   );
   if (bagReplayTopics) {
     bagReplayTopics.innerHTML = "";
@@ -4581,6 +4795,7 @@ function setBagReplayDialogOpen(open) {
   document.body.classList.toggle("bag-replay-open", open);
   if (!open) {
     bagReplayState.loadToken += 1;
+    bagReplayState.scrubbing = false;
     setBagReplayPlaying(false);
   } else {
     requestAnimationFrame(() => {
@@ -4589,6 +4804,24 @@ function setBagReplayDialogOpen(open) {
       if (btnBagReplayClose) btnBagReplayClose.focus();
     });
   }
+}
+
+function formatBagReplaySelectionLabel(bags) {
+  return bags.length === 1
+    ? basenameOfLogPath(bags[0])
+    : bags.length + " 个 bag · 按录制时间连续播放";
+}
+
+function formatBagReplaySuccessfulSubtitle(entries, bags) {
+  const playedBags = Array.isArray(bags) ? bags.map(String) : [];
+  const playedPaths = new Set(playedBags);
+  const tags = Array.from(new Set(
+    entries
+      .filter((entry) => playedPaths.has(String(entry.bag)))
+      .flatMap((entry) => Array.isArray(entry.tags) ? entry.tags.map(String) : [])
+  ));
+  return formatBagReplaySelectionLabel(playedBags) +
+    (tags.length ? " · tag: " + tags.join(", ") : "");
 }
 
 async function openSelectedLogBagReplay() {
@@ -4600,6 +4833,8 @@ async function openSelectedLogBagReplay() {
   ) return;
   const token = ++bagReplayState.loadToken;
   bagReplayState.data = null;
+  renderBagReplayImageMarkers();
+  renderBagReplaySkippedBags([]);
   bagReplayState.currentTime = 0;
   bagReplayState.speed = Number(bagReplaySpeed && bagReplaySpeed.value) || 1;
   bagReplayState.availableMaps = [];
@@ -4612,9 +4847,7 @@ async function openSelectedLogBagReplay() {
   setBagReplayText(bagReplayCurrentBag, "—");
   setBagReplayPlaying(false);
   setBagReplayDialogOpen(true);
-  const selectionLabel = entries.length === 1
-    ? basenameOfLogPath(entries[0].bag)
-    : entries.length + " 个 bag · 按录制时间连续播放";
+  const selectionLabel = formatBagReplaySelectionLabel(entries.map((entry) => entry.bag));
   if (bagReplaySubtitle) bagReplaySubtitle.textContent = selectionLabel;
   if (bagReplayLoading) {
     bagReplayLoading.hidden = false;
@@ -4632,6 +4865,7 @@ async function openSelectedLogBagReplay() {
     if (!response.ok) throw new Error(data.error || "bag 解析失败");
     if (token !== bagReplayState.loadToken) return;
     bagReplayState.data = data;
+    renderBagReplayImageMarkers();
     const duration = Math.max(0, Number(data.duration) || 0);
     if (bagReplayProgress) {
       bagReplayProgress.max = String(duration);
@@ -4639,12 +4873,8 @@ async function openSelectedLogBagReplay() {
     }
     setBagReplayText(bagReplayDuration, formatBagReplayTime(duration));
     setBagReplayPlaying(duration > 0);
-    const tags = Array.from(new Set(
-      entries.flatMap((entry) => Array.isArray(entry.tags) ? entry.tags.map(String) : [])
-    ));
     if (bagReplaySubtitle) {
-      bagReplaySubtitle.textContent =
-        selectionLabel + (tags.length ? " · tag: " + tags.join(", ") : "");
+      bagReplaySubtitle.textContent = formatBagReplaySuccessfulSubtitle(entries, data.bags);
     }
     renderBagReplayMetadata();
     bagReplayState.availableMaps = Array.isArray(data.available_maps)
@@ -4682,10 +4912,34 @@ function initBagReplayUi() {
     });
   }
   if (bagReplayProgress) {
-    bagReplayProgress.addEventListener("input", () => {
-      bagReplayState.currentTime = Number(bagReplayProgress.value) || 0;
-      bagReplayState.lastAnimationTime = performance.now();
-      renderBagReplayFrame();
+    bagReplayProgress.addEventListener("pointerdown", beginBagReplayProgressScrub);
+    bagReplayProgress.addEventListener("input", () => seekBagReplayProgress(bagReplayProgress.value));
+    bagReplayProgress.addEventListener("change", endBagReplayProgressScrub);
+    bagReplayProgress.addEventListener("blur", endBagReplayProgressScrub);
+    window.addEventListener("pointerup", endBagReplayProgressScrub);
+    window.addEventListener("pointercancel", endBagReplayProgressScrub);
+  }
+  if (bagReplayImageMarkers) {
+    bagReplayImageMarkers.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-marker-index]");
+      if (!button) return;
+      const index = Number(button.dataset.markerIndex);
+      focusBagReplayImageMarker(index, false);
+      seekBagReplayImageMarker(index);
+    });
+    bagReplayImageMarkers.addEventListener("keydown", (event) => {
+      const button = event.target.closest("button[data-marker-index]");
+      if (!button) return;
+      const current = Number(button.dataset.markerIndex);
+      const last = bagReplayState.imageMarkerButtons.length - 1;
+      let next = current;
+      if (event.key === "ArrowRight") next = Math.min(last, current + 1);
+      else if (event.key === "ArrowLeft") next = Math.max(0, current - 1);
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = last;
+      else return;
+      event.preventDefault();
+      focusBagReplayImageMarker(next, true);
     });
   }
   if (bagReplaySpeed) {
@@ -4738,6 +4992,7 @@ function initBagReplayUi() {
   });
   window.addEventListener("resize", () => {
     if (!bagReplayDialog.hidden) {
+      layoutBagReplayImageMarkers();
       resizeBagReplayCanvas();
       renderBagReplayFrame();
     }

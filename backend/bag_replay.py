@@ -7,10 +7,12 @@ The module never publishes topics and opens every database with SQLite ``mode=ro
 import json
 import base64
 import io
+from bisect import bisect_left, bisect_right
 import math
 import sqlite3
 import struct
 from collections import deque
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import quote
@@ -63,12 +65,15 @@ class _CdrReader:
         return int(self._unpack("B", 1))
 
     def octets(self, size: int) -> bytes:
+        return bytes(self.octets_view(size))
+
+    def octets_view(self, size: int) -> memoryview:
         if size < 0 or size > 128 * 1024 * 1024:
             raise BagReplayError("CDR byte sequence is too large")
         end = self._offset + size
         if end > len(self._data):
             raise BagReplayError("truncated CDR byte sequence")
-        value = bytes(self._data[self._offset:end])
+        value = self._data[self._offset:end]
         self._offset = end
         return value
 
@@ -130,7 +135,7 @@ def _decode_pose_stamped(payload: bytes, with_covariance: bool = False) -> Dict[
     pose = _pose(reader)
     if with_covariance:
         _skip_float64(reader, 36)
-    return {"frame_id": head["frame_id"], "pose": pose}
+    return {"frame_id": head["frame_id"], "stamp": head["stamp"], "pose": pose}
 
 
 def _decode_twist(payload: bytes) -> Dict[str, Any]:
@@ -156,8 +161,8 @@ def _decode_laser_scan(payload: bytes, max_hits: int = 240) -> Dict[str, Any]:
     stride = max(1, int(math.ceil(count / max_hits)))
     points: List[float] = []
     valid_count = 0
-    for index in range(count):
-        distance = reader.float32()
+    ranges = reader.octets_view(count * 4)
+    for index, (distance,) in enumerate(struct.iter_unpack(reader._endian + "f", ranges)):
         if not math.isfinite(distance) or distance < range_min or distance > range_max:
             continue
         valid_count += 1
@@ -166,10 +171,12 @@ def _decode_laser_scan(payload: bytes, max_hits: int = 240) -> Dict[str, Any]:
         angle = angle_min + angle_increment * index
         points.extend((round(distance * math.cos(angle), 4), round(distance * math.sin(angle), 4)))
     intensity_count = reader.uint32()
-    for _ in range(intensity_count):
-        reader.float32()
+    if intensity_count > 2_000_000:
+        raise BagReplayError("LaserScan intensity sequence is too large")
+    reader.octets_view(intensity_count * 4)
     return {
         "frame_id": head["frame_id"],
+        "stamp": head["stamp"],
         "coordinates": "sensor_frame",
         "points": points,
         "valid_count": valid_count,
@@ -268,7 +275,7 @@ def _decode_image(payload: bytes) -> Dict[str, Any]:
 
     image = Image.frombytes(mode, (width, height), data, "raw", raw_mode, step, 1)
     resampling = getattr(Image, "Resampling", Image)
-    image.thumbnail((480, 270), resampling.LANCZOS)
+    image.thumbnail((480, 270), resampling.BILINEAR)
     if image.mode != "RGB":
         image = image.convert("RGB")
     output = io.BytesIO()
@@ -304,6 +311,7 @@ def _decode_tf(payload: bytes) -> List[Dict[str, Any]]:
             {
                 "parent": _clean_frame(head["frame_id"]),
                 "child": _clean_frame(child),
+                "stamp": head["stamp"],
                 "x": x,
                 "y": y,
                 "z": z,
@@ -466,6 +474,78 @@ def _find_tf_pose(
     }
 
 
+def _is_map_frame(value: str) -> bool:
+    frame = _clean_frame(value)
+    return frame == "map" or frame.endswith("/map")
+
+
+def _tf_at_stamp(
+    samples: Tuple[List[int], List[Tuple[int, float, Tuple[float, float, float]]]],
+    stamp: float, received_ns: int,
+) -> Optional[Tuple[float, float, float]]:
+    """Find a stamped TF near a scan, even when TF arrived after the scan."""
+    received_times, rows = samples
+    if not rows or stamp <= 0:
+        return None
+    # Limit the matching receipt window so a repeated ROS stamp after a /clock
+    # reset cannot accidentally use TF from an earlier run of the same bag.
+    first = bisect_left(received_times, received_ns - 3_000_000_000)
+    last = bisect_right(received_times, received_ns + 3_000_000_000)
+    nearby = {}
+    for tf_received, tf_stamp, value in rows[first:last]:
+        previous = nearby.get(tf_stamp)
+        if previous is None or abs(tf_received - received_ns) < abs(previous[0] - received_ns):
+            nearby[tf_stamp] = (tf_received, value)
+    if not nearby:
+        return None
+    times = sorted(nearby)
+    index = bisect_left(times, stamp)
+    if index < len(times) and times[index] == stamp:
+        return nearby[times[index]][1]
+    before, after = index - 1, index
+    if before >= 0 and after < len(times):
+        left_age = stamp - times[before]
+        right_age = times[after] - stamp
+        first_received, first_value = nearby[times[before]]
+        second_received, second_value = nearby[times[after]]
+        if (left_age <= 0.5 and right_age <= 0.5
+                and 0 <= second_received - first_received <= 1_500_000_000):
+            ratio = left_age / (times[after] - times[before])
+            x0, y0, yaw0 = first_value
+            x1, y1, yaw1 = second_value
+            yaw_delta = math.atan2(math.sin(yaw1 - yaw0), math.cos(yaw1 - yaw0))
+            return (x0 + (x1 - x0) * ratio, y0 + (y1 - y0) * ratio,
+                    yaw0 + yaw_delta * ratio)
+    candidates = [i for i in (before, after) if 0 <= i < len(times)]
+    if not candidates:
+        return None
+    nearest = min(candidates, key=lambda i: abs(times[i] - stamp))
+    return nearby[times[nearest]][1] if abs(times[nearest] - stamp) <= 0.5 else None
+
+
+def _place_scan_at_map_pose(
+    scan: Dict[str, Any], frame_id: str, points: List[float],
+    pose: Dict[str, float], map_frame: str,
+    static_graph: Dict[Tuple[str, str], Tuple[float, float, float]],
+    robot_name: str,
+) -> bool:
+    frames = _tf_frames(static_graph)
+    bases = _ranked_tf_frames(frames, ("base_footprint",), robot_name)
+    bases += _ranked_tf_frames(frames, ("base_link",), robot_name)
+    located = _lookup_tf_2d(static_graph, bases, (_clean_frame(frame_id),))
+    if not located:
+        return False
+    scan["points"] = points
+    _transform_scan_points(scan, _compose_2d(
+        (float(pose["x"]), float(pose["y"]), float(pose["yaw"])),
+        located["transform"],
+    ))
+    scan.update({"source_frame_id": _clean_frame(frame_id),
+                 "frame_id": _clean_frame(map_frame),
+                 "coordinates": "map", "tf_applied": True})
+    return True
+
+
 _TYPE_CAPS = {
     "nav_msgs/msg/Odometry": 5000,
     "geometry_msgs/msg/PoseStamped": 5000,
@@ -504,7 +584,15 @@ def _database_files(path: Path) -> List[Path]:
 def _open_database(path: Path) -> sqlite3.Connection:
     uri = "file:" + quote(str(path.resolve())) + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=3.0)
-    connection.execute("PRAGMA query_only=ON")
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        # rosbag2 writes in WAL mode. Hold one read snapshot across metadata,
+        # topic samples, and images so a live bag cannot grow midway through a
+        # response and place frames beyond the reported duration.
+        connection.execute("BEGIN")
+    except sqlite3.Error:
+        connection.close()
+        raise
     return connection
 
 def _read_robot_status_sidecar(
@@ -561,115 +649,140 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
     databases = _database_files(path)
     topic_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
     events: List[Tuple[int, str, str, bytes]] = []
-    image_sources: Dict[Path, List[Tuple[int, str, str, int]]] = {}
     start_ns: Optional[int] = None
     end_ns: Optional[int] = None
     message_count = 0
 
-    for database in databases:
-        try:
-            connection = _open_database(database)
-        except sqlite3.Error as exc:
-            raise BagReplayError(f"无法只读打开 rosbag2 数据库: {exc}") from exc
-        try:
-            schema = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('topics','messages')"
-            ).fetchall()
-            if {row[0] for row in schema} != {"topics", "messages"}:
-                raise BagReplayError("文件不是有效的 rosbag2 SQLite 数据库")
-            bounds = connection.execute("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages").fetchone()
-            count = int(bounds[0] or 0)
-            message_count += count
-            if bounds[1] is not None:
-                start_ns = int(bounds[1]) if start_ns is None else min(start_ns, int(bounds[1]))
-                end_ns = int(bounds[2]) if end_ns is None else max(end_ns, int(bounds[2]))
+    images: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    # Retention can unlink a rotated bag during extraction. Reuse the original
+    # read-only handles for the image pass so it cannot fail on a second open.
+    with ExitStack() as databases_open:
+        image_sources: Dict[sqlite3.Connection, List[Tuple[int, str, str, int]]] = {}
+        for database in databases:
+            try:
+                connection = databases_open.enter_context(closing(_open_database(database)))
+            except sqlite3.Error as exc:
+                raise BagReplayError(f"无法只读打开 rosbag2 数据库: {exc}") from exc
+            try:
+                schema = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('topics','messages')"
+                ).fetchall()
+                if {row[0] for row in schema} != {"topics", "messages"}:
+                    raise BagReplayError("文件不是有效的 rosbag2 SQLite 数据库")
+                bounds = connection.execute("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM messages").fetchone()
+                count = int(bounds[0] or 0)
+                message_count += count
+                if bounds[1] is not None:
+                    start_ns = int(bounds[1]) if start_ns is None else min(start_ns, int(bounds[1]))
+                    end_ns = int(bounds[2]) if end_ns is None else max(end_ns, int(bounds[2]))
 
-            topics = connection.execute(
-                "SELECT t.id, t.name, t.type, t.serialization_format, COUNT(m.id), MIN(m.id) "
-                "FROM topics t LEFT JOIN messages m ON m.topic_id=t.id GROUP BY t.id ORDER BY t.name"
-            ).fetchall()
-            for topic_id, name, type_name, serialization, topic_count, first_id in topics:
-                key = (str(name), str(type_name))
-                summary = topic_rows.setdefault(
-                    key,
-                    {"name": str(name), "type": str(type_name), "count": 0, "supported": str(type_name) in _TYPE_CAPS},
-                )
-                summary["count"] += int(topic_count or 0)
-                if not topic_count or type_name not in _TYPE_CAPS or serialization != "cdr":
-                    continue
-                if type_name == "sensor_msgs/msg/Image":
-                    image_sources.setdefault(database, []).append(
-                        (int(topic_id), str(type_name), str(name), int(topic_count))
+                topics = connection.execute(
+                    "SELECT t.id, t.name, t.type, t.serialization_format, COUNT(m.id), MIN(m.id) "
+                    "FROM topics t LEFT JOIN messages m ON m.topic_id=t.id GROUP BY t.id ORDER BY t.name"
+                ).fetchall()
+                for topic_id, name, type_name, serialization, topic_count, first_id in topics:
+                    name, type_name = str(name), str(type_name)
+                    supported = serialization == "cdr" and _is_supported_topic(name, type_name)
+                    key = (name, type_name)
+                    summary = topic_rows.setdefault(
+                        key,
+                        {"name": name, "type": type_name, "count": 0, "supported": supported},
                     )
-                    continue
-                cap = _TYPE_CAPS[str(type_name)]
-                stride = max(1, int(math.ceil(int(topic_count) / cap)))
-                query = (
-                    "SELECT timestamp, data FROM messages WHERE topic_id=? "
-                    "AND ((id - ?) % ?)=0 ORDER BY timestamp"
-                )
-                for timestamp, payload in connection.execute(query, (topic_id, int(first_id), stride)):
-                    events.append((int(timestamp), str(type_name), str(name), bytes(payload)))
-        except sqlite3.Error as exc:
-            raise BagReplayError(f"读取 rosbag2 SQLite 失败: {exc}") from exc
-        finally:
-            connection.close()
-
-    image_offsets: Dict[Tuple[str, str], int] = {}
-    for database, sources in image_sources.items():
-        try:
-            connection = _open_database(database)
-        except sqlite3.Error as exc:
-            raise BagReplayError(f"无法只读打开 rosbag2 图像数据库: {exc}") from exc
-        try:
-            for topic_id, type_name, topic_name, topic_count in sources:
-                key = (topic_name, type_name)
-                total_count = int(topic_rows[key]["count"])
-                stride = max(1, int(math.ceil(total_count / _TYPE_CAPS[type_name])))
-                offset = image_offsets.get(key, 0)
-                selected = [
-                    (int(message_id), int(timestamp))
-                    for local_index, (message_id, timestamp) in enumerate(
-                        connection.execute(
-                            "SELECT id, timestamp FROM messages WHERE topic_id=? ORDER BY timestamp",
-                            (topic_id,),
+                    summary["count"] += int(topic_count or 0)
+                    summary["supported"] = bool(summary["supported"] or supported)
+                    if not topic_count or not supported:
+                        continue
+                    if type_name == "sensor_msgs/msg/Image":
+                        image_sources.setdefault(connection, []).append(
+                            (int(topic_id), type_name, name, int(topic_count))
                         )
+                        continue
+                    cap = _TYPE_CAPS[type_name]
+                    stride = max(1, int(math.ceil(int(topic_count) / cap)))
+                    query = (
+                        "SELECT timestamp, data FROM messages WHERE topic_id=? "
+                        "AND ((id - ?) % ?)=0 ORDER BY timestamp"
                     )
-                    if (offset + local_index) % stride == 0
-                ]
-                image_offsets[key] = offset + topic_count
-                for chunk_start in range(0, len(selected), 300):
-                    chunk = selected[chunk_start:chunk_start + 300]
-                    placeholders = ",".join("?" for _ in chunk)
-                    payloads = dict(
-                        connection.execute(
-                            f"SELECT id, data FROM messages WHERE id IN ({placeholders})",
-                            tuple(message_id for message_id, _ in chunk),
-                        )
-                    )
-                    for message_id, timestamp in chunk:
-                        payload = payloads.get(message_id)
-                        if payload is not None:
-                            events.append((timestamp, type_name, topic_name, bytes(payload)))
-        except sqlite3.Error as exc:
-            raise BagReplayError(f"读取 rosbag2 图像失败: {exc}") from exc
-        finally:
-            connection.close()
+                    for timestamp, payload in connection.execute(query, (topic_id, int(first_id), stride)):
+                        events.append((int(timestamp), type_name, name, bytes(payload)))
+            except sqlite3.Error as exc:
+                raise BagReplayError(f"读取 rosbag2 SQLite 失败: {exc}") from exc
 
-    if not message_count or start_ns is None or end_ns is None:
-        raise BagReplayError("bag 中没有可回放消息")
+        if not message_count or start_ns is None or end_ns is None:
+            raise BagReplayError("bag 中没有可回放消息")
+
+        def relative_time(timestamp: int) -> float:
+            return round((timestamp - start_ns) / 1_000_000_000.0, 6)
+
+        image_offsets: Dict[Tuple[str, str], int] = {}
+        for connection, sources in image_sources.items():
+            try:
+                for topic_id, type_name, topic_name, topic_count in sources:
+                    key = (topic_name, type_name)
+                    total_count = int(topic_rows[key]["count"])
+                    stride = max(1, int(math.ceil(total_count / _TYPE_CAPS[type_name])))
+                    offset = image_offsets.get(key, 0)
+                    selected = [
+                        (int(message_id), int(timestamp))
+                        for local_index, (message_id, timestamp) in enumerate(
+                            connection.execute(
+                                "SELECT id, timestamp FROM messages WHERE topic_id=? ORDER BY timestamp",
+                                (topic_id,),
+                            )
+                        )
+                        if (offset + local_index) % stride == 0
+                    ]
+                    image_offsets[key] = offset + topic_count
+                    # Small chunks bound peak raw frame memory. Decode each
+                    # selected BLOB before reading the next chunk.
+                    for chunk_start in range(0, len(selected), 16):
+                        chunk = selected[chunk_start:chunk_start + 16]
+                        placeholders = ",".join("?" for _ in chunk)
+                        payloads = dict(
+                            connection.execute(
+                                f"SELECT id, data FROM messages WHERE id IN ({placeholders})",
+                                tuple(message_id for message_id, _ in chunk),
+                            )
+                        )
+                        for message_id, timestamp in chunk:
+                            payload = payloads.pop(message_id, None)
+                            if payload is None:
+                                continue
+                            try:
+                                decoded = _decode_image(payload)
+                                decoded.update(
+                                    {
+                                        "t": relative_time(timestamp),
+                                        "topic": topic_name,
+                                        "camera": "front_down"
+                                        if topic_name.endswith("/front_down_camera/image_raw")
+                                        else "front",
+                                    }
+                                )
+                                images.append(decoded)
+                            except (BagReplayError, UnicodeError, ValueError, OSError, struct.error) as exc:
+                                warning = f"{topic_name}: {exc}"
+                                if warning not in warnings and len(warnings) < 12:
+                                    warnings.append(warning)
+            except sqlite3.Error as exc:
+                raise BagReplayError(f"读取 rosbag2 图像失败: {exc}") from exc
 
     events.sort(key=lambda row: row[0])
     poses_from_messages: List[Dict[str, Any]] = []
+    poses_from_map_messages: List[Dict[str, Any]] = []
     poses_from_map_tf: List[Dict[str, Any]] = []
     poses_from_odom_tf: List[Dict[str, Any]] = []
+    map_pose_samples: List[Tuple[int, float, Dict[str, float], str]] = []
+    scan_sources: List[Tuple[Dict[str, Any], str, List[float], float, int]] = []
+    tf_history: Dict[
+        Tuple[str, str], List[Tuple[int, float, Tuple[float, float, float]]]
+    ] = {}
     scans: List[Dict[str, Any]] = []
     paths: List[Dict[str, Any]] = []
     statuses: List[Dict[str, Any]] = []
     tasks: List[Dict[str, Any]] = []
     twists: List[Dict[str, Any]] = []
-    images: List[Dict[str, Any]] = []
-    warnings: List[str] = []
     tf_graph: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
 
     # Static transforms are valid for the whole bag. Seed them first so a scan
@@ -686,9 +799,7 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                     )
         except (BagReplayError, UnicodeError, ValueError, struct.error):
             pass
-
-    def relative_time(timestamp: int) -> float:
-        return round((timestamp - start_ns) / 1_000_000_000.0, 6)
+    static_tf_graph = dict(tf_graph)
 
     for timestamp, type_name, topic_name, payload in events:
         try:
@@ -715,11 +826,24 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                 pose = _round_pose(decoded["pose"])
                 pose.update({"t": relative_time(timestamp), "source": "pose", "frame_id": decoded["frame_id"]})
                 poses_from_messages.append(pose)
+                if (type_name == "geometry_msgs/msg/PoseWithCovarianceStamped"
+                        and topic_name.rstrip("/").endswith(("/amcl_pose", "/localization_pose"))
+                        and _is_map_frame(decoded["frame_id"])):
+                    poses_from_map_messages.append(pose)
+                    map_pose_samples.append((timestamp, float(decoded["stamp"]), pose,
+                                             decoded["frame_id"]))
             elif type_name == "sensor_msgs/msg/LaserScan":
                 decoded = _decode_laser_scan(payload)
+                # Preserve the original sensor points: TF recorded at this bag
+                # receive time can be about a second older than the scan's ROS
+                # stamp. A later TF sample may describe this exact scan instant.
+                source_frame = decoded["frame_id"]
+                source_points = decoded["points"]
                 _place_scan_in_tf_graph(decoded, tf_graph, robot_name)
                 decoded.update({"t": relative_time(timestamp), "topic": topic_name})
                 scans.append(decoded)
+                scan_sources.append((decoded, source_frame, source_points,
+                                     float(decoded["stamp"]), timestamp))
             elif type_name == "nav_msgs/msg/Path":
                 decoded = _decode_path(payload)
                 decoded.update({"t": relative_time(timestamp), "topic": topic_name})
@@ -742,18 +866,6 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                         "angular_z": round(decoded["angular"]["z"], 5),
                     }
                 )
-            elif type_name == "sensor_msgs/msg/Image":
-                decoded = _decode_image(payload)
-                decoded.update(
-                    {
-                        "t": relative_time(timestamp),
-                        "topic": topic_name,
-                        "camera": "front_down"
-                        if topic_name.endswith("/front_down_camera/image_raw")
-                        else "front",
-                    }
-                )
-                images.append(decoded)
             elif type_name == "tf2_msgs/msg/TFMessage":
                 # Static transforms were decoded in the seed pass above.  Replaying
                 # them here decodes the same (often latched and repeatedly recorded)
@@ -763,9 +875,13 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                 transforms = _decode_tf(payload)
                 for transform in transforms:
                     if transform["parent"] and transform["child"]:
-                        tf_graph[(transform["parent"], transform["child"])] = (
-                            transform["x"], transform["y"], transform["yaw"]
-                        )
+                        edge = (transform["parent"], transform["child"])
+                        value = (transform["x"], transform["y"], transform["yaw"])
+                        tf_graph[edge] = value
+                        if float(transform["stamp"]) > 0:
+                            tf_history.setdefault(edge, []).append(
+                                (timestamp, float(transform["stamp"]), value)
+                            )
                 tf_pose = _find_tf_pose(tf_graph, robot_name)
                 if tf_pose:
                     pose = _round_pose(tf_pose)
@@ -785,7 +901,49 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
             if warning not in warnings and len(warnings) < 12:
                 warnings.append(warning)
 
-    poses = poses_from_map_tf or poses_from_messages or poses_from_odom_tf
+    # Localization poses and scans have comparable ROS stamps and bag receive
+    # times. Prefer them over /tf, whose messages may arrive around a second
+    # after the scan they describe. This also keeps the robot icon aligned with
+    # the corrected laser points during playback.
+    map_pose_times = [row[0] for row in map_pose_samples]
+    tf_by_receipt = {
+        edge: ([row[0] for row in samples], samples)
+        for edge, samples in tf_history.items()
+    }
+    for scan, source_frame, source_points, stamp, received_ns in scan_sources:
+        matched = False
+        # A localization callback can arrive just after its corresponding
+        # LaserScan. Match by ROS stamp within a small receive-time window;
+        # pose timeline rows retain their actual bag times for playback.
+        first_pose = bisect_left(map_pose_times, received_ns - 500_000_000)
+        last_pose = bisect_right(map_pose_times, received_ns + 500_000_000)
+        candidates = map_pose_samples[first_pose:last_pose]
+        if stamp > 0:
+            candidates = [row for row in candidates if row[1] > 0
+                          and -0.000001 <= stamp - row[1] <= 0.25]
+            candidates.sort(key=lambda row: (abs(row[1] - stamp), abs(row[0] - received_ns)))
+        else:
+            candidates = [row for row in candidates if row[0] <= received_ns
+                          and received_ns - row[0] <= 250_000_000]
+            candidates.sort(key=lambda row: received_ns - row[0])
+        if candidates:
+            _, _, pose, map_frame = candidates[0]
+            matched = _place_scan_at_map_pose(
+                scan, source_frame, source_points, pose, map_frame,
+                static_tf_graph, robot_name
+            )
+        if not matched and stamp > 0 and tf_by_receipt:
+            stamped_graph = dict(static_tf_graph)
+            for edge, history in tf_by_receipt.items():
+                value = _tf_at_stamp(history, stamp, received_ns)
+                if value is not None:
+                    stamped_graph[edge] = value
+            candidate = {"frame_id": source_frame, "points": source_points,
+                         "coordinates": "sensor_frame"}
+            _place_scan_in_tf_graph(candidate, stamped_graph, robot_name)
+            if candidate.get("coordinates") == "map":
+                scan.update(candidate)
+    poses = poses_from_map_messages or poses_from_map_tf or poses_from_messages or poses_from_odom_tf
     poses.sort(key=lambda row: row["t"])
     scans.sort(key=lambda row: row["t"])
     paths.sort(key=lambda row: row["t"])
@@ -860,17 +1018,23 @@ def merge_replays(replays: List[Dict[str, Any]]) -> Dict[str, Any]:
     topic_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
     segments: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    cursor = 0.0
+    # Keep adjacent segment boundaries distinct at the timeline's 1 µs
+    # precision. A frame at the end of one bag must still belong to that bag
+    # when the next bag starts with a frame at its own time zero.
+    cursor_us = 0
 
     for segment_index, (_, replay) in enumerate(ordered):
-        duration = max(0.0, float(replay.get("duration") or 0.0))
+        if segment_index:
+            cursor_us += 1
+        duration_us = max(0, round(float(replay.get("duration") or 0.0) * 1_000_000))
+        duration = duration_us / 1_000_000
         bag_name = str(replay.get("bag") or "")
         segment = {
             "index": segment_index,
             "bag": bag_name,
-            "start": round(cursor, 6),
-            "end": round(cursor + duration, 6),
-            "duration": round(duration, 6),
+            "start": cursor_us / 1_000_000,
+            "end": (cursor_us + duration_us) / 1_000_000,
+            "duration": duration,
             "source_start_time_ns": int(replay.get("start_time_ns") or 0),
             "robot_name": str(replay.get("robot_name") or ""),
             "initial_map_name": str(replay.get("initial_map_name") or ""),
@@ -883,7 +1047,8 @@ def merge_replays(replays: List[Dict[str, Any]]) -> Dict[str, Any]:
         for name in timeline_names:
             for sample in source_timeline.get(name) or []:
                 row = dict(sample)
-                row["t"] = round(cursor + max(0.0, float(sample.get("t") or 0.0)), 6)
+                sample_us = max(0, round(float(sample.get("t") or 0.0) * 1_000_000))
+                row["t"] = (cursor_us + sample_us) / 1_000_000
                 row["segment_index"] = segment_index
                 row["bag"] = bag_name
                 merged_timeline[name].append(row)
@@ -899,7 +1064,7 @@ def merge_replays(replays: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         label = Path(bag_name).name or f"bag {segment_index + 1}"
         warnings.extend(f"{label}: {warning}" for warning in replay.get("warnings") or [])
-        cursor += duration
+        cursor_us += duration_us
 
     first = ordered[0][1]
     robot_names = [str(item[1].get("robot_name") or "") for item in ordered]
@@ -923,7 +1088,7 @@ def merge_replays(replays: List[Dict[str, Any]]) -> Dict[str, Any]:
         "map_name": initial_map_name,
         "map_names": list(dict.fromkeys(name for name in map_names if name)),
         "start_time_ns": min(int(item[1].get("start_time_ns") or 0) for item in ordered),
-        "duration": round(cursor, 6),
+        "duration": cursor_us / 1_000_000,
         "message_count": sum(int(item[1].get("message_count") or 0) for item in ordered),
         "database_count": sum(int(item[1].get("database_count") or 0) for item in ordered),
         "topics": sorted(topic_rows.values(), key=lambda row: (-row["count"], row["name"])),
