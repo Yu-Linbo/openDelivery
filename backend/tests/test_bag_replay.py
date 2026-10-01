@@ -295,6 +295,32 @@ class BagReplayTest(unittest.TestCase):
         with sqlite3.connect(str(database)) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0], original_count + 1)
 
+    def test_rosout_decode_and_multi_bag_time_alignment(self):
+        payload = CdrWriter()
+        payload.i32(12)
+        payload.u32(500000000)
+        payload.pack("B", 40, 1)
+        for value in ("amcl", "failed <scan>", "amcl.cpp", "tick"):
+            payload.string(value)
+        payload.u32(42)
+        with sqlite3.connect(str(self.bag / "sample_0.db3")) as connection:
+            connection.execute("INSERT INTO topics VALUES(6, '/rosout', 'rcl_interfaces/msg/Log', 'cdr')")
+            connection.execute("INSERT INTO messages VALUES(7, 6, 1600000000, ?)", (payload.bytes(),))
+        result = extract_replay(self.bag, robot_name="robot2")
+        row = result["timeline"]["logs"][0]
+        self.assertEqual(row["level"], "ERROR")
+        self.assertEqual(row["node"], "amcl")
+        self.assertEqual(row["epoch"], 12.5)
+        self.assertEqual(row["t"], 0.6)
+        self.assertIn("source=amcl.cpp:42 tick", row["message"])
+        result["bag"] = "first"
+        second = dict(result, bag="second", start_time_ns=20000000000)
+        merged = merge_replays([second, result])
+        logs = merged["timeline"]["logs"]
+        self.assertEqual(logs[0]["bag"], "first")
+        self.assertEqual(logs[1]["segment_index"], 1)
+        self.assertAlmostEqual(logs[1]["t"], result["duration"] + 0.600001)
+
     def test_database_removed_after_open_still_replays_images(self):
         database = self.bag / "sample_0.db3"
         from bag_replay import _open_database

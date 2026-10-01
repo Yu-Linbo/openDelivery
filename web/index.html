@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20260919-i18n-audit-v2" />
+    <link rel="stylesheet" href="./styles.css?v=20261001-review-v2" />
   </head>
   <body>
     <div class="layout">
@@ -387,7 +387,7 @@
         <section id="view-logs" class="view">
           <header class="view-header">
             <h1>日志</h1>
-            <p>读取已归档索引及当前录制 bag；已归档 bag 可下载，所有 bag 均可在浏览器中纯离线回放（不启动 ROS）</p>
+            <p>选择 bag 后播放录制画面，同步查看对应文本日志；支持下载与离线回放</p>
           </header>
 
           <div class="log-bag-toolbar">
@@ -656,6 +656,16 @@
           <div id="bag-replay-skipped" class="bag-replay-skipped" role="status" aria-live="polite" hidden></div>
           <div id="bag-replay-topics" class="bag-replay-topics"></div>
         </aside>
+        <details id="log-viewer" class="log-viewer bag-replay-logs">
+          <summary class="lv-summary">回放日志</summary>
+          <div class="lv-content">
+          <div class="lv-heading"><h3>回放日志</h3><label><input id="lv-follow" type="checkbox" checked />跟随播放时间</label><span id="lv-matched"></span><span id="lv-errors"></span></div>
+          <div class="lv-filters"><input id="lv-search" type="search" placeholder="搜索消息、节点或时间…（/）" aria-label="搜索日志" /><label><input id="lv-regex" type="checkbox" />正则</label><select id="lv-node" aria-label="日志节点筛选"><option value="">全部节点</option></select><div id="lv-levels" class="lv-levels"></div></div>
+          <p id="lv-note" class="lv-note" role="status"></p>
+          <div class="lv-table-wrap"><table class="lv-table"><thead><tr><th scope="col">ROS 时间 / 播放进度</th><th scope="col">级别</th><th scope="col">节点</th><th scope="col">消息</th></tr></thead><tbody id="lv-rows"></tbody></table><p id="lv-empty" class="lv-empty">此 bag 暂无关联日志</p></div>
+          <div class="lv-footer"><span id="lv-status" role="status"></span><div><button id="lv-prev" type="button">上一页</button><button id="lv-next" type="button">下一页</button></div></div>
+          </div>
+        </details>
       </div>
       <footer class="bag-replay-controls">
         <button id="btn-bag-replay-toggle" type="button" class="bag-replay-toggle">▶ 播放</button>
@@ -691,8 +701,9 @@
       </form>
       <p id="openclaw-chat-status" class="openclaw-chat-status" role="status"></p>
     </section>
-    <script src="./i18n.js?v=20260919-i18n-audit-v2"></script>
-    <script src="./map_editor.js?v=20260918-i18n-v1"></script>
-    <script src="./app.js?v=20260919-robot-settings-v1"></script>
+    <script src="./i18n.js?v=20261001-review-v2"></script>
+    <script src="./map_editor.js?v=20261001-review-v2"></script>
+    <script src="./app.js?v=20261001-review-v2"></script>
+    <script src="./log_viewer.js?v=20261001-logs-v3"></script>
   </body>
 </html>

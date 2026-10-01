@@ -228,3 +228,5 @@ Web 地图选点
 - `src/README.md`：ROS 包、TF、构建和运行流程。
 - `src/navigation/nav_bringup/README.md`：Nav2 启动细节。
 - `src/slam/slam_gmapping/README.md`：slam_toolbox、Gazebo 真值与 AMCL 兼容接口。
+
+日志筛选已整合到 bag 离线播放器：播放时自动加载关联日志，支持进度同步、点击时间跳转及级别 / 节点 / 文本筛选。格式、目录和保留规则见 [日志规范](docs/logging.md)。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -91,6 +92,16 @@ def _yaw_quat(yaw: float) -> Tuple[float, float]:
     return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
 
+def _finite_numbers(*values) -> Tuple[float, ...]:
+    try:
+        numbers = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("motion values must be numeric") from exc
+    if not all(math.isfinite(value) for value in numbers):
+        raise ValueError("motion values must be finite")
+    return numbers
+
+
 def publish_cmd_vel_timed(
     robot_id: str,
     linear: float,
@@ -104,9 +115,8 @@ def publish_cmd_vel_timed(
     rid = str(robot_id or "").strip()
     if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
         raise ValueError("invalid robot_id")
-    sec = max(0.1, min(float(seconds), 30.0))
-    lin = float(linear)
-    ang = float(angular)
+    lin, ang, duration = _finite_numbers(linear, angular, seconds)
+    sec = max(0.1, min(duration, 30.0))
     if abs(lin) > 2.0 or abs(ang) > 3.0:
         raise ValueError("linear/angular out of safe range")
     topic = f"/{rid}/cmd_vel"
@@ -129,8 +139,7 @@ def _validate_velocity(robot_id: str, linear: float, angular: float) -> Tuple[st
     rid = str(robot_id or "").strip()
     if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
         raise ValueError("invalid robot_id")
-    lin = float(linear)
-    ang = float(angular)
+    lin, ang = _finite_numbers(linear, angular)
     if abs(lin) > 1.2 or abs(ang) > 1.5:
         raise ValueError("teleop linear/angular out of safe range")
     return rid, lin, ang
@@ -250,9 +259,11 @@ def send_navigate_to_pose(
     rid = str(robot_id or "").strip()
     if not rid or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", rid):
         raise ValueError("invalid robot_id")
-    z, w = _yaw_quat(float(yaw))
+    x, y, yaw = _finite_numbers(x, y, yaw)
+    z, w = _yaw_quat(yaw)
     # Use rclpy action client directly to avoid ros2 CLI yaml parsing bugs
     script = f"""
+import logging
 import rclpy
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
@@ -292,7 +303,7 @@ try:
     result = send_goal_future.result()
     if not result or not result.accepted:
         raise RuntimeError("navigation goal rejected")
-    print("Goal accepted")
+    logging.getLogger("opendelivery.motion").info("Goal accepted")
 finally:
     if client is not None:
         client.destroy()
@@ -351,8 +362,11 @@ def record_waypoint(
     nm = str(name or "").strip()
     if not rid or not nm:
         raise ValueError("robot_id and name are required")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", rid):
+        raise ValueError("invalid robot_id")
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", nm):
         raise ValueError("invalid waypoint name")
+    x, y, yaw = _finite_numbers(x, y, yaw)
     with _LOCK:
         all_wp = _load_waypoints()
         bucket = all_wp.setdefault(rid, {})
@@ -391,4 +405,7 @@ def ros2_read_only(cmd: str, timeout: float = 15.0) -> Dict[str, Any]:
     low = f" {stripped} "
     if any(x in low for x in forbidden):
         raise ValueError("command must not publish, call services, launch, or run nodes")
-    return _ros_run(stripped, timeout=timeout)
+    # Treat all supplied arguments as literals, including shell operators and
+    # substitutions. The helper sources ROS through a shell, so passing the
+    # original text would turn an introspection request into arbitrary execution.
+    return _ros_run(shlex.join(shlex.split(stripped)), timeout=timeout)

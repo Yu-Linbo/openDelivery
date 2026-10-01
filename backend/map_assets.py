@@ -166,10 +166,16 @@ def save_raster(map_dir: Path, floor: str, pgm_data_url: str) -> Dict[str, Any]:
         raise ValueError("PGM image too large")
     try:
         with Image.open(BytesIO(raw)) as image:
-            image.verify()
+            if image.format != "PPM" or image.mode != "L":
+                raise ValueError("expected grayscale PGM")
+            image.load()
             size = image.size
     except Exception as exc:
         raise ValueError("invalid PGM image") from exc
+    with Image.open(folder / f"{floor}.pgm") as raster:
+        raster_size = raster.size
+    if size != raster_size:
+        raise ValueError(f"raster image size {size} must match existing size {raster_size}")
     _atomic_write(folder / f"{floor}.pgm", raw)
     return {"ok": True, "floor": floor, "width": size[0], "height": size[1]}
 
@@ -181,6 +187,8 @@ def save_semantic(map_dir: Path, floor: str, png_data_url: str) -> Dict[str, Any
         raise ValueError("semantic PNG too large")
     try:
         with Image.open(BytesIO(raw)) as image:
+            if image.format != "PNG":
+                raise ValueError("expected PNG")
             image.verify()
             size = image.size
     except Exception as exc:

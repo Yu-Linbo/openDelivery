@@ -49,7 +49,8 @@ function setSidebarHidden(hidden) {
 }
 
 if (layoutEl) {
-  const saved = localStorage.getItem("openDelivery_sidebar_hidden_v1") === "1";
+  let saved = false;
+  try { saved = localStorage.getItem("openDelivery_sidebar_hidden_v1") === "1"; } catch { /* storage may be disabled */ }
   layoutEl.classList.toggle("sidebar-hidden", saved);
 }
 
@@ -327,6 +328,7 @@ let activeMappingRobotId = null;
 let rosNodesPollTimer = null;
 let settingsRobotOptionsSignature = "";
 let settingsLoadSequence = 0;
+let floorLoadSequence = 0;
 
 let robotIconLoaded = false;
 const robotIcon = new Image();
@@ -857,7 +859,7 @@ function discardMapEditorChanges() {
   if (mapEditorMessage) mapEditorMessage.textContent = "已取消全部未保存修改";
 }
 
-async function loadActiveMapAssets() {
+async function loadActiveMapAssets(floor = activeFloor, sequence = floorLoadSequence) {
   semanticBitmap = null;
   semanticEditCanvas = null;
   mapPoints = [];
@@ -868,13 +870,15 @@ async function loadActiveMapAssets() {
     renderMapWaypointList();
     return;
   }
-  const assets = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(activeFloor)}/assets`, { cache: "no-store" });
+  const assets = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(floor)}/assets`, { cache: "no-store" });
+  const bitmap = await buildSemanticBitmapFromDataUrl(assets.semantic_png || "");
+  if (sequence !== floorLoadSequence || floor !== activeFloor) return;
   mapPoints = cloneMapPointRows(Array.isArray(assets.points) ? assets.points : []);
   savedMapPoints = cloneMapPointRows(mapPoints);
   const labels = assets.semantic_legend && Array.isArray(assets.semantic_legend.labels)
     ? assets.semantic_legend.labels : [];
   semanticLegend = labels;
-  semanticBitmap = await buildSemanticBitmapFromDataUrl(assets.semantic_png || "");
+  semanticBitmap = bitmap;
   semanticEditCanvas = semanticBitmap ? cloneCanvasElement(semanticBitmap) : createBlankSemanticCanvas();
   clearMapEditorUndoHistory();
   renderSemanticLabelOptions();
@@ -2736,6 +2740,7 @@ function refreshMetaPanel() {
 }
 
 async function loadFloorMap(floor) {
+  const sequence = ++floorLoadSequence;
   stopMapLivePolling();
   activeMappingRobotId = null;
   updateMappingToolbar();
@@ -2753,6 +2758,10 @@ async function loadFloorMap(floor) {
     }
     mapStatus.textContent = `正在连接 /${rid}/mapping …`;
     activePgm = null;
+    activeMeta = null;
+    semanticBitmap = null;
+    semanticEditCanvas = null;
+    mapPoints = [];
     mapBitmap = null;
     activeFloor = floor;
     activeMappingRobotId = rid;
@@ -2770,6 +2779,7 @@ async function loadFloorMap(floor) {
   mapStatus.textContent = `正在加载 ${floor}...`;
   try {
     const mapData = await fetchJson(`${API_BASE_URL}/api/maps/${encodeURIComponent(floor)}`);
+    if (sequence !== floorLoadSequence) return;
     const pgm = mapData.pgm;
     const yamlText = mapData.yaml;
     if (!pgm || typeof yamlText !== "string") {
@@ -2785,7 +2795,8 @@ async function loadFloorMap(floor) {
     activePgm = pgm;
     activeMeta = parseYaml(yamlText);
     mapBitmap = buildMapBitmap(pgm);
-    await loadActiveMapAssets();
+    await loadActiveMapAssets(floor, sequence);
+    if (sequence !== floorLoadSequence) return;
     resetViewToFit();
     renderScene();
     updateRobotStatus();
@@ -2793,6 +2804,7 @@ async function loadFloorMap(floor) {
     updateMappingToolbar();
     mapStatus.textContent = `${floor} 加载完成 · 滚轮缩放 · 拖拽平移`;
   } catch (err) {
+    if (sequence !== floorLoadSequence) return;
     mapStatus.textContent = `加载失败: ${err.message}`;
     mapBitmap = null;
     activePgm = null;
@@ -3085,6 +3097,7 @@ async function applyLiveMappingFrame() {
   try {
     const url = `${API_BASE_URL}/api/mapping/live?robot_id=${encodeURIComponent(rid)}`;
     const data = await fetchJsonOptional(url);
+    if (rid !== activeMappingRobotId || !isMappingFloor(activeFloor)) return;
     if (!data || !data.available) {
       mapStatus.textContent =
         (data && data.reason) ||
@@ -3252,13 +3265,14 @@ function showSettingsBinding(envelope, runtime = null) {
 }
 
 async function loadSettingsForRobot(robotId) {
+  const sequence = ++settingsLoadSequence;
   const rid = String(robotId || "").trim();
   if (!rid || !settingsForm) {
     setSettingsFormDisabled(true);
     if (settingsBindingStatus) settingsBindingStatus.textContent = "请选择机器人。配置不会再保存在当前浏览器中。";
     return;
   }
-  const sequence = ++settingsLoadSequence;
+  let loaded = false;
   setSettingsFormDisabled(true);
   if (settingsMessage) settingsMessage.textContent = "正在读取机器人配置…";
   try {
@@ -3266,12 +3280,13 @@ async function loadSettingsForRobot(robotId) {
     if (sequence !== settingsLoadSequence || !settingsRobotId || settingsRobotId.value !== rid) return;
     fillSettingsForm(envelope);
     showSettingsBinding(envelope);
+    loaded = true;
     if (settingsMessage) settingsMessage.textContent = envelope.source === "saved" ? "已从服务器读取该机器人配置。" : "该机器人尚无单独配置，显示系统默认值。";
   } catch (err) {
     if (sequence !== settingsLoadSequence) return;
     if (settingsMessage) settingsMessage.textContent = `读取失败：${err.message || err}`;
   } finally {
-    if (sequence === settingsLoadSequence && settingsRobotId && settingsRobotId.value === rid) setSettingsFormDisabled(false);
+    if (loaded && sequence === settingsLoadSequence && settingsRobotId && settingsRobotId.value === rid) setSettingsFormDisabled(false);
   }
 }
 
@@ -3290,6 +3305,7 @@ function syncSettingsRobotSelect() {
     settingsRobotId.appendChild(option);
   });
   if (!robots.length) {
+    settingsLoadSequence += 1;
     const option = document.createElement("option");
     option.value = "";
     option.textContent = "暂无机器人";
@@ -3311,6 +3327,7 @@ function initSettings() {
     e.preventDefault();
     const robotId = settingsRobotId.value.trim();
     if (!robotId) return;
+    const sequence = ++settingsLoadSequence;
     const payload = {
       robot_id: robotId,
       settings: {
@@ -3327,24 +3344,29 @@ function initSettings() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (sequence !== settingsLoadSequence || settingsRobotId.value !== robotId) return;
       fillSettingsForm(envelope);
       showSettingsBinding(envelope, envelope.runtime);
       if (settingsMessage) settingsMessage.textContent = `${envelope.runtime.message}（${new Date().toLocaleString()}）`;
       appendLog(`${robotId} 参数保存结果: ${envelope.runtime.state} ${JSON.stringify(payload.settings)}`);
     } catch (err) {
+      if (sequence !== settingsLoadSequence || settingsRobotId.value !== robotId) return;
       if (settingsMessage) settingsMessage.textContent = `保存失败：${err.message || err}`;
     } finally {
-      setSettingsFormDisabled(false);
+      if (sequence === settingsLoadSequence && settingsRobotId.value === robotId) setSettingsFormDisabled(false);
     }
   });
 }
 
 function getLogs() {
-  return JSON.parse(localStorage.getItem(LOGS_KEY) || "[]");
+  try {
+    const logs = JSON.parse(localStorage.getItem(LOGS_KEY) || "[]");
+    return Array.isArray(logs) ? logs.filter((entry) => typeof entry === "string") : [];
+  } catch { return []; }
 }
 
 function setLogs(logs) {
-  localStorage.setItem(LOGS_KEY, JSON.stringify(logs));
+  try { localStorage.setItem(LOGS_KEY, JSON.stringify(logs)); } catch { /* logging must not interrupt an operation */ }
 }
 
 function appendLog(message) {
@@ -4540,6 +4562,7 @@ function updateBagReplayStatePanel() {
 }
 
 function renderBagReplayFrame() {
+  window.openDeliveryLogViewer?.sync(bagReplayState.currentTime);
   syncBagReplayMapToCurrentTime();
   if (!bagReplayCtx || !bagReplayCanvas) return;
   resizeBagReplayCanvas();
@@ -4833,6 +4856,7 @@ async function openSelectedLogBagReplay() {
   ) return;
   const token = ++bagReplayState.loadToken;
   bagReplayState.data = null;
+  window.openDeliveryLogViewer?.reset();
   renderBagReplayImageMarkers();
   renderBagReplaySkippedBags([]);
   bagReplayState.currentTime = 0;
@@ -4865,6 +4889,7 @@ async function openSelectedLogBagReplay() {
     if (!response.ok) throw new Error(data.error || "bag 解析失败");
     if (token !== bagReplayState.loadToken) return;
     bagReplayState.data = data;
+    window.openDeliveryLogViewer?.loadReplay(data, entries);
     renderBagReplayImageMarkers();
     const duration = Math.max(0, Number(data.duration) || 0);
     if (bagReplayProgress) {
@@ -5372,6 +5397,7 @@ async function initMonitor() {
     const floor = e.target.value;
     if (mapEditorDirty && !window.confirm("当前地图有未保存修改，确定切换地图吗？")) { e.target.value = activeFloor || ""; return; }
     await loadFloorMap(floor);
+    if (floorSelect.value !== floor) return;
     saveFloorPreference(floor);
     appendLog(`切换楼层到 ${floor}`);
   });
@@ -7055,7 +7081,8 @@ async function refreshRobotDetail() {
     const status = payload.status || {};
     if (robotDetailName) robotDetailName.textContent = status.name || payload.robot_id;
     if (robotDetailSubtitle) robotDetailSubtitle.textContent = `${payload.robot_id} · ${status.robot_model || "未知机型"} · ${status.online ? "在线" : "离线"} · ${status.floor || "无地图"} · ${status.current_position || "unknown;"}`;
-    renderRobotDetail();
+    // Keep the user's parameter edits intact while background telemetry refreshes.
+    if (robotDetailActiveTab !== "params" || !document.getElementById("robot-detail-params-form")) renderRobotDetail();
     renderRobotQuickDock();
   } finally {
     robotDetailRefreshInFlight = false;
@@ -7155,6 +7182,7 @@ function initRobotDetailUi() {
       if (message) message.textContent = envelope.runtime.message;
       appendLog(`${robotId} 参数保存结果: ${envelope.runtime.state} ${JSON.stringify(payload.settings)}`);
     } catch (err) {
+      if (robotId !== selectedDetailRobotId || robotDetailPanel.hidden || robotDetailActiveTab !== "params") return;
       message = document.getElementById("robot-detail-param-message");
       if (message) message.textContent = `保存失败：${err.message || err}`;
       if (button) button.disabled = false;
@@ -7177,12 +7205,15 @@ function initOpenClawChat() {
   const sessionKey = "openDelivery_openclaw_session_v1";
   const historyKey = "openDelivery_openclaw_history_v1";
   const welcome = "你好，我可以查询机器人状态、地图、ROS 节点和日志，也能在确认后执行操作。";
-  let sessionId = localStorage.getItem(sessionKey) || sessionStorage.getItem(sessionKey);
+  let sessionId = "";
+  try { sessionId = localStorage.getItem(sessionKey) || sessionStorage.getItem(sessionKey); } catch { /* use an in-memory session */ }
   if (!sessionId) {
     sessionId = `opendelivery-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
-  localStorage.setItem(sessionKey, sessionId);
-  sessionStorage.removeItem(sessionKey);
+  try {
+    localStorage.setItem(sessionKey, sessionId);
+    sessionStorage.removeItem(sessionKey);
+  } catch { /* the chat remains available without browser storage */ }
   if (adminLink) adminLink.href = "https://linbo.lol/openclaw/";
   let history = [];
   try {
@@ -7198,6 +7229,7 @@ function initOpenClawChat() {
   const append = (role, text) => {
     const item = document.createElement("div");
     item.className = `openclaw-chat-message ${role}`;
+    if (role === "user") item.setAttribute("data-i18n-ignore", "");
     item.textContent = text;
     messages.appendChild(item);
     messages.scrollTop = messages.scrollHeight;
@@ -7219,7 +7251,7 @@ function initOpenClawChat() {
   close?.addEventListener("click", () => setOpen(false));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !panel.hidden) setOpen(false); });
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); form.requestSubmit(); }
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -7276,6 +7308,7 @@ function initOpenClawChat() {
         append("assistant", accepted);
         saveMessage("assistant", accepted);
         let lastJobUpdate = "";
+        let jobFinished = false;
         for (let attempt = 0; attempt < 240; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
           const job = await fetchJson(`${API_BASE_URL}/api/assistant/jobs/${encodeURIComponent(result.job_id)}`, { cache: "no-store" });
@@ -7290,8 +7323,13 @@ function initOpenClawChat() {
             append("assistant", update);
             saveMessage("assistant", update);
           }
-          if (job.status === "completed" || job.status === "failed") break;
+          if (job.status === "completed" || job.status === "failed") {
+            jobFinished = true;
+            if (job.status === "failed" && !update) throw new Error(job.error || "Task failed");
+            break;
+          }
         }
+        if (!jobFinished) throw new Error("Task status polling timed out; the task may still be running.");
         status.textContent = "";
         return;
       }

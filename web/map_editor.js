@@ -50,8 +50,8 @@
     const dirty=s.dirty.size>0;
     ui.floor.textContent=s.name?s.name+(dirty?" · 未保存":""):"未加载地图";
     const layerDirty=s.dirty.has("raster")||s.dirty.has("semantic"),pointDirty=s.dirty.has("points");
-    ui["layer-undo"].disabled=!s.undo.some((entry)=>entry.layer!=="points");ui["layer-discard"].disabled=!layerDirty;ui["layer-save"].disabled=!s.pgm||!layerDirty;
-    ui["point-undo"].disabled=!s.undo.some((entry)=>entry.layer==="points");ui["point-discard"].disabled=!pointDirty;ui["point-save"].disabled=!s.pgm||!pointDirty;
+    ui["layer-undo"].disabled=s.saving||!s.undo.some((entry)=>entry.layer!=="points");ui["layer-discard"].disabled=s.saving||!layerDirty;ui["layer-save"].disabled=s.saving||!s.pgm||!layerDirty;
+    ui["point-undo"].disabled=s.saving||!s.undo.some((entry)=>entry.layer==="points");ui["point-discard"].disabled=s.saving||!pointDirty;ui["point-save"].disabled=s.saving||!s.pgm||!pointDirty;
     ui["layer-section"].classList.toggle("has-unsaved",layerDirty);ui["point-section"].classList.toggle("has-unsaved",pointDirty);
   }
   function snapshot(layer) {
@@ -60,6 +60,14 @@
     if(s.undo.length>12)s.undo.shift(); sync();
   }
   function mark(layer){s.dirty.add(layer);sync();}
+  function setSaving(saving) {
+    s.saving=saving;
+    s.painting=false;s.panning=false;
+    root.querySelector(".standalone-map-editor__body").inert=saving;
+    ui["map-name"].disabled=saving;ui["load-map"].disabled=saving;
+    root.setAttribute("aria-busy",String(saving));
+    sync();
+  }
   function tools() {
     const choices=[["paint","画笔"],["erase","擦除"]];
     ui.tool.innerHTML=choices.map(([value,label])=>`<option value="${value}">${label}</option>`).join("");
@@ -124,8 +132,16 @@
   function resize(){const rect=$("canvas-wrap").getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=Math.max(1,Math.round(rect.width*dpr));canvas.height=Math.max(1,Math.round(rect.height*dpr));canvas.style.width=`${rect.width}px`;canvas.style.height=`${rect.height}px`;render();}
   function fit(){if(!s.pgm)return;const rect=canvas.getBoundingClientRect();s.scale=Math.min(rect.width/s.pgm.width,rect.height/s.pgm.height)*.94;s.panX=(rect.width-s.pgm.width*s.scale)/2;s.panY=(rect.height-s.pgm.height*s.scale)/2;render();}
   function pixel(event){const rect=canvas.getBoundingClientRect();return{x:(event.clientX-rect.left-s.panX)/s.scale,y:(event.clientY-rect.top-s.panY)/s.scale};}
-  function toWorld(p){return{x:s.meta.origin[0]+p.x*s.meta.resolution,y:s.meta.origin[1]+(s.pgm.height-p.y)*s.meta.resolution};}
-  function toPixel(point){return{x:(Number(point.x)-s.meta.origin[0])/s.meta.resolution,y:s.pgm.height-(Number(point.y)-s.meta.origin[1])/s.meta.resolution};}
+  function toWorld(p){
+    const yaw=Number(s.meta.origin[2]||0),c=Math.cos(yaw),n=Math.sin(yaw);
+    const x=p.x*s.meta.resolution,y=(s.pgm.height-p.y)*s.meta.resolution;
+    return{x:s.meta.origin[0]+c*x-n*y,y:s.meta.origin[1]+n*x+c*y};
+  }
+  function toPixel(point){
+    const yaw=Number(s.meta.origin[2]||0),c=Math.cos(yaw),n=Math.sin(yaw);
+    const x=Number(point.x)-s.meta.origin[0],y=Number(point.y)-s.meta.origin[1];
+    return{x:(c*x+n*y)/s.meta.resolution,y:s.pgm.height-(-n*x+c*y)/s.meta.resolution};
+  }
   function pointTypeLabel(type){return type==="elevator"||type==="elevator_inside"?"电梯内点":type==="elevator_waiting"?"电梯等待点":type==="standby"?"待机点":type==="relocalization"?"重定位点":"自定义点位";}
   function selectPoint(point){s.selectedPointId=point?.id||"";pointList();render();}
   function drawPoint(point) {
@@ -135,7 +151,7 @@
     ctx.save();ctx.translate(p.x,p.y);
     if(selected){ctx.strokeStyle="#facc15";ctx.lineWidth=3*unit;ctx.beginPath();ctx.arc(0,0,radius+4*unit,0,Math.PI*2);ctx.stroke();}
     ctx.fillStyle=pointColor;ctx.strokeStyle="#0f172a";ctx.lineWidth=2*unit;ctx.beginPath();ctx.arc(0,0,radius,0,Math.PI*2);ctx.fill();ctx.stroke();
-    ctx.rotate(-Number(point.yaw||0));
+    ctx.rotate(-(Number(point.yaw||0)-Number(s.meta.origin[2]||0)));
     const arrowScale=radius/(7*unit);ctx.scale(arrowScale,arrowScale);ctx.fillStyle="#0f172a";ctx.beginPath();ctx.moveTo(5*unit,0);ctx.lineTo(-3*unit,-3.5*unit);ctx.lineTo(-1*unit,0);ctx.lineTo(-3*unit,3.5*unit);ctx.closePath();ctx.fill();ctx.restore();
     const label=String(point.name||point.id),labelX=p.x+9*unit,labelBaseline=p.y-7*unit;
     ctx.save();ctx.font=`${11*unit}px "Fira Code", monospace`;const labelWidth=ctx.measureText(label).width+10*unit,labelTop=labelBaseline-12*unit;
@@ -203,8 +219,9 @@
     let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return"data:image/x-portable-graymap;base64,"+btoa(binary);
   }
   async function saveLayers() {
+    if(s.saving)return;
     const layers=["raster","semantic"].filter((layer)=>s.dirty.has(layer));if(!layers.length)return;
-    ui["layer-save"].disabled=true;message("正在保存图层…");
+    setSaving(true);message("正在保存图层…");
     try{
       for(const layer of layers){
         const body=layer==="raster"?{pgm_data:pgmUrl(s.raster)}:{png_data:s.semantic.toDataURL("image/png")};
@@ -213,18 +230,22 @@
         s.dirty.delete(layer);s.undo=s.undo.filter((entry)=>entry.layer!==layer);
       }
       sync();message("图层修改已保存");
-    }catch(error){message(`图层保存失败：${error.message}`,true);sync();}
+    }catch(error){message(`图层保存失败：${error.message}`,true);}
+    finally{setSaving(false);}
   }
   async function savePoints() {
+    if(s.saving)return;
     if(!s.dirty.has("points"))return;
-    ui["point-save"].disabled=true;message("正在保存点位…");
+    setSaving(true);message("正在保存点位…");
     try{
       const out=await json(`/api/maps/${encodeURIComponent(s.name)}/assets/points`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({points:s.points})});
       s.points=clonePoints(Array.isArray(out.points)?out.points:s.points);s.savedPoints=clonePoints(s.points);s.dirty.delete("points");s.undo=s.undo.filter((entry)=>entry.layer!=="points");
       pointList();sync();render();message("点位修改已保存");
-    }catch(error){message(`点位保存失败：${error.message}`,true);sync();}
+    }catch(error){message(`点位保存失败：${error.message}`,true);}
+    finally{setSaving(false);}
   }
   function undoScope(scope){
+    if(s.saving)return;
     let index=-1;for(let i=s.undo.length-1;i>=0;i-=1){const pointEntry=s.undo[i].layer==="points";if((scope==="points"&&pointEntry)||(scope==="layers"&&!pointEntry)){index=i;break;}}
     if(index<0)return;const [entry]=s.undo.splice(index,1),wasDirty=entry.dirty.includes(entry.layer);
     if(entry.layer==="points"){s.points=clonePoints(entry.value);if(wasDirty)s.dirty.add("points");else s.dirty.delete("points");pointList();}
@@ -243,12 +264,14 @@
     mapName=String(mapName||"").trim();
     if(!mapName){message("请输入地图名称",true);ui["map-name"].focus();return;}
     if(mapName.endsWith("_mapping")){message("建图中的临时地图不可编辑，请输入已保存地图名称",true);ui["map-name"].focus();return;}
-    if(s.dirty.size&&mapName!==s.name&&!confirm("当前地图有未保存修改，确定切换地图吗？"))return;
+    if(s.saving)return;
+    if(s.dirty.size&&!confirm("当前地图有未保存修改，确定切换地图吗？")){ui["map-name"].value=s.name;return;}
     ui.loading.hidden=false;ui.loading.textContent=`正在加载 ${mapName}…`;s.name=mapName;s.pgm=null;s.dirty.clear();s.undo.length=0;sync();const token=++s.loadToken;
     try{const[map,assets]=await Promise.all([json(`/api/maps/${encodeURIComponent(mapName)}`,{cache:"no-store"}),json(`/api/maps/${encodeURIComponent(mapName)}/assets`,{cache:"no-store"})]);if(token!==s.loadToken)return;if(!map.pgm||typeof map.yaml!=="string")throw new Error("地图数据格式不正确");
-      s.pgm=map.pgm;s.meta=parseYaml(map.yaml);s.raster=rasterFromPgm(map.pgm);s.semantic=await semanticCanvas(assets.semantic_png,map.pgm.width,map.pgm.height);s.points=clonePoints(Array.isArray(assets.points)?assets.points:[]);s.selectedPointId="";cancelPointPick(false);s.savedRaster=cloneCanvas(s.raster);s.savedSemantic=cloneCanvas(s.semantic);s.savedPoints=clonePoints(s.points);
+      const semantic=await semanticCanvas(assets.semantic_png,map.pgm.width,map.pgm.height);if(token!==s.loadToken)return;
+      s.pgm=map.pgm;s.meta=parseYaml(map.yaml);s.raster=rasterFromPgm(map.pgm);s.semantic=semantic;s.points=clonePoints(Array.isArray(assets.points)?assets.points:[]);s.selectedPointId="";cancelPointPick(false);s.savedRaster=cloneCanvas(s.raster);s.savedSemantic=cloneCanvas(s.semantic);s.savedPoints=clonePoints(s.points);
       semanticOptions(assets.semantic_legend?.labels||[]);resetToolState();pointList();ui.loading.hidden=true;requestAnimationFrame(()=>{resize();fit();});message("地图已加载；默认使用栅格障碍画笔");sync();
-    }catch(error){ui.loading.hidden=false;ui.loading.textContent=`加载失败：${error.message}`;message(`加载失败：${error.message}`,true);}
+    }catch(error){if(token!==s.loadToken)return;ui.loading.hidden=false;ui.loading.textContent=`加载失败：${error.message}`;message(`加载失败：${error.message}`,true);}
   }
   async function loadMapChoices(defaultName) {
     ui["map-name"].disabled=true;ui["load-map"].disabled=true;
@@ -261,12 +284,13 @@
     return ui["map-name"].value;
   }
   async function open(mapName) {
+    if(s.saving)return;
     root.hidden=false;document.body.classList.add("standalone-map-editor-open");
     const defaultName=String(mapName||"").trim();
     ui.loading.hidden=false;ui.loading.textContent="正在读取地图列表…";
     try{const selected=await loadMapChoices(defaultName);if(selected)await loadMap(selected);else message("没有可编辑的已保存地图",true);}catch(error){ui.loading.textContent=`地图列表加载失败：${error.message}`;message(`地图列表加载失败：${error.message}`,true);}
   }
-  function close(){if(s.dirty.size&&!confirm("存在未保存修改，确定关闭编辑器吗？"))return;root.hidden=true;document.body.classList.remove("standalone-map-editor-open");s.painting=false;s.panning=false;}
+  function close(){if(s.saving)return;if(s.dirty.size&&!confirm("存在未保存修改，确定关闭编辑器吗？"))return;s.dirty.clear();s.undo.length=0;root.hidden=true;document.body.classList.remove("standalone-map-editor-open");s.painting=false;s.panning=false;}
   canvas.addEventListener("pointerdown",(event)=>{if(!s.pgm)return;canvas.setPointerCapture(event.pointerId);if(event.shiftKey||event.button===1){s.panning=true;s.lastX=event.clientX;s.lastY=event.clientY;}else if(event.button===0){s.painting=true;edit(event,true);}});
   canvas.addEventListener("pointermove",(event)=>{if(s.pgm){const p=pixel(event),world=toWorld(p);ui.coordinates.textContent=`X ${world.x.toFixed(2)} · Y ${world.y.toFixed(2)} · 像素 ${Math.floor(p.x)}, ${Math.floor(p.y)}`;if(s.pointPickStep===1){s.pointPickCursor=world;render();}}if(s.panning){s.panX+=event.clientX-s.lastX;s.panY+=event.clientY-s.lastY;s.lastX=event.clientX;s.lastY=event.clientY;render();}else if(s.painting)edit(event,false);});
   const pointerUp=()=>{s.painting=false;s.panning=false;s.movingId="";s.moveSnapshotTaken=false;};canvas.addEventListener("pointerup",pointerUp);canvas.addEventListener("pointercancel",pointerUp);
@@ -286,6 +310,7 @@
   ui["layer-undo"].onclick=()=>undoScope("layers");ui["layer-discard"].onclick=discardLayers;ui["layer-save"].onclick=saveLayers;
   ui["point-undo"].onclick=()=>undoScope("points");ui["point-discard"].onclick=discardPoints;ui["point-save"].onclick=savePoints;
   document.addEventListener("keydown",(event)=>{if(root.hidden)return;if(event.key==="Escape"&&!ui["semantic-menu"].hidden){setSemanticMenu(false);ui["semantic-trigger"].focus();return;}if(event.key==="Escape"&&s.pointPickMode){cancelPointPick();return;}const typing=/INPUT|TEXTAREA|SELECT/.test(event.target?.tagName||"");if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"&&!typing){event.preventDefault();undoScope(s.activePanel==="points"?"points":"layers");}else if(event.key==="Escape")close();});
+  window.addEventListener("beforeunload",(event)=>{if(!s.dirty.size)return;event.preventDefault();event.returnValue="";});
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(resize).observe($("canvas-wrap"));
   } else {

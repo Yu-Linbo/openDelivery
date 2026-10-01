@@ -922,7 +922,7 @@ public:
       if (has_latest_robot_status_ &&
         heartbeat_now - last_robot_status_received_steady_ >= kRobotStatusStall)
       {
-        write_line("robot_status heartbeat stalled; restarting recorder process");
+        write_line("robot_status heartbeat stalled; restarting recorder process", "WARN");
         stop_current_bag("heartbeat_stalled");
         archive_text_log();
         return 3;
@@ -1277,7 +1277,7 @@ private:
           log_recovery("retention removed untagged backup bag: " + target);
         }
       } else if (log_fd_ >= 0) {
-        write_line("retention failed to remove untagged backup bag path=" + target);
+        write_line("retention failed to remove untagged backup bag path=" + target, "ERROR");
       } else {
         log_recovery("retention failed to remove untagged backup bag: " + target);
       }
@@ -1377,22 +1377,47 @@ private:
     }
   }
 
-  void write_line(const std::string & line) {
-    const std::string out = "[" + now_iso8601() + "] " + line + "\n";
+  void write_text(const std::string & line) {
+    const std::string out = line + "\n";
     if (log_fd_ >= 0) {
       ::write(log_fd_, out.data(), out.size());
     }
   }
 
-  void write_rosout(const rcl_interfaces::msg::Log & msg) {
+  void write_line(const std::string & line, const char * level = "INFO") {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
     std::ostringstream os;
-    os << "rosout"
-       << " level=" << static_cast<int>(msg.level)
-       << " name=" << msg.name
-       << " file=" << msg.file
-       << " line=" << msg.line
-       << " msg=" << msg.msg;
-    write_line(os.str());
+    os << "[" << level << "] [" << ns / 1000000000 << "." << std::setw(9) << std::setfill('0')
+       << ns % 1000000000 << "] [robot_log_recorder]: " << line;
+    write_text(os.str());
+  }
+
+  void write_rosout(const rcl_interfaces::msg::Log & msg) {
+    const char * level = "INFO";
+    switch (msg.level) {
+      case rcl_interfaces::msg::Log::DEBUG: level = "DEBUG"; break;
+      case rcl_interfaces::msg::Log::INFO: level = "INFO"; break;
+      case rcl_interfaces::msg::Log::WARN: level = "WARN"; break;
+      case rcl_interfaces::msg::Log::ERROR: level = "ERROR"; break;
+      case rcl_interfaces::msg::Log::FATAL: level = "FATAL"; break;
+      default: break;
+    }
+    std::ostringstream os;
+    // Use receipt wall time to align terminal logs with rosbag storage time.
+    // Keep ROS source time separately, including when use_sim_time is enabled.
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+    os << "[" << level << "] [" << ns / 1000000000 << "."
+       << std::setw(9) << std::setfill('0') << ns % 1000000000
+       << "] [" << msg.name << "]: " << msg.msg
+       << " [ros_time=" << msg.stamp.sec << "." << std::setw(9) << msg.stamp.nanosec << "]";
+    if (!msg.file.empty()) {
+      os << " [source=" << msg.file << ":" << msg.line;
+      if (!msg.function.empty()) os << " " << msg.function;
+      os << "]";
+    }
+    write_text(os.str());
   }
 
   std::vector<std::string> robot_topics() {

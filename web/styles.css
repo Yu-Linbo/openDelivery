@@ -192,6 +192,11 @@ body {
   border: 1px solid transparent;
 }
 
+.robot-presence-list li > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .robot-presence-list li:hover {
   border-color: rgba(51, 65, 85, 0.8);
 }
@@ -560,6 +565,7 @@ body {
 
 .content {
   grid-area: content;
+  min-width: 0;
   padding: 24px;
   width: 100%;
   max-width: 1400px;
@@ -948,6 +954,7 @@ button {
 
 .log-bag-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
@@ -958,6 +965,9 @@ button {
 }
 
 .log-bag-toolbar .status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
   margin-left: 0;
 }
 
@@ -989,6 +999,7 @@ button {
 
 .log-bag-panel,
 .log-bag-download {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
@@ -1006,6 +1017,7 @@ button {
 
 .log-bag-panel-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -1211,7 +1223,7 @@ button {
 
 .ros-nodes-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -1230,6 +1242,7 @@ button {
 }
 
 .ros-robot-group {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
@@ -1251,6 +1264,7 @@ button {
 
 .ros-node-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
@@ -1807,6 +1821,12 @@ button {
   }
 }
 
+@media (min-width: 961px) and (max-width: 1280px) {
+  .log-bag-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: auto; }
+  .log-bag-download { grid-column: 1 / -1; position: static; }
+  .log-bag-list, .log-bag-file-list { max-height: 60vh; }
+}
+
 @media (max-width: 960px) {
   .ros-layout {
     grid-template-columns: 1fr;
@@ -1818,7 +1838,7 @@ button {
 
 @media (max-width: 960px) {
   .log-bag-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     height: auto;
   }
 
@@ -1827,7 +1847,7 @@ button {
   }
 
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "sidebar"
       "content";
@@ -1847,6 +1867,16 @@ button {
     border-top: 1px solid var(--line);
     position: static;
     height: auto;
+  }
+
+  .sidebar-header {
+    padding-top: 54px;
+  }
+
+  .sidebar nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
   }
 
   .content {
@@ -1869,6 +1899,19 @@ button {
 
   .robot-presence-trigger__sub {
     max-width: 140px;
+  }
+
+  .robot-presence-list li {
+    flex-wrap: wrap;
+  }
+
+  .robot-presence-row__tail {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
+  .monitor-aside, .monitor-teleop-rail {
+    order: 0;
   }
 }
 
@@ -1896,9 +1939,9 @@ button {
   background: rgba(15, 23, 42, 0.96);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
   cursor: pointer;
-}
   pointer-events: auto;
   touch-action: manipulation;
+}
 
 .robot-quick-chip:hover,
 .robot-quick-chip.active {
@@ -2223,8 +2266,7 @@ button {
 @media (max-width: 960px) {
   .monitor-layout { grid-template-columns: 1fr; }
   .monitor-main, .monitor-aside, .monitor-teleop-rail { grid-column: 1; grid-row: auto; position: static; }
-  .monitor-aside { order: -2; }
-  .monitor-teleop-rail { order: -1; }
+  .monitor-aside, .monitor-teleop-rail { order: 0; }
   .map-editor-float { top: 10px; right: 10px; width: calc(100vw - 20px); min-width: 0; max-height: calc(100vh - 20px); resize: none; }
 }
 @media (max-width: 520px) {
@@ -3140,4 +3182,39 @@ body.bag-replay-open {
   .bag-replay-offline-badge {
     display: none;
   }
+}
+
+/* Logs are part of the bag player and share its playback clock. */
+.bag-replay-body { grid-template-rows: minmax(280px, 1fr) auto; overflow: auto; }
+.bag-replay-logs { grid-column: 1 / -1; min-width: 0; min-height: 0; background: var(--panel); border-top: 1px solid var(--line); }
+.lv-summary { padding: 8px 12px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.lv-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.lv-content { display: flex; flex-direction: column; height: min(300px, 38vh); min-height: 200px; }
+.lv-ros-time { color: var(--muted); white-space: nowrap; }
+.lv-heading, .lv-filters, .lv-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
+.lv-heading h3 { margin: 0 auto 0 0; font-size: 14px; }.lv-heading span { font-size: 12px; color: var(--muted); }
+.lv-filters > input, .lv-filters select { min-width: 0; padding: 6px 8px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
+#lv-search { flex: 1; width: 180px; }.lv-filters select { max-width: 180px; }
+.lv-heading label, .lv-filters label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; }
+.lv-levels { display: flex; flex-wrap: wrap; gap: 8px; }.bag-replay-logs input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
+.lv-note { margin: 0; padding: 0 12px 6px; color: var(--muted); font-size: 11px; }.lv-note:empty { display: none; }
+.lv-table-wrap { position: relative; min-height: 60px; flex: 1; overflow: auto; border-block: 1px solid var(--line); }
+.lv-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 580px; font: 12px/1.5 Consolas, monospace; }
+.lv-table th { position: sticky; top: 0; z-index: 1; background: var(--panel-2); text-align: left; color: var(--muted); }
+.lv-table td, .lv-table th { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.lv-table th:nth-child(1) { width: 190px; }.lv-table th:nth-child(2) { width: 70px; }.lv-table th:nth-child(3) { width: 165px; }
+.lv-table td { overflow-wrap: anywhere; white-space: pre-wrap; }.lv-table td button { border: 0; background: transparent; color: #7dd3fc; padding: 0; font: inherit; text-decoration: underline; }
+.lv-current { background: rgba(34,197,94,.12); box-shadow: inset 3px 0 var(--accent); }
+.lv-table tr[data-level="ERROR"] td:nth-child(2), .lv-levels [data-level="ERROR"] { color: #f87171; }
+.lv-table tr[data-level="FATAL"] td:nth-child(2), .lv-levels [data-level="FATAL"] { color: #c084fc; }
+.lv-table tr[data-level="WARN"] td:nth-child(2), .lv-levels [data-level="WARN"] { color: #fbbf24; }
+.lv-table mark { color: #111827; background: #fde68a; border-radius: 2px; }
+.lv-empty { color: var(--muted); text-align: center; padding: 12px; font-size: 12px; }
+.lv-footer { justify-content: space-between; color: var(--muted); font-size: 11px; }.lv-footer > div { display: flex; gap: 8px; }.lv-footer button { padding: 4px 8px; }
+@media (max-width: 820px) { .bag-replay-body { grid-template-rows: 380px 180px auto; }.bag-replay-viewer { overflow: auto; }.bag-replay-logs { grid-column: 1; }.lv-filters { gap: 6px; }.lv-heading { gap: 6px; }.lv-table th:nth-child(3) { width: 130px; } }
+/* Keep a short viewport from letting the map paint over the log panel. */
+@media (min-width: 821px) {
+  .bag-replay-body { grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; }
+  .bag-replay-viewer { grid-template-rows: auto minmax(100px, 1fr) auto; overflow: auto; }
+  .bag-replay-canvas-wrap { min-height: 100px; }
 }

@@ -127,7 +127,7 @@ class WebI18nCoverageTest(unittest.TestCase):
             self.assert_translates_fully(value, f"index.html {kind}")
 
     def test_dynamic_javascript_ui_strings_translate(self):
-        for filename in ("app.js", "map_editor.js"):
+        for filename in ("app.js", "map_editor.js", "log_viewer.js"):
             source = (WEB / filename).read_text(encoding="utf-8")
             for line_number, line in enumerate(source.splitlines(), 1):
                 if not CHINESE_RE.search(line) or line.lstrip().startswith("//"):

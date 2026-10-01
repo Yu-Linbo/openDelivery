@@ -88,6 +88,7 @@ These endpoints are used by `web/app.js`.
 - `POST /api/maps/{floor}/assets/raster` / `semantic`
   - Body: PGM `pgm_data` or PNG `png_data` base64 data URL.
   - Purpose: atomically save map-editor raster/semantic layers; image validity and dimensions are checked. Existing file permissions are preserved.
+  - Raster payloads must contain a complete grayscale PGM with the existing map's dimensions; semantic payloads must contain a PNG with the same dimensions. Other image formats and dimension changes are rejected before writing.
 
 - `GET /api/robot/{robot_id}/detail`
   - Purpose: read-only robot detail payload: status, robot-scoped ROS nodes, process CPU/memory and log summary.
@@ -221,3 +222,10 @@ These endpoints are not primary Web user workflows. Keep them backend-only and u
 
 - `POST /api/ros/threads/control`
   - Backend ROS bridge thread control.
+
+### bag 回放关联日志
+
+- `GET /api/log_bag/text?path={URL编码的录制日志相对路径}`：返回 `path`、`text`、`bytes`、`truncated`、`limit_bytes`。只读 `log_bag` 内 `.log` / `.txt` 文件；拒绝目录穿越和越界符号链接。大文件仅返回末尾 2 MiB 中的完整行。路径非法返回 400，文件不存在返回 404，读取失败返回 500。
+- `POST /api/log_bag/replay` 的 `timeline.logs` 包含 bag 中可用的 `rcl_interfaces/msg/Log` 消息（`t`、`epoch`、`level`、`node`、`message`）。多 bag 合并时添加 `segment_index`、`bag`，`t` 使用合并回放时间轴。
+
+播放器优先使用 bag 自带日志；无此消息时自动读取索引中的关联文本日志，并根据对应 segment 的 `source_start_time_ns` 进行同步。没有日志或读取失败不会阻断地图、相机及状态回放。详见 [日志规范](../docs/logging.md)。

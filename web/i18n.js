@@ -11,6 +11,47 @@
   // newly inserted DOM fragments localized without coupling every call site to
   // the language picker. Longer phrases are applied first.
   const ENGLISH_PHRASES = {
+    "没有匹配日志，请调整筛选条件": "No matching logs. Adjust the filters.",
+    "日志文件或后端日志接口不存在，请检查后端是否已更新": "Log file or endpoint was not found. Check whether the backend is up to date.",
+    "关联日志读取失败，bag 回放仍可继续": "Failed to read associated logs. Bag playback can continue.",
+    "关联日志存在，但当前 bag 时间范围内没有日志记录": "Associated logs exist, but there are no records within this bag's time range.",
+    "关联日志尚未加载": "Associated logs have not loaded yet",
+    "日志过多，按": "Too many logs; sampled every",
+    "条间隔采样": "messages",
+    "选择 bag 后播放录制画面，同步查看对应文本日志；支持下载与离线回放": "Play recorded bag frames alongside synchronized logs; download and replay offline.",
+    "回放日志": "Replay logs",
+    "ROS 时间 / 播放进度": "ROS time / Playback progress",
+    "无 ROS 时间": "No ROS timestamp",
+    "无播放进度": "No playback time",
+    "播放进度": "Playback progress",
+    "跟随播放时间": "Follow playback time",
+    "此 bag 暂无关联日志": "No associated logs for this bag",
+    "随 bag 加载对应日志…": "Loading associated bag logs…",
+    "跳转到此日志时间": "Seek to this log time",
+    "关联日志较大，仅加载末尾 2 MiB": "Associated log is large; loaded only its final 2 MiB",
+    "部分关联日志无法读取，bag 回放仍可继续": "Some associated logs could not be read; bag playback can continue",
+    "无时间信息的原文保留在列表末尾": "Raw text without timestamps is preserved at the end",
+    "日志随播放进度高亮，点击日志时间可跳转": "Logs follow playback. Click a log timestamp to seek.",
+    " 行": " rows",
+    "第 ": "Page ",
+    "搜索消息、节点或时间…（/）": "Search messages, nodes or time… (/)",
+    "搜索日志": "Search logs",
+    "正则": "Regex",
+    "日志节点筛选": "Log node filter",
+    "全部节点": "All nodes",
+    "原文": "Raw",
+    "级别": "Level",
+    "消息": "Message",
+    "行": "Line",
+    "上一页": "Previous",
+    "下一页": "Next",
+    "正则表达式无效，请修改搜索条件": "Invalid regular expression. Update the search.",
+    "条错误 / 致命": "errors / fatal",
+    "无时间信息": "No timestamps",
+    "第": "Page",
+    "页 · 每页": "· rows per page",
+    "页": "page",
+    "发现": "Found",
     "暂无机器人数据；请确认 ROS 桥与": "No robot data. Check that the ROS bridge and",
     "已发布。仍可直接在下方填写新 ID 做仿真上线。": "is publishing. You can still enter a new ID below to start a simulation.",
     "填写命名空间 ID（与 Gazebo spawn 一致，如": "Enter the namespace ID used by Gazebo spawn (for example,",
@@ -857,6 +898,7 @@
   window.confirm = (message) => nativeConfirm(translate(message));
   wrapCanvasText("fillText");
   wrapCanvasText("strokeText");
+  wrapCanvasText("measureText");
 
   window.OpenDeliveryI18n = {
     get locale() { return locale; },

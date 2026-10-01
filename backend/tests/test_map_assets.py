@@ -114,6 +114,24 @@ class MapAssetsTest(unittest.TestCase):
         self.assertEqual((result["width"], result["height"]), (2, 2))
         self.assertEqual((self.map_dir / self.floor / "floor1.pgm").read_bytes(), raw)
 
+    def test_raster_rejects_other_formats_truncation_and_size_changes(self):
+        path = self.map_dir / self.floor / "floor1.pgm"
+        before = path.read_bytes()
+        png = base64.b64decode(self._png_url().split(",", 1)[1])
+        for raw in (png, b"P5\n2 2\n255\n\x00", b"P5\n1 1\n255\n\x00"):
+            url = "data:image/x-portable-graymap;base64," + base64.b64encode(raw).decode()
+            with self.subTest(raw=raw[:20]), self.assertRaises(ValueError):
+                map_assets.save_raster(self.map_dir, self.floor, url)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_semantic_rejects_a_different_image_format(self):
+        buf = BytesIO()
+        Image.new("RGB", (2, 2)).save(buf, format="JPEG")
+        url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        with self.assertRaisesRegex(ValueError, "invalid semantic PNG"):
+            map_assets.save_semantic(self.map_dir, self.floor, url)
+        self.assertFalse((self.map_dir / self.floor / "floor1_semantic.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

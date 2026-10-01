@@ -39,11 +39,15 @@ import ros_node_store
 import ros_task_store
 import openclaw_chat
 import robot_settings
+import log_files
+import logging
+import diagnostic_logging
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+LOGGER = logging.getLogger("opendelivery.server")
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MAP_DIR = ROOT_DIR / "map"
 LOG_BAG_DIR = ROOT_DIR / "log_bag"
@@ -60,6 +64,8 @@ def _configure_ros_transport(root_dir: Path, env=None):
     """Make direct backend starts use the same compatible Fast DDS profile."""
     target = os.environ if env is None else env
     target.setdefault("ROS_LOCALHOST_ONLY", "1")
+    target.setdefault("RCUTILS_CONSOLE_OUTPUT_FORMAT", "[{severity}] [{time}] [{name}]: {message}")
+    target.setdefault("RCUTILS_COLORIZED_OUTPUT", "0")
     repo_profile = str(Path(root_dir) / "backend" / "fastdds_udp_only.xml")
     target.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE", repo_profile)
     # A long-running start_web_stack.sh may still carry the repository's old
@@ -538,9 +544,9 @@ class RosNodeManager:
             try:
                 log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
                 log_fp.write(
-                    f"\n--- managed start {time.strftime('%Y-%m-%d %H:%M:%S')} node_id={node_id!r} ---\n"
+                    f"[INFO] [{time.time():.9f}] [node_manager]: managed start node_id={node_id!r}\n"
                 )
-                log_fp.write(full_cmd + "\n")
+                log_fp.write(f"[DEBUG] [{time.time():.9f}] [node_manager]: command={full_cmd!r}\n")
                 log_fp.flush()
             except OSError:
                 if log_fp:
@@ -551,15 +557,9 @@ class RosNodeManager:
                 log_fp = None
                 log_path = None
         if log_path:
-            print(
-                f"[RosNodeManager] starting managed node id={node_id!r} log={log_path}",
-                flush=True,
-            )
+            LOGGER.info("starting managed node id=%r log=%s", node_id, log_path)
         else:
-            print(
-                f"[RosNodeManager] starting managed node id={node_id!r} (no log file)",
-                flush=True,
-            )
+            LOGGER.warning("starting managed node id=%r without a log file", node_id)
         try:
             proc = subprocess.Popen(
                 ["bash", "-lc", full_cmd],
@@ -890,7 +890,7 @@ class RobotPoseProvider:
             return
 
         if raw != "ros2_tf":
-            print(f"[pose] unknown ROBOT_POSE_MODE={raw!r}, using empty robots (no fake data)")
+            LOGGER.warning("unknown ROBOT_POSE_MODE=%r, using empty robots", raw)
             self._mode = "empty"
             self._pose = self._empty_snapshot("empty")
             return
@@ -1008,13 +1008,13 @@ class RobotPoseProvider:
         try:
             self._start_ros_bridge_once()
             self._clear_error()
-            print("[pose] ROS2 TF bridge started")
+            LOGGER.info("ROS2 TF bridge started")
         except Exception as exc:  # noqa: BLE001
             msg = (
                 f"ROS2 TF unavailable ({exc}). "
                 "Install/sourced ROS2 + rclpy/tf2, or set ROBOT_POSE_MODE=mock for local demo."
             )
-            print(f"[pose] {msg}")
+            LOGGER.warning("%s", msg)
             self._set_error(msg)
             with self._lock:
                 self._pose = self._empty_snapshot("ros2_unavailable")
@@ -1230,11 +1230,7 @@ def _run_startup_heartbeat_recovery_check(rid: str, terminate_fn=None) -> bool:
     if not robot_process_running:
         return False
 
-    print(
-        f"[dds-recovery] {rid} stack is running but heartbeat is missing; "
-        "restarting supervised backend to rebuild the DDS participant",
-        flush=True,
-    )
+    LOGGER.warning("%s stack is running but heartbeat is missing; restarting supervised backend to rebuild the DDS participant", rid)
     if terminate_fn is None:
         terminate_fn = lambda: os.kill(os.getpid(), signal.SIGTERM)
     terminate_fn()
@@ -3161,14 +3157,14 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                 out = rma.set_teleop_velocity(
                     str(data.get("robot_id") or ""),
-                    float(data.get("linear", 0)),
-                    float(data.get("angular", 0)),
+                    data.get("linear", 0),
+                    data.get("angular", 0),
                     active=bool(data.get("active")),
                     confirmed=bool(data.get("confirmed")),
                     session_id=str(data.get("session_id") or ""),
                     sequence=int(data.get("sequence", 0)),
                 )
-            except ValueError as err:
+            except (ValueError, TypeError) as err:
                 self._send_json({"error": str(err)}, 400)
                 return
             except Exception as err:  # noqa: BLE001
@@ -3186,9 +3182,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                 out = rma.publish_cmd_vel_timed(
                     str(data.get("robot_id") or ""),
-                    float(data.get("linear", 0)),
-                    float(data.get("angular", 0)),
-                    float(data.get("seconds", 1)),
+                    data.get("linear", 0),
+                    data.get("angular", 0),
+                    data.get("seconds", 1),
                     confirmed=bool(data.get("confirmed")),
                 )
             except ValueError as err:
@@ -3237,9 +3233,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 out = rma.record_waypoint(
                     str(data.get("robot_id") or ""),
                     str(data.get("name") or ""),
-                    float(data.get("x")),
-                    float(data.get("y")),
-                    float(data.get("yaw", 0)),
+                    data.get("x"),
+                    data.get("y"),
+                    data.get("yaw", 0),
                 )
             except ValueError as err:
                 self._send_json({"error": str(err)}, 400)
@@ -3415,6 +3411,18 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/api/log_bag/text":
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                result = log_files.read_log(ROOT_DIR, (q.get("path") or [""])[0])
+                self._send_json(result)
+            except FileNotFoundError as err:
+                self._send_json({"error": str(err)}, 404)
+            except ValueError as err:
+                self._send_json({"error": str(err)}, 400)
+            except OSError:
+                self._send_json({"error": "cannot read recording log"}, 500)
+            return
         if path == "/api/robot/settings":
             q = parse_qs(urlparse(self.path).query)
             robot_id = (q.get("robot_id") or [""])[0].strip()
@@ -3778,6 +3786,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    diagnostic_logging.configure(_BACKEND_DIR / "logs")
     host = os.environ.get("MAP_API_HOST", "0.0.0.0")
     port = int(os.environ.get("MAP_API_PORT", "8001"))
     server = ThreadingHTTPServer((host, port), ApiHandler)
@@ -3785,7 +3794,7 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _shutdown_signal)
     signal.signal(signal.SIGINT, _shutdown_signal)
-    print(f"map api listening on http://{host}:{port}")
+    LOGGER.info("map api listening on http://%s:%s", host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -112,6 +112,18 @@ def _skip_float64(reader: _CdrReader, count: int) -> None:
         reader.float64()
 
 
+def _decode_log(payload: bytes) -> Dict[str, Any]:
+    reader = _CdrReader(payload)
+    epoch = reader.int32() + reader.uint32() / 1_000_000_000.0
+    severity = reader.uint8()
+    node, message, file, function = reader.string(), reader.string(), reader.string(), reader.string()
+    line = reader.uint32()
+    level = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}.get(severity, "RAW")
+    if file:
+        message += f" [source={file}:{line}" + (f" {function}" if function else "") + "]"
+    return {"epoch": epoch, "level": level, "node": node, "message": message}
+
+
 def _decode_odometry(payload: bytes) -> Dict[str, Any]:
     reader = _CdrReader(payload)
     head = _header(reader)
@@ -547,6 +559,7 @@ def _place_scan_at_map_pose(
 
 
 _TYPE_CAPS = {
+    "rcl_interfaces/msg/Log": 12000,
     "nav_msgs/msg/Odometry": 5000,
     "geometry_msgs/msg/PoseStamped": 5000,
     "geometry_msgs/msg/PoseWithCovarianceStamped": 5000,
@@ -700,6 +713,8 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
                         continue
                     cap = _TYPE_CAPS[type_name]
                     stride = max(1, int(math.ceil(int(topic_count) / cap)))
+                    if type_name == "rcl_interfaces/msg/Log" and stride > 1:
+                        warnings.append(f"{name}: 日志过多，按 {stride} 条间隔采样")
                     query = (
                         "SELECT timestamp, data FROM messages WHERE topic_id=? "
                         "AND ((id - ?) % ?)=0 ORDER BY timestamp"
@@ -783,6 +798,7 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
     statuses: List[Dict[str, Any]] = []
     tasks: List[Dict[str, Any]] = []
     twists: List[Dict[str, Any]] = []
+    logs: List[Dict[str, Any]] = []
     tf_graph: Dict[Tuple[str, str], Tuple[float, float, float]] = {}
 
     # Static transforms are valid for the whole bag. Seed them first so a scan
@@ -803,7 +819,11 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
 
     for timestamp, type_name, topic_name, payload in events:
         try:
-            if type_name == "nav_msgs/msg/Odometry":
+            if type_name == "rcl_interfaces/msg/Log":
+                decoded = _decode_log(payload)
+                decoded["t"] = relative_time(timestamp)
+                logs.append(decoded)
+            elif type_name == "nav_msgs/msg/Odometry":
                 decoded = _decode_odometry(payload)
                 pose = _round_pose(decoded["pose"])
                 pose.update(
@@ -998,6 +1018,7 @@ def extract_replay(path: Path, robot_name: str = "") -> Dict[str, Any]:
             "twists": twists,
             "maps": map_changes,
             "images": images,
+            "logs": logs,
         },
         "warnings": warnings,
         "offline": True,
@@ -1013,7 +1034,7 @@ def merge_replays(replays: List[Dict[str, Any]]) -> Dict[str, Any]:
         enumerate(replays),
         key=lambda item: (int(item[1].get("start_time_ns") or 0), item[0]),
     )
-    timeline_names = ("poses", "scans", "paths", "statuses", "tasks", "twists", "images", "maps")
+    timeline_names = ("poses", "scans", "paths", "statuses", "tasks", "twists", "images", "maps", "logs")
     merged_timeline: Dict[str, List[Dict[str, Any]]] = {name: [] for name in timeline_names}
     topic_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
     segments: List[Dict[str, Any]] = []

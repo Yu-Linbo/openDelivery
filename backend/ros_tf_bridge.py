@@ -48,6 +48,7 @@ Lost TF behavior:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -1595,7 +1596,7 @@ def start_ros_tf_thread(
         try:
             run_ros_tf_bridge(publish_fn, stop_event=stop_event)
         except Exception as ex:  # noqa: BLE001
-            print(f"[ros_tf_bridge] fatal: {ex}")
+            logging.getLogger("opendelivery.ros_tf_bridge").critical("TF bridge stopped: %s", ex, exc_info=True)
 
     t = threading.Thread(target=_target, name="ros_tf_bridge", daemon=True)
     t.start()
