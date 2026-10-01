@@ -69,6 +69,7 @@ class RetryHarness:
         self._goal_watchdog_phase = ""
         self._goal_handle = FakeGoalHandle()
         self._dispatch_id = 9
+        self._watchdog_clock = object()
         self.published = []
         self.dispatched = []
         self.finished = []
@@ -77,8 +78,9 @@ class RetryHarness:
     def _publish_status(self):
         self.published.append((self._status, self._message))
 
-    def create_timer(self, delay, callback):
+    def create_timer(self, delay, callback, clock=None):
         assert delay == 1.0
+        assert clock is self._watchdog_clock
         return FakeTimer(callback)
 
     def destroy_timer(self, timer):
@@ -128,6 +130,10 @@ class WatchdogHarness(RetryHarness):
         self._goal_activity_at = time.monotonic() - elapsed
         self._nav2_goal_response_timeout_sec = 10.0
         self._nav2_feedback_timeout_sec = 20.0
+        self._nav2_progress_timeout_sec = 60.0
+        self._nav2_goal_timeout_sec = 600.0
+        self._goal_started_at = time.monotonic()
+        self._goal_progress_at = time.monotonic()
         self._goal_watchdog_timer = FakeTimer(lambda: None)
         self.retries = []
 

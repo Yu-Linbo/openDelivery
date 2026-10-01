@@ -180,6 +180,9 @@ def _launch_setup(context, *_args, **_kwargs):
                     executable="navigation_task_node",
                     name="task_executor",
                     output="screen",
+                    # Foxy's Python TransformListener subscribes to relative
+                    # names; localization publishes the shared global TF graph.
+                    remappings=[("tf", "/tf"), ("tf_static", "/tf_static")],
                     parameters=[
                         {
                             "robot_name": robot_name,

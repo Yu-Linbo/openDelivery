@@ -28,7 +28,8 @@
   → /<robot>/navigation/task_status → task_manager → /<robot>/task_status
 ```
 
-`/<robot>/navigate_to_pose` 作为兼容 action 保留，正常 Web 任务链路不直接使用。
+Nav2、任务执行器和 Web 直接目标接口统一使用 `/<robot>/navigation/navigate_to_pose`。
+旧的根命名空间 `/<robot>/navigate_to_pose` 不再是本启动文件的目标接口。
 启动或切图时 Nav2 lifecycle 激活可能晚于机器人状态更新。执行器通过参数
 `action_server_wait_sec` 等待 action server，默认 15 秒；超时状态会包含实际等待的
 action 名称。
@@ -37,3 +38,42 @@ ROS 2 Foxy 的 BT action 偶发在 controller 已接收路径后以 `send_goal f
 `NavigateToPose`。执行器仅对 `STATUS_ABORTED` 使用有上限的延迟重试，默认重试 2 次、
 间隔 1 秒；Pause、Terminate 或新任务会取消等待中的重试。其他终态仍立即如实上报，避免
 真正不可达的目标被无限重试。
+
+
+## 到达判定与停滞处理
+
+规划器不再用距离目标 0.5 m 内的替代终点：`GridBased.tolerance=0.0`。
+DWB 和 Nav2 到达窗口统一为 0.10 m，朝向窗口为 0.15 rad；Nav2 在最终旋转期间
+继续检查位置，避免进入窗口后漂出仍报告成功。末端进展检测半径缩小到 0.05 m，
+朝向评分点偏移缩小到 0.05 m，软膨胀成本权重从 0.02 调到 0.005，
+避免靠墙合法目标的接近收益被软障碍惩罚压过；硬障碍拒绝及 0.28 m 碰撞半径保持原配置。
+任务执行器在 Nav2 成功后，
+通过 `map → <robot>/base_footprint` 的新鲜 TF 独立核对原始目标的位置和朝向。
+TF 超过 1 s、缺失或误差超限时，最多等待 2 s 让定位更新，随后按原有有界策略重试，
+仍不满足则报告 Failed；巡逻/返回任务只有核对通过才推进到下一个点。
+
+执行器除了响应/反馈超时，还监控实际距离缩短以及目标附近的朝向调整：
+
+| ROS 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `nav2_progress_timeout_sec` | 60 s | 收到反馈但距离/最终朝向长期无改善，取消并有界重试 |
+| `nav2_goal_timeout_sec` | 600 s | 每次 goal 的最长执行时间，防止反复重规划无限运行 |
+| `arrival_xy_tolerance` | 0.10 m | 对原始目标的位置复核容差 |
+| `arrival_yaw_tolerance` | 0.15 rad | 对原始目标的朝向复核容差 |
+| `arrival_tf_max_age_sec` | 1 s | 可接受的定位 TF 最大年龄 |
+| `arrival_verification_timeout_sec` | 2 s | Nav2 成功后的定位复核等待时间 |
+
+这些执行器参数在启动时读取；修改后需重启导航栈。超时计时及重试使用单调时钟，
+不依赖仿真 `/clock` 是否还在推进。目标落在障碍物内时应明确失败，不能把附近的点当成到达。
+
+回归检查（先 source ROS 及工作区）：
+
+```bash
+python3 -m pytest -q src/navigation/navigation_tasks/test
+python3 src/navigation/navigation_tasks/test/nav2_closed_loop_check.py
+```
+
+第二个是显式运行的 Nav2 软件闭环检查，使用隔离的 ROS domain 93、合成地图、
+激光、TF、里程计和差速运动模型，检查直行、原地转向、绕障及障碍内目标失败。
+它不会启动真实机器人；结果及日志保存在 `/tmp/od-navigation-check`。
+真实机器人仍需验证定位精度、底盘制动及狭窄通道表现。

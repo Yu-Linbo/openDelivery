@@ -1,4 +1,5 @@
 import copy
+import math
 import threading
 import time
 
@@ -10,7 +11,10 @@ from nav_msgs.msg import Path
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
 
 
 TERMINAL = {TaskStatus.STATUS_FINISHED, TaskStatus.STATUS_FAILED, TaskStatus.STATUS_TERMINATED}
@@ -33,8 +37,25 @@ class NavigationTaskNode(Node):
         self.declare_parameter("nav2_goal_retry_delay_sec", 1.0)
         self.declare_parameter("nav2_goal_response_timeout_sec", 10.0)
         self.declare_parameter("nav2_feedback_timeout_sec", 20.0)
+        self.declare_parameter("nav2_progress_timeout_sec", 60.0)
+        self.declare_parameter("nav2_goal_timeout_sec", 600.0)
+        self.declare_parameter("arrival_xy_tolerance", 0.10)
+        self.declare_parameter("arrival_yaw_tolerance", 0.15)
+        self.declare_parameter("arrival_tf_max_age_sec", 1.0)
+        self.declare_parameter("arrival_verification_timeout_sec", 2.0)
         robot = str(self.get_parameter("robot_name").value).strip().strip("/") or "robot2"
         self._map_frame = str(self.get_parameter("map_frame").value).strip() or "map"
+        self._base_frame = f"{robot}/base_footprint"
+        for name in ("nav2_progress_timeout_sec", "nav2_goal_timeout_sec",
+                     "arrival_xy_tolerance", "arrival_yaw_tolerance",
+                     "arrival_tf_max_age_sec", "arrival_verification_timeout_sec"):
+            value = float(self.get_parameter(name).value)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+            setattr(self, "_" + name, value)
+        self._watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         self._action_server_wait_sec = max(
             0.1, float(self.get_parameter("action_server_wait_sec").value)
         )
@@ -56,8 +77,7 @@ class NavigationTaskNode(Node):
         self._status_pub = self.create_publisher(TaskStatus, "task_status", qos)
         self.create_subscription(TaskInfo, "task_info", self._on_task, 10)
         self.create_subscription(TaskCommand, "task_command", self._on_command, 10)
-        # Normal task traffic stays inside /<robot>/navigation.  The public
-        # /<robot>/navigate_to_pose action is retained only as a compatibility API.
+        # Task traffic and the Web goal sender use the same namespaced action.
         self._navigate = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._follow = ActionClient(self, FollowPath, "follow_path")
         self._navigate_action_name = f"/{robot}/navigation/navigate_to_pose"
@@ -73,6 +93,11 @@ class NavigationTaskNode(Node):
         self._goal_watchdog_timer = None
         self._goal_watchdog_phase = ""
         self._goal_activity_at = 0.0
+        self._goal_started_at = 0.0
+        self._goal_progress_at = 0.0
+        self._best_remaining = math.inf
+        self._best_yaw_error = math.inf
+        self._active_goal_pose = None
         self._dispatch_id = 0
         self._generation = 0
         self._publish_status()
@@ -111,7 +136,7 @@ class NavigationTaskNode(Node):
                 self._publish_status()
                 return
             if self._task and self._status not in TERMINAL and msg.task_id == self._task.task_id:
-                self.get_logger().warning("duplicate active task ignored: %s", msg.task_id)
+                self.get_logger().warning(f"duplicate active task ignored: {msg.task_id}")
                 return
             self._generation += 1
             self._cancel_goal()
@@ -130,7 +155,7 @@ class NavigationTaskNode(Node):
         command = str(msg.command).strip().lower()
         with self._lock:
             if not self._task or str(msg.task_id).strip() != self._task.task_id:
-                self.get_logger().warning("command ignored for non-current task: %s", msg.task_id)
+                self.get_logger().warning(f"command ignored for non-current task: {msg.task_id}")
                 return
             if command == TaskCommand.COMMAND_PAUSE.lower():
                 if self._status in TERMINAL or self._status == TaskStatus.STATUS_PAUSED:
@@ -159,7 +184,7 @@ class NavigationTaskNode(Node):
                 self._message = "task resumed"
                 self._publish_status()
             else:
-                self.get_logger().warning("unknown task command: %s", msg.command)
+                self.get_logger().warning(f"unknown task command: {msg.command}")
                 return
         self._dispatch(generation)
 
@@ -191,9 +216,14 @@ class NavigationTaskNode(Node):
         self._cancel_goal_watchdog()
         self._goal_watchdog_phase = "response"
         self._goal_activity_at = time.monotonic()
+        self._goal_started_at = self._goal_activity_at
+        self._goal_progress_at = self._goal_activity_at
+        self._best_remaining = math.inf
+        self._best_yaw_error = math.inf
         self._goal_watchdog_timer = self.create_timer(
             1.0,
             lambda: self._check_goal_watchdog(generation, dispatch_id),
+            clock=self._watchdog_clock,
         )
 
     def _check_goal_watchdog(self, generation, dispatch_id):
@@ -201,18 +231,32 @@ class NavigationTaskNode(Node):
             if generation != self._generation or dispatch_id != self._dispatch_id:
                 return
             phase = self._goal_watchdog_phase
-            timeout = (
-                self._nav2_goal_response_timeout_sec
-                if phase == "response"
-                else self._nav2_feedback_timeout_sec
-            )
-            if not phase or time.monotonic() - self._goal_activity_at < timeout:
-                return
-            message = (
-                f"Nav2 goal response timed out after {timeout:.1f}s"
-                if phase == "response"
-                else f"Nav2 goal produced no feedback for {timeout:.1f}s"
-            )
+            now = time.monotonic()
+            if phase == "verify":
+                error = self._arrival_error()
+                if not error:
+                    self._complete_goal(generation, dispatch_id)
+                    return
+                if now - self._goal_activity_at < self._arrival_verification_timeout_sec:
+                    return
+                message = f"Nav2 reported success but arrival was not verified: {error}"
+            elif phase == "feedback" and now - self._goal_started_at >= self._nav2_goal_timeout_sec:
+                message = f"Nav2 goal exceeded {self._nav2_goal_timeout_sec:.1f}s"
+            elif phase == "feedback" and now - self._goal_progress_at >= self._nav2_progress_timeout_sec:
+                message = f"Nav2 goal made no progress for {self._nav2_progress_timeout_sec:.1f}s"
+            else:
+                timeout = (
+                    self._nav2_goal_response_timeout_sec
+                    if phase == "response"
+                    else self._nav2_feedback_timeout_sec
+                )
+                if not phase or now - self._goal_activity_at < timeout:
+                    return
+                message = (
+                    f"Nav2 goal response timed out after {timeout:.1f}s"
+                    if phase == "response"
+                    else f"Nav2 goal produced no feedback for {timeout:.1f}s"
+                )
             self._cancel_goal_watchdog()
             self._dispatch_id += 1
             handle = self._goal_handle
@@ -221,12 +265,30 @@ class NavigationTaskNode(Node):
                 handle.cancel_goal_async()
         self._retry_goal(generation, message)
 
-    def _goal_feedback(self, _feedback, generation, dispatch_id):
+    def _goal_feedback(self, feedback, generation, dispatch_id):
         with self._lock:
             if generation != self._generation or dispatch_id != self._dispatch_id:
                 return
+            if self._goal_watchdog_phase == "verify":
+                return
             self._goal_watchdog_phase = "feedback"
             self._goal_activity_at = time.monotonic()
+            payload = feedback.feedback
+            remaining = getattr(payload, "distance_remaining", getattr(payload, "distance_to_goal", math.nan))
+            current = getattr(payload, "current_pose", None)
+            xy, yaw = (self._pose_error(current.pose, self._active_goal_pose)
+                       if current and current.header.frame_id == self._map_frame
+                       else (math.inf, math.inf))
+            # NavigateToPose can emit zero before its first path is available.
+            # Do not let that default prevent later real progress from counting.
+            usable = remaining > 0 or xy <= self._arrival_xy_tolerance
+            if usable and math.isfinite(remaining) and remaining >= 0 and remaining < self._best_remaining - 0.05:
+                self._best_remaining = remaining
+                self._goal_progress_at = self._goal_activity_at
+            # Final rotation is useful progress even after distance reaches zero.
+            if xy <= self._arrival_xy_tolerance and yaw < self._best_yaw_error - 0.05:
+                self._best_yaw_error = yaw
+                self._goal_progress_at = self._goal_activity_at
 
     @staticmethod
     def _retryable_goal_status(status):
@@ -268,7 +330,7 @@ class NavigationTaskNode(Node):
                 if active:
                     self._dispatch(generation)
 
-            timer = self.create_timer(self._nav2_goal_retry_delay_sec, retry_once)
+            timer = self.create_timer(self._nav2_goal_retry_delay_sec, retry_once, clock=self._watchdog_clock)
             self._retry_timer = timer
 
     def _pose_stamped(self, pose):
@@ -303,10 +365,12 @@ class NavigationTaskNode(Node):
                 goal = FollowPath.Goal()
                 goal.path = path
                 self._status = TaskStatus.STATUS_FOLLOWING
+                self._active_goal_pose = copy.deepcopy(self._task.poses[-1])
             else:
                 goal = NavigateToPose.Goal()
                 goal.pose = self._pose_stamped(self._task.poses[self._index])
                 self._status = TaskStatus.STATUS_NAVIGATING
+                self._active_goal_pose = copy.deepcopy(self._task.poses[self._index])
             self._message = "goal dispatched"
             self._publish_status()
             self._dispatch_id += 1
@@ -363,7 +427,6 @@ class NavigationTaskNode(Node):
         with self._lock:
             if generation != self._generation or dispatch_id != self._dispatch_id:
                 return
-            self._cancel_goal_watchdog()
             self._goal_handle = None
             if status != GoalStatus.STATUS_SUCCEEDED:
                 message = f"Nav2 goal status={status}"
@@ -372,6 +435,53 @@ class NavigationTaskNode(Node):
                 else:
                     self._finish(generation, TaskStatus.STATUS_FAILED, message)
                 return
+            error = self._arrival_error()
+            if error:
+                self._goal_watchdog_phase = "verify"
+                self._goal_activity_at = time.monotonic()
+                self._message = f"verifying arrival: {error}"
+                self._publish_status()
+                return
+        self._complete_goal(generation, dispatch_id)
+
+    @staticmethod
+    def _pose_error(current, goal):
+        if current is None or goal is None:
+            return math.inf, math.inf
+        def yaw(q):
+            norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
+            if not math.isfinite(norm) or norm < 1e-12:
+                return math.nan
+            return math.atan2(2 * (q.w*q.z + q.x*q.y) / norm,
+                              1 - 2 * (q.y*q.y + q.z*q.z) / norm)
+        xy = math.hypot(current.position.x - goal.position.x, current.position.y - goal.position.y)
+        delta = yaw(current.orientation) - yaw(goal.orientation)
+        angle = abs(math.atan2(math.sin(delta), math.cos(delta))) if math.isfinite(delta) else math.inf
+        return (xy if math.isfinite(xy) else math.inf), angle
+
+    def _arrival_error(self):
+        try:
+            transform = self._tf_buffer.lookup_transform(self._map_frame, self._base_frame, Time())
+        except TransformException as exc:
+            return f"robot pose unavailable: {exc}"
+        stamp = transform.header.stamp
+        age = self.get_clock().now().nanoseconds / 1e9 - (stamp.sec + stamp.nanosec / 1e9)
+        if age < -0.1 or age > self._arrival_tf_max_age_sec:
+            return f"robot pose is stale (age={age:.2f}s)"
+        pose = PoseStamped().pose
+        pose.position.x = transform.transform.translation.x
+        pose.position.y = transform.transform.translation.y
+        pose.orientation = transform.transform.rotation
+        xy, yaw = self._pose_error(pose, self._active_goal_pose)
+        if xy > self._arrival_xy_tolerance or yaw > self._arrival_yaw_tolerance:
+            return f"goal error {xy:.3f}m / {yaw:.3f}rad"
+        return ""
+
+    def _complete_goal(self, generation, dispatch_id):
+        with self._lock:
+            if generation != self._generation or dispatch_id != self._dispatch_id:
+                return
+            self._cancel_goal_watchdog()
             if self._task.task_type != TaskInfo.TASK_TYPE_FOLLOWING and self._index + 1 < len(self._task.poses):
                 self._index += 1
                 self._retry_attempt = 0
