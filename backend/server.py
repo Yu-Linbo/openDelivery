@@ -38,6 +38,7 @@ import bag_replay
 import ros_node_store
 import ros_task_store
 import openclaw_chat
+import assistant_sessions
 import robot_settings
 import log_files
 import logging
@@ -2299,6 +2300,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             raw = gzip.compress(raw, compresslevel=5)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if urlparse(self.path).path.startswith("/api/assistant/"):
+            self.send_header("Cache-Control", "no-store")
         if use_gzip:
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Vary", "Accept-Encoding")
@@ -2374,6 +2377,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if assistant_sessions.handle_request(self, path, "POST"):
+            return
         if path == "/api/robot/settings":
             data = self._read_json_body()
             if data is None:
@@ -2384,27 +2389,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(err)}, 400)
             except Exception as err:  # noqa: BLE001
                 self._send_json({"error": str(err)}, 500)
-            return
-
-        if path == "/api/assistant/chat":
-            data = self._read_json_body()
-            if data is None:
-                return
-            try:
-                out = openclaw_chat.run_chat(
-                    data.get("message"), data.get("session_id"), data.get("context") or {},
-                    defer_mutations=True,
-                )
-            except ValueError as err:
-                self._send_json({"error": str(err)}, 400)
-                return
-            except TimeoutError as err:
-                self._send_json({"error": str(err)}, 504)
-                return
-            except RuntimeError as err:
-                self._send_json({"error": str(err)}, 503)
-                return
-            self._send_json(out)
             return
 
         if path == "/api/robot/relocalization/record":
@@ -3411,6 +3395,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if assistant_sessions.handle_request(self, path, "GET"):
+            return
         if path == "/api/log_bag/text":
             try:
                 q = parse_qs(urlparse(self.path).query)

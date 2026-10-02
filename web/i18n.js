@@ -11,6 +11,13 @@
   // newly inserted DOM fragments localized without coupling every call site to
   // the language picker. Longer phrases are applied first.
   const ENGLISH_PHRASES = {
+    "任务状态查询超时，任务可能仍在运行。": "Task status polling timed out; the task may still be running.",
+    "已开启新对话，旧对话可在管理页查看。": "New conversation started. Previous conversations are available in Admin.",
+    "请登录后开启新对话": "Sign in to start a new conversation",
+    "请登录后查看会话管理": "Sign in to view conversations",
+    "对话已更新，请刷新后重试": "The conversation has changed. Refresh and try again.",
+    "对话管理": "Conversation management",
+    "新对话": "New chat",
     "没有匹配日志，请调整筛选条件": "No matching logs. Adjust the filters.",
     "日志文件或后端日志接口不存在，请检查后端是否已更新": "Log file or endpoint was not found. Check whether the backend is up to date.",
     "关联日志读取失败，bag 回放仍可继续": "Failed to read associated logs. Bag playback can continue.",

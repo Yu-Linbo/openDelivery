@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <title>机器人管理平台</title>
-    <link rel="stylesheet" href="./styles.css?v=20261001-review-v2" />
+    <link rel="stylesheet" href="./styles.css?v=20261001-assistant-sessions-v1" />
   </head>
   <body>
     <div class="layout">
@@ -690,7 +690,10 @@
     <section id="openclaw-chat-panel" class="openclaw-chat-panel" role="dialog" aria-label="OpenClaw 页面助手" hidden>
       <header class="openclaw-chat-head">
         <div><strong>OpenClaw 助手</strong><small>通过 OpenDelivery API 操作当前页面</small></div>
-        <a id="openclaw-admin-link" class="openclaw-admin-link" href="https://linbo.lol/openclaw/" target="_blank" rel="noopener noreferrer">管理页 ↗</a>
+        <nav class="openclaw-chat-tools" aria-label="对话管理">
+          <button id="openclaw-chat-reset" type="button" hidden>新对话</button>
+          <a id="openclaw-admin-link" class="openclaw-admin-link" href="./assistant-admin.html" target="_blank" rel="noopener noreferrer" hidden>管理页 ↗</a>
+        </nav>
         <button id="openclaw-chat-close" type="button" aria-label="关闭对话框">×</button>
       </header>
       <div id="openclaw-chat-messages" class="openclaw-chat-messages" aria-live="polite">
@@ -701,9 +704,9 @@
       </form>
       <p id="openclaw-chat-status" class="openclaw-chat-status" role="status"></p>
     </section>
-    <script src="./i18n.js?v=20261001-review-v2"></script>
+    <script src="./i18n.js?v=20261001-assistant-routing-v2"></script>
     <script src="./map_editor.js?v=20261001-review-v2"></script>
-    <script src="./app.js?v=20261001-review-v2"></script>
+    <script src="./app.js?v=20261001-assistant-routing-v2"></script>
     <script src="./log_viewer.js?v=20261001-logs-v3"></script>
   </body>
 </html>

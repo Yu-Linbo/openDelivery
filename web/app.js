@@ -7200,6 +7200,7 @@ function initOpenClawChat() {
   const messages = document.getElementById("openclaw-chat-messages");
   const status = document.getElementById("openclaw-chat-status");
   const adminLink = document.getElementById("openclaw-admin-link");
+  const reset = document.getElementById("openclaw-chat-reset");
   if (!trigger || !panel || !form || !input || !messages) return;
 
   const sessionKey = "openDelivery_openclaw_session_v1";
@@ -7214,13 +7215,17 @@ function initOpenClawChat() {
     localStorage.setItem(sessionKey, sessionId);
     sessionStorage.removeItem(sessionKey);
   } catch { /* the chat remains available without browser storage */ }
-  if (adminLink) adminLink.href = "https://linbo.lol/openclaw/";
   let history = [];
   try {
     const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
     if (Array.isArray(saved)) history = saved.slice(-50);
   } catch { history = []; }
   if (!history.length) history = [{ role: "assistant", text: welcome }];
+  const guestSessionId = sessionId;
+  let guestHistory = history.slice();
+  let authenticated = false;
+  let storageHistoryKey = historyKey;
+  let sessionRequest = null;
   const setOpen = (open) => {
     panel.hidden = !open;
     trigger.setAttribute("aria-expanded", open ? "true" : "false");
@@ -7229,7 +7234,7 @@ function initOpenClawChat() {
   const append = (role, text) => {
     const item = document.createElement("div");
     item.className = `openclaw-chat-message ${role}`;
-    if (role === "user") item.setAttribute("data-i18n-ignore", "");
+    item.setAttribute("data-i18n-ignore", "");
     item.textContent = text;
     messages.appendChild(item);
     messages.scrollTop = messages.scrollHeight;
@@ -7237,9 +7242,65 @@ function initOpenClawChat() {
   const saveMessage = (role, text) => {
     history.push({ role, text: String(text).slice(0, 8000) });
     history = history.slice(-50);
-    try { localStorage.setItem(historyKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
+    if (!authenticated) guestHistory = history.slice();
+    try { localStorage.setItem(storageHistoryKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
   };
   history.forEach((item) => append(item.role === "user" ? "user" : "assistant", item.text));
+  const renderHistory = () => {
+    messages.replaceChildren();
+    history.forEach((item) => append(item.role === "user" ? "user" : "assistant", item.text));
+  };
+  const applySession = (session) => {
+    sessionId = session.id;
+    history = session.messages.map((item) => ({ role: item.role, text: item.text })).slice(-50);
+    if (!history.length) history = [{ role: "assistant", text: welcome }];
+    renderHistory();
+    try { localStorage.setItem(storageHistoryKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
+  };
+  const refreshSession = () => {
+    if (sessionRequest) return sessionRequest;
+    sessionRequest = (async () => {
+      const state = await fetchJson(`${API_BASE_URL}/api/assistant/session`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        body: JSON.stringify({ session_id: guestSessionId, history: guestHistory }),
+      });
+      authenticated = state.authenticated === true;
+      storageHistoryKey = authenticated ? `${historyKey}_${state.user}` : historyKey;
+      if (reset) reset.hidden = !authenticated;
+      if (adminLink) adminLink.hidden = !authenticated;
+      if (authenticated && state.session) applySession(state.session);
+      else {
+        sessionId = guestSessionId;
+        history = guestHistory.slice();
+        renderHistory();
+      }
+    })().finally(() => { sessionRequest = null; });
+    return sessionRequest;
+  };
+  refreshSession().catch(() => { /* server checks all restricted actions */ });
+  reset?.addEventListener("click", async () => {
+    if (!authenticated || send?.disabled || reset.disabled) return;
+    reset.disabled = true;
+    if (send) send.disabled = true;
+    status.classList.remove("error");
+    try {
+      const result = await fetchJson(`${API_BASE_URL}/api/assistant/reset`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      applySession(result.session);
+      input.value = "";
+      status.textContent = "已开启新对话，旧对话可在管理页查看。";
+    } catch (error) {
+      status.classList.add("error");
+      status.textContent = error.message || String(error);
+      await refreshSession().catch(() => {});
+    } finally {
+      reset.disabled = false;
+      if (send) send.disabled = false;
+      input.focus();
+    }
+  });
   const pageContext = () => ({
     view: document.querySelector(".menu-item.active")?.dataset.view || "monitor",
     floor: floorSelect?.value || "",
@@ -7247,7 +7308,10 @@ function initOpenClawChat() {
     online_robots: Array.from(document.querySelectorAll("[data-robot-quick-id]")).map((el) => el.dataset.robotQuickId),
     page_url: window.location.href,
   });
-  trigger.addEventListener("click", () => setOpen(panel.hidden));
+  trigger.addEventListener("click", () => {
+    setOpen(panel.hidden);
+    if (!panel.hidden && !send?.disabled) refreshSession().catch(() => {});
+  });
   close?.addEventListener("click", () => setOpen(false));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !panel.hidden) setOpen(false); });
   input.addEventListener("keydown", (event) => {
@@ -7257,66 +7321,45 @@ function initOpenClawChat() {
     event.preventDefault();
     const message = input.value.trim();
     if (!message || send?.disabled) return;
+    if (send) send.disabled = true;
+    if (reset) reset.disabled = true;
+    try { await refreshSession(); } catch { /* legacy guest chat remains available */ }
     append("user", message);
     saveMessage("user", message);
     input.value = "";
-    if (send) send.disabled = true;
     status.classList.remove("error");
     status.textContent = "OpenClaw 正在处理，涉及操作时可能需要一些时间…";
-    const robotMatch = message.match(/\b(robot[A-Za-z0-9_-]*)\b/i);
-    const trackedRobot = robotMatch ? robotMatch[1] : (relocRobotId?.value || selectedDetailRobotId || "");
-    const isStartup = /上线|启动仿真|bringup|start simulation/i.test(message);
-    const isTask = /前往|导航|发任务|到test_|取货|回来|返回|goto/i.test(message);
-    let progressTimer = null;
-    let lastProgress = "";
-    if ((isStartup || isTask) && trackedRobot) {
-      const accepted = "收到，正在执行中。";
-      append("assistant", accepted);
-      saveMessage("assistant", accepted);
-      const pollProgress = async () => {
-        try {
-          let progress = "";
-          if (isStartup) {
-            const payload = await fetchJson(`${API_BASE_URL}/api/robot/status/cache`, { cache: "no-store" });
-            const rows = Array.isArray(payload) ? payload : (Array.isArray(payload?.items) ? payload.items : []);
-            const row = rows.find((item) => String(item.robot_id || item.id || item.name) === trackedRobot);
-            if (row) progress = row.online ? `${trackedRobot} 已在线，状态 ${row.robot_status || row.live_robot_status || row.persisted_robot_status || row.status || "online"}` : `${trackedRobot} 上线中`;
-          } else {
-            const detail = await fetchJson(`${API_BASE_URL}/api/robot/${encodeURIComponent(trackedRobot)}/detail`, { cache: "no-store" });
-            const task = detail.task || {};
-            const taskStatus = task.task_status || detail.status?.live_task_status || detail.status?.persisted_task_status || "等待执行";
-            const value = Number(task.task_progress ?? detail.status?.task_progress);
-            progress = `${trackedRobot}：${taskStatus}${Number.isFinite(value) && value >= 0 ? ` ${Math.round(value * 100)}%` : ""}`;
-          }
-          if (progress && progress !== lastProgress) {
-            lastProgress = progress;
-            append("assistant", progress);
-            saveMessage("assistant", progress);
-          }
-        } catch { /* transient polling errors are covered by the final result */ }
-      };
-      pollProgress();
-      progressTimer = setInterval(pollProgress, 5000);
-    }
+    let responseTexts = /[\u3400-\u9fff]/.test(message) ? {
+      accepted: "收到，正在执行中。", confirmation: "请明确说明要执行的操作", failed: "执行失败：",
+      completed: "操作已完成", empty_reply: "OpenClaw 未返回内容。", request_failed: "请求失败：",
+      job_timeout: "任务状态查询超时，任务可能仍在运行。",
+    } : {
+      accepted: "Received. Executing the requested steps.", confirmation: "Please explicitly request the operation.",
+      failed: "Execution failed: ", completed: "Operation completed.", empty_reply: "OpenClaw returned no content.",
+      request_failed: "Request failed: ", job_timeout: "Task status polling timed out; the task may still be running.",
+    };
     try {
       const result = await fetchJson(`${API_BASE_URL}/api/assistant/chat`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
         body: JSON.stringify({ message, session_id: sessionId, context: pageContext() }),
       });
+      if (result.status_text) responseTexts = { ...responseTexts, ...result.status_text };
       if (result.job_id) {
-        const accepted = result.reply || "收到，正在执行中。";
+        const accepted = result.reply || responseTexts.accepted;
         append("assistant", accepted);
         saveMessage("assistant", accepted);
         let lastJobUpdate = "";
         let jobFinished = false;
-        for (let attempt = 0; attempt < 240; attempt += 1) {
+        // Each navigation can take up to 15 minutes and plans may have several
+        // legs. Follow the actual background job until it reaches a terminal state.
+        for (let attempt = 0; attempt < 3000; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
           const job = await fetchJson(`${API_BASE_URL}/api/assistant/jobs/${encodeURIComponent(result.job_id)}`, { cache: "no-store" });
           const rows = Array.isArray(job.results) ? job.results : [];
           const update = rows.map((action) => {
-            if (action.confirmation_required) return action.summary || "请明确说明要执行的操作";
-            if (!action.ok) return `执行失败：${action.error || "未知错误"}`;
-            return action.summary || "操作已完成";
+            if (action.confirmation_required) return action.summary || responseTexts.confirmation;
+            if (!action.ok) return `${responseTexts.failed}${action.error || "unknown error"}`;
+            return action.summary || responseTexts.completed;
           }).join("\n");
           if (update && update !== lastJobUpdate) {
             lastJobUpdate = update;
@@ -7325,25 +7368,25 @@ function initOpenClawChat() {
           }
           if (job.status === "completed" || job.status === "failed") {
             jobFinished = true;
-            if (job.status === "failed" && !update) throw new Error(job.error || "Task failed");
+            if (job.status === "failed" && !update) throw new Error(job.error || responseTexts.failed);
             break;
           }
         }
-        if (!jobFinished) throw new Error("Task status polling timed out; the task may still be running.");
+        if (!jobFinished) throw new Error(responseTexts.job_timeout);
         status.textContent = "";
         return;
       }
-      let reply = result.reply || "OpenClaw 未返回内容。";
+      let reply = result.reply || responseTexts.empty_reply;
       if (Array.isArray(result.actions) && result.actions.length) {
         const summaries = result.actions.map((action) => {
-          if (action.confirmation_required) return action.summary || "请明确说明要执行的操作";
-          if (!action.ok) return `执行失败：${action.error || "未知错误"}`;
+          if (action.confirmation_required) return action.summary || responseTexts.confirmation;
+          if (!action.ok) return `${responseTexts.failed}${action.error || "unknown error"}`;
           if (Object.prototype.hasOwnProperty.call(action, "result")) {
             const rawPayload = JSON.stringify(action.result, null, 2);
-            const payload = rawPayload.length > 5000 ? `${rawPayload.slice(0, 5000)}\n…结果已截断` : rawPayload;
-            return `${action.summary || `${action.name} 执行成功`}\n${payload}`;
+            const payload = rawPayload.length > 5000 ? `${rawPayload.slice(0, 5000)}\n${responseTexts.truncated || "…"}` : rawPayload;
+            return `${action.summary || responseTexts.completed}\n${payload}`;
           }
-          return action.summary || `${action.name}：执行成功`;
+          return action.summary || responseTexts.completed;
         });
         reply = summaries.join("\n");
       }
@@ -7352,14 +7395,14 @@ function initOpenClawChat() {
       status.textContent = "";
     } catch (error) {
       const detail = error?.message || String(error);
-      const failure = `请求失败：${detail}`;
+      const failure = `${responseTexts.request_failed}${detail}`;
       append("assistant", failure);
       saveMessage("assistant", failure);
       status.classList.add("error");
       status.textContent = "请确认 OpenClaw Gateway 已启动并可用。";
     } finally {
-      if (progressTimer) clearInterval(progressTimer);
       if (send) send.disabled = false;
+      if (reset) reset.disabled = false;
       input.focus();
     }
   });

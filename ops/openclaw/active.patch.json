@@ -1,0 +1,57 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/gpt-5.6-sol"
+      },
+      "thinkingDefault": "low",
+      "models": {
+        "openai/gpt-6.1-sol": {
+          "params": {
+            "thinking": "low"
+          }
+        },
+        "openai/gpt-5.6-sol": {
+          "params": {
+            "thinking": "low"
+          }
+        }
+      },
+      "modelPolicy": {
+        "allow": [
+          "deepseek/deepseek-chat",
+          "openai/gpt-6.1-sol",
+          "openai/gpt-5.6-sol"
+        ]
+      }
+    },
+    "entries": {
+      "main": {
+        "skills": [],
+        "tools": {
+          "profile": "minimal"
+        },
+        "contextInjection": "continuation-skip"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "openai": {
+        "models": [
+          {
+            "id": "gpt-6.1-sol",
+            "name": "GPT-6.1 Sol",
+            "api": "openai-chatgpt-responses",
+            "reasoning": true,
+            "contextWindow": 1050000,
+            "maxTokens": 128000,
+            "agentRuntime": {
+              "id": "codex"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

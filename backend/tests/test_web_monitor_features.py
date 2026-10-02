@@ -186,7 +186,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("收到，正在执行中。", js)
         self.assertIn("task_progress", js)
         self.assertIn("/api/assistant/chat", js)
-        self.assertIn('path == "/api/assistant/chat"', server_py)
+        self.assertIn('assistant_sessions.handle_request(self, path, "POST")', server_py)
         self.assertIn(".openclaw-chat-trigger", css)
         self.assertGreater(html.index('id="standalone-map-editor"'), html.index('class="monitor-teleop-rail"'))
         self.assertIn('data-teleop="forward"', html)
@@ -627,7 +627,7 @@ class WebMonitorFeatureTest(unittest.TestCase):
         self.assertIn("grid-template-columns: minmax(0, 1fr) auto auto", css)
         self.assertIn("overflow-x: hidden", css)
         self.assertIn("grid-template-columns: minmax(0, 1fr) auto", css)
-        self.assertIn("Array.isArray(payload?.items)", js)
+        self.assertIn("const rows = Array.isArray(job.results) ? job.results : []", js)
 
     def test_standalone_editor_tool_modes_are_exclusive(self):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")

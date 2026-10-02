@@ -22,6 +22,7 @@ backend/data/.sim_spawn_slots.json.*.tmp
 backend/data/robot_settings.json
 backend/data/.robot_settings.json.*.tmp
 backend/logs/
+backend/data/assistant_sessions.sqlite*
 
 # ROS bag files
 /log_bag/

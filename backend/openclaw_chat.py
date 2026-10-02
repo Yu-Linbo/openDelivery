@@ -1,6 +1,7 @@
 """Small, validated bridge between the web API and the OpenClaw CLI."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -13,45 +14,52 @@ from typing import Any, Dict
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from assistant_language import EN, ZH, response_texts
 
 
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,95}")
 MAX_MESSAGE_CHARS = 4000
-MAX_CONTEXT_CHARS = 6000
 _JOBS = {}
 _JOBS_LOCK = threading.Lock()
+LOGGER = logging.getLogger("opendelivery.assistant")
+MAX_ACTIONS = 8
 
 
-SYSTEM_INSTRUCTIONS = """You are the assistant embedded in the OpenDelivery robot management page.
-Reply in concise Chinese and lead with the conclusion. Unless the user explicitly asks for raw data, JSON,
-or a complete response, never include raw API payloads or long field listings. You do not have HTTP tools.
-Return ONLY JSON:
-{{"reply":"short response","actions":[{{"name":"action_name","arguments":{{}}}}]}}.
-The backend validates and executes actions. Available actions: robot_status {{}}, robot_pose {{}}, floors {{}},
-locations {{}}, robot_detail {{"robot_id":"robot1"}}, waypoints {{"robot_id":"robot1"}}, ros_nodes {{}},
-ros_threads {{}}, startup_sim {{"robot_id":"robot1"}}, shutdown_sim {{"robot_id":"robot1"}},
-stop_task {{"robot_id":"robot1"}}.
-For navigation use navigate_to_point {{"robot_id":"robot1","floor_id":"test_102","point":"elevator_inside"}}.
-To list map places use map_points {{"floor_id":"test_101"}}. For a pickup round trip use
-pickup_and_return {{"robot_id":"robot1","floor_id":"test_101","point":"前台取货点"}}.
-“进梯点” means elevator_inside, “候梯点” means elevator_waiting, and “2楼” means test_102. When the user
-requests a floor but gives no destination on that floor, choose that floor's elevator_waiting point.
-Use no action for ordinary conversation. Never claim success before the backend returns a result. A command
-like “上线 robot1” or “仿真上线 robot1” explicitly confirms startup_sim. Treat “继续/继续吧/开始任务/开始执行”
-as explicit confirmation of the remaining actions already discussed; return those actions again instead of asking.
-Interpret a plain “停止/取消/终止”
-as stop_task, never as shutdown_sim. Choose shutdown_sim only for explicit “关闭仿真”, “仿真下线”,
-“停止仿真”, or “下线机器人”.
-For named places such as “前台取货点”, use map_points or navigate_to_point; robot waypoints are a separate
-temporary list and must not be used to decide that a map place does not exist. Point names support natural
-language interpretation by you. Use pickup_and_return {{"robot_id":"robot1","floor_id":"test_101",
-"point":"前台取货点"}} for requests like “去1楼取货后回来”; it captures the robot's current pose as the
-return destination. If there is exactly one online/context robot, use it without asking. Only ask the user
-when point matching is ambiguous or no candidate exists. Choose only from the real point catalog below; use
-the selected point's exact id or exact name in actions. Decide semantic similarity yourself; the backend does
-not perform fuzzy matching. For a multi-step request, return every ordered action in one response (up to three);
-the backend runs them sequentially and startup_sim waits for online before the next action. Current map point catalog: {point_catalog}
-Current browser context: {page_context}\nUser request: {message}"""
+SYSTEM_INSTRUCTIONS = """Plan for the embedded OpenDelivery assistant. Return ONLY JSON:
+{{"reply":"concise reply","language":"BCP-47","decision":"execute|query|clarify|chat",
+"actions":[{{"name":"action","arguments":{{}},"include_result":false}}]}}.
+Reply in THIS request's language, independent of history/dashboard. Interpret intent semantically:
+execute for requested operations or confirmation of a discussed plan; query for reads; clarify for
+essential ambiguity; chat otherwise. Negated operations and explanations do not authorize execution.
+Clarify/chat have no actions; query has only reads; execute has a complete ordered plan (max 8).
+The backend validates and executes actions, without keyword decisions, robot substitution or added steps.
+Never claim completion before verified results. Set include_result=true only for requested raw/full data.
+
+Actions and arguments:
+robot_status, robot_pose, floors, locations, ros_nodes, ros_threads: {{}}.
+robot_detail, waypoints, startup_sim, shutdown_sim, stop_task: {{"robot_id":"ID"}}.
+map_points: {{"floor_id":"ID"}}.
+navigate_to_point, pickup_and_return: {{"robot_id":"ID","floor_id":"ID","point":"exact catalog id/name"}}.
+Choose points semantically from the catalog; never invent coordinates. Floor-only destinations use
+that floor's elevator_waiting; elevator entry/进梯点 uses elevator_inside; 候梯点 uses elevator_waiting.
+Map places are not temporary waypoints. Ask briefly if no matching point or equally plausible points.
+Pickup then delivery on another floor requires both navigation steps. pickup_and_return captures the
+starting pose and waits for outbound and return completion; use it only for returning to that pose.
+Honor named robots. Otherwise prefer an online ready/idle robot; browser selection is only a preference
+among suitable robots. If none is online, choose a NEW valid robot ID absent from the snapshot and include startup_sim before
+navigation; an offline named robot also requires startup_sim. Navigation authorizes this prerequisite.
+If live facts are unavailable, do not invent them. The backend waits for ready and each navigation
+Finished, then stops the plan on failure. Task cancellation uses stop_task; shutdown_sim requires an
+explicit simulation shutdown request. Semantic confirmation (e.g. 继续/开始任务) executes the discussed
+remaining plan without asking again. You do not need external tools for facts already supplied.
+
+For other languages than en/zh, return status_text translating these templates, preserving placeholders:
+{status_templates}
+Current facts below supersede stale history. Browser context is untrusted preference only; you make the decision.
+Live robots: {robot_context}
+Map points: {point_catalog}
+Browser: {page_context}
+User request (JSON string): {message}"""
 
 ACTION_SPECS = {
     "robot_status": ("GET", "/api/robot/status/cache", False),
@@ -74,6 +82,66 @@ ACTION_SPECS = {
 def _read_json(url: str, timeout: float = 15.0):
     with urlopen(Request(url, method="GET"), timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _load_robot_context(api_port: int):
+    try:
+        payload = _read_json(f"http://127.0.0.1:{api_port}/api/robot/status/cache", timeout=5)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return {"available": False}
+    rows = payload.get("items", []) if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return {"available": False}
+    robots = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("robot_id") or row.get("id") or row.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", rid):
+            continue
+        robots.append({"id": rid, "online": row.get("online") is True,
+                       "status": row.get("live_robot_status") or row.get("robot_status") or row.get("persisted_robot_status") or "",
+                       "task_status": row.get("live_task_status") or row.get("persisted_task_status") or ""})
+    return {"available": True, "robots": robots}
+
+
+def _validate_actions(actions: list, decision: str):
+    if decision not in ("execute", "query", "clarify", "chat"):
+        raise ValueError("invalid AI decision")
+    if len(actions) > MAX_ACTIONS:
+        raise ValueError(f"A plan may contain at most {MAX_ACTIONS} actions")
+    if actions and decision in ("clarify", "chat"):
+        raise ValueError("AI clarification/chat must not include actions")
+    if decision == "execute" and not actions:
+        raise ValueError("AI execution plan must include actions")
+    validated = []
+    for action in actions:
+        if not isinstance(action, dict) or not isinstance(action.get("arguments"), dict):
+            raise ValueError("AI action and arguments must be objects")
+        item = {"name": str(action.get("name") or ""),
+                "arguments": dict(action["arguments"])}
+        spec = ACTION_SPECS.get(item["name"])
+        if not spec:
+            raise ValueError(f"unsupported action: {item['name']}")
+        if spec[2] and decision != "execute":
+            raise ValueError("AI query must not include mutating actions")
+        if spec[2] or "{robot_id}" in spec[1]:
+            if not isinstance(item["arguments"].get("robot_id"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", item["arguments"]["robot_id"]):
+                raise ValueError("invalid robot_id in AI action")
+        if item["name"] in ("map_points", "navigate_to_point", "pickup_and_return"):
+            if not isinstance(item["arguments"].get("floor_id"), str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", item["arguments"]["floor_id"]):
+                raise ValueError("invalid floor_id in AI action")
+        if item["name"] in ("navigate_to_point", "pickup_and_return"):
+            point = item["arguments"].get("point")
+            if not isinstance(point, str) or not point.strip() or len(point) > 120:
+                raise ValueError("invalid point in AI action")
+        include_result = action.get("include_result", False)
+        if not isinstance(include_result, bool):
+            raise ValueError("include_result must be a boolean")
+        if include_result:
+            item["include_result"] = True
+        validated.append(item)
+    return validated
 
 
 def _load_map_point_catalog(api_port: int):
@@ -105,7 +173,8 @@ def _load_map_point_catalog(api_port: int):
     return catalog[:500]
 
 
-def _resolve_map_point(floor_id: str, query: str, api_port: int):
+def _resolve_map_point(floor_id: str, query: str, api_port: int, *, texts=None):
+    texts = texts or ZH
     assets = _read_json(f"http://127.0.0.1:{api_port}/api/maps/{quote(floor_id, safe='')}/assets")
     points = [item for item in (assets.get("points") or []) if isinstance(item, dict)]
     wanted = str(query or "").strip()
@@ -119,11 +188,12 @@ def _resolve_map_point(floor_id: str, query: str, api_port: int):
         return typed[0]
     if len(typed) > 1:
         names = "、".join(str(point.get("name") or point.get("id")) for point in typed[:5])
-        raise ValueError(f"点位类型“{query}”不唯一：{names}")
-    raise ValueError(f"模型选择的点位不存在：{floor_id}/{query}")
+        raise ValueError(texts["point_ambiguous"].format(point=query, names=f": {names}"))
+    raise ValueError(texts["point_missing"].format(point=f"{floor_id}/{query}"))
 
 
-def _current_robot_pose(robot_id: str, api_port: int):
+def _current_robot_pose(robot_id: str, api_port: int, *, texts=None):
+    texts = texts or ZH
     payload = _read_json(f"http://127.0.0.1:{api_port}/api/robot/pose")
     for row in payload.get("robots") or []:
         if str(row.get("id") or row.get("robot_id") or "") == robot_id:
@@ -132,7 +202,7 @@ def _current_robot_pose(robot_id: str, api_port: int):
                 "floor_id": str(row.get("active_floor") or ""),
                 "x": float(pose["x"]), "y": float(pose["y"]), "yaw": float(pose.get("yaw", 0)),
             }
-    raise ValueError(f"未获取到 {robot_id} 的当前位置")
+    raise ValueError(texts["pose_missing"].format(robot_id=robot_id))
 
 
 def _post_navigation(robot_id: str, destination: dict, api_port: int):
@@ -154,6 +224,8 @@ def _extract_text(payload: Any) -> str:
         return "\n".join(part for part in parts if part).strip()
     if not isinstance(payload, dict):
         return ""
+    if isinstance(payload.get("reply"), str) and isinstance(payload.get("actions"), list):
+        return json.dumps(payload, ensure_ascii=False)
     for key in ("text", "reply", "message", "content"):
         text = _extract_text(payload.get(key))
         if text:
@@ -184,27 +256,15 @@ def _parse_agent_reply(text: str):
     if not isinstance(parsed, dict):
         return {"reply": text, "actions": []}
     actions = parsed.get("actions")
-    return {"reply": str(parsed.get("reply") or "").strip(), "actions": actions if isinstance(actions, list) else []}
+    if actions is not None and not isinstance(actions, list):
+        raise ValueError("AI actions must be an array")
+    return {"reply": str(parsed.get("reply") or "").strip(), "actions": actions or [],
+            "decision": parsed.get("decision"),
+            "language": parsed.get("language"), "status_text": parsed.get("status_text")}
 
 
-def _confirmed(message: str, name: str) -> bool:
-    value = message.lower()
-    if any(term in value for term in (
-        "开始执行", "开始任务", "确认执行", "按计划执行", "继续执行", "继续吧",
-        "执行吧", "现在执行", "proceed", "continue", "execute now",
-    )):
-        return True
-    terms = {
-        "startup_sim": ("仿真上线", "上线", "启动仿真", "启动机器人", "start simulation", "bringup"),
-        "shutdown_sim": ("仿真下线", "关闭仿真", "停止仿真", "下线机器人", "shutdown simulation"),
-        "navigate_to_point": ("前往", "导航", "发任务", "到", "去", "goto"),
-        "pickup_and_return": ("取货后回来", "取货再回来", "取货并返回", "取货后返回", "取货"),
-        "stop_task": ("停止", "取消任务", "终止任务", "停下", "stop task", "cancel task"),
-    }
-    return any(term in value for term in terms.get(name, ()))
-
-
-def _execute_action(action: dict, message: str, api_port: int):
+def _execute_action(action: dict, api_port: int):
+    texts = action.get("_texts") or ZH
     name = str(action.get("name") or "")
     if name not in ACTION_SPECS:
         raise ValueError(f"unsupported action: {name}")
@@ -214,8 +274,6 @@ def _execute_action(action: dict, message: str, api_port: int):
     if "{robot_id}" in path_template or mutating:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", robot_id):
             raise ValueError("invalid robot_id")
-    if mutating and not _confirmed(message, name):
-        return {"name": name, "ok": False, "confirmation_required": True, "summary": "请明确说明要执行的操作"}
     if name == "stop_task":
         detail = _read_json(
             f"http://127.0.0.1:{api_port}/api/robot/{quote(robot_id, safe='')}/detail"
@@ -223,7 +281,7 @@ def _execute_action(action: dict, message: str, api_port: int):
         task = detail.get("task") if isinstance(detail, dict) else None
         task_id = str((task or {}).get("task_id") or "").strip()
         if not task_id:
-            return {"name": name, "ok": True, "summary": f"{robot_id} 当前没有运行中的任务"}
+            return {"name": name, "ok": True, "summary": texts["no_task"].format(robot_id=robot_id)}
         request = Request(
             f"http://127.0.0.1:{api_port}/api/robot/command",
             data=json.dumps({
@@ -234,7 +292,7 @@ def _execute_action(action: dict, message: str, api_port: int):
         )
         with urlopen(request, timeout=15) as response:
             json.loads(response.read().decode("utf-8"))
-        return {"name": name, "ok": True, "summary": f"{robot_id} 任务已停止"}
+        return {"name": name, "ok": True, "summary": f"{robot_id} " + texts["stopped"]}
     if name == "map_points":
         floor_id = str(arguments.get("floor_id") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", floor_id):
@@ -245,18 +303,22 @@ def _execute_action(action: dict, message: str, api_port: int):
         point_name = str(arguments.get("point") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", floor_id):
             raise ValueError("invalid floor_id")
-        point = _resolve_map_point(floor_id, point_name, api_port)
+        point = _resolve_map_point(floor_id, point_name, api_port, texts=texts)
         arguments = {**arguments, **point, "floor_id": floor_id}
         if name == "pickup_and_return":
-            return_pose = _current_robot_pose(robot_id, api_port)
+            return_pose = _current_robot_pose(robot_id, api_port, texts=texts)
             outbound = _post_navigation(robot_id, arguments, api_port)
             outbound_task_id = str(outbound.get("task_id") or "")
             if not outbound_task_id:
-                raise RuntimeError("取货导航未返回任务编号")
-            _wait_for_navigation_terminal(robot_id, outbound_task_id, api_port)
+                raise RuntimeError(texts["task_missing"])
+            _wait_for_navigation_terminal(robot_id, outbound_task_id, api_port, texts=texts)
             result = _post_navigation(robot_id, return_pose, api_port)
+            return_task_id = str(result.get("task_id") or "")
+            if not return_task_id:
+                raise RuntimeError(texts["task_missing"])
+            _wait_for_navigation_terminal(robot_id, return_task_id, api_port, texts=texts)
             result["point_name"] = point.get("name") or point_name
-            return {"name": name, "ok": True, "summary": _summarize_action_result(name, result)}
+            return {"name": name, "ok": True, "summary": _summarize_action_result(name, result, texts)}
     path = path_template.format(robot_id=quote(robot_id, safe=""), floor_id=quote(str(arguments.get("floor_id") or ""), safe=""))
     data = None
     headers = {}
@@ -278,21 +340,24 @@ def _execute_action(action: dict, message: str, api_port: int):
     except (URLError, TimeoutError) as err:
         raise RuntimeError(f"{name} API unavailable: {err}") from err
     if name == "startup_sim":
-        status = _wait_for_robot_online(robot_id, api_port)
+        status = _wait_for_robot_online(robot_id, api_port, texts=texts)
         result = {"robot_id": robot_id, "status": status}
-    summary = _summarize_action_result(name, result)
-    wants_raw = any(term in message.lower() for term in ("原始数据", "原始响应", "完整响应", "raw data", "json"))
+    summary = _summarize_action_result(name, result, texts)
     output = {"name": name, "ok": True, "summary": summary}
-    if name == "navigate_to_point" and isinstance(result, dict) and result.get("task_id"):
+    if name == "navigate_to_point":
+        if not isinstance(result, dict) or not result.get("task_id"):
+            raise RuntimeError(texts["task_missing"])
         output["task_id"] = str(result["task_id"])
-    if wants_raw:
+    if action.get("include_result"):
         output["result"] = result
     return output
 
 
 def _wait_for_navigation_terminal(
     robot_id: str, task_id: str, api_port: int, timeout_s: float = 900.0,
+    *, texts=None,
 ):
+    texts = texts or ZH
     deadline = time.monotonic() + timeout_s
     seen = False
     last_status = ""
@@ -312,13 +377,14 @@ def _wait_for_navigation_terminal(
             if last_status == "Finished":
                 return last_status
             if last_status in ("Failed", "Terminated"):
-                raise RuntimeError(f"导航任务{last_status}")
+                raise RuntimeError(texts["navigation_failed"].format(status=last_status))
         time.sleep(2)
-    reason = f"，最后状态 {last_status}" if seen and last_status else ""
-    raise RuntimeError(f"等待导航完成超时{reason}")
+    reason = f" ({last_status})" if seen and last_status else ""
+    raise RuntimeError(texts["navigation_timeout"].format(status=reason))
 
 
-def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.0):
+def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.0, *, texts=None):
+    texts = texts or ZH
     deadline = time.monotonic() + timeout_s
     last_status = ""
     while time.monotonic() < deadline:
@@ -341,52 +407,53 @@ def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.
                 row.get("robot_status") or row.get("live_robot_status")
                 or row.get("persisted_robot_status") or row.get("status") or ""
             )
-            if row.get("online") is True:
+            if row.get("online") is True and last_status.lower() in ("", "ready", "idle", "online"):
                 return last_status or "online"
         time.sleep(2)
-    raise RuntimeError(f"{robot_id} 上线超时" + (f"，最后状态 {last_status}" if last_status else ""))
+    raise RuntimeError(texts["startup_timeout"].format(robot_id=robot_id, status=f" ({last_status})" if last_status else ""))
 
 
-def _summarize_action_result(name: str, result: Any) -> str:
+def _summarize_action_result(name: str, result: Any, texts=None) -> str:
+    texts = texts or ZH
     if name == "startup_sim":
         rid = result.get("robot_id") or "机器人"
         status = result.get("status")
-        return f"{rid} 仿真已上线" + (f"，状态 {status}" if status else "")
-    if name == "shutdown_sim":
-        return "机器人仿真已下线"
-    if name == "navigate_to_point":
-        return "导航任务已下发"
+        return texts["startup"].format(robot_id=rid, status=status or "online")
+    if name in ("shutdown_sim", "navigate_to_point", "stop_task"):
+        return texts[{"shutdown_sim": "shutdown", "navigate_to_point": "navigation_sent", "stop_task": "stopped"}[name]]
     if name == "pickup_and_return":
-        return f"已下发前往{result.get('point_name') or '取货点'}并返回的任务"
-    if name == "stop_task":
-        return "任务已停止"
-    if name == "robot_status" and isinstance(result, list):
-        online = [row.get("robot_id") or row.get("id") for row in result if isinstance(row, dict) and row.get("online")]
+        return texts["roundtrip"].format(point=result.get("point_name") or "pickup point")
+    if name == "robot_status" and isinstance(result, (list, dict)):
+        rows = result.get("items", []) if isinstance(result, dict) else result
+        online = [row.get("robot_id") or row.get("id") for row in rows if isinstance(row, dict) and row.get("online")]
         names = ", ".join(str(item) for item in online if item)
-        return f"在线 {len(online)} 台" + (f"：{names}" if names else "")
+        return texts["online"].format(count=len(online), names=f": {names}" if names else "")
     if name == "floors" and isinstance(result, dict):
-        return f"共 {len(result.get('floors') or [])} 个地图"
+        return texts["floors"].format(count=len(result.get("floors") or []))
     if name == "waypoints":
         rows = result.get("waypoints", result) if isinstance(result, dict) else result
-        return f"共 {len(rows) if isinstance(rows, list) else 0} 个点位"
+        return texts["waypoints"].format(count=len(rows) if isinstance(rows, list) else 0)
     if name == "map_points":
         rows = result.get("points") if isinstance(result, dict) else []
         names = "、".join(str(row.get("name") or row.get("id")) for row in rows[:8] if isinstance(row, dict))
-        return f"共 {len(rows)} 个地图点位" + (f"：{names}" if names else "")
-    return "查询成功"
+        return texts["points"].format(count=len(rows), names=f": {names}" if names else "")
+    return texts["query"]
 
 
-def _run_action_job(job_id: str, actions: list, message: str, api_port: int):
+def _run_action_job(job_id: str, actions: list, api_port: int):
     results = []
     with _JOBS_LOCK:
         _JOBS[job_id]["status"] = "running"
+        texts = _JOBS[job_id].get("status_text") or ZH
     for action in actions:
         if not isinstance(action, dict):
             continue
         try:
-            result = _execute_action(action, message, api_port)
-        except (ValueError, RuntimeError) as err:
+            LOGGER.info("assistant job=%s action=%s robot=%s started", job_id, action.get("name"), (action.get("arguments") or {}).get("robot_id"))
+            result = _execute_action({**action, "_texts": texts}, api_port)
+        except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
             result = {"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)}
+        LOGGER.info("assistant job=%s action=%s accepted=%s confirmation_required=%s", job_id, action.get("name"), result.get("ok"), result.get("confirmation_required", False))
         results.append(result)
         with _JOBS_LOCK:
             _JOBS[job_id]["results"] = list(results)
@@ -397,8 +464,9 @@ def _run_action_job(job_id: str, actions: list, message: str, api_port: int):
                 _wait_for_navigation_terminal(
                     str((action.get("arguments") or {}).get("robot_id") or ""),
                     str(result.get("task_id") or ""), api_port,
+                    texts=texts,
                 )
-                result["summary"] = "已到达目标点"
+                result["summary"] = texts["arrived"]
             except RuntimeError as err:
                 result = {**result, "ok": False, "error": str(err)}
             results[-1] = result
@@ -410,6 +478,11 @@ def _run_action_job(job_id: str, actions: list, message: str, api_port: int):
         job = _JOBS[job_id]
         job["status"] = "completed" if results and all(item.get("ok") for item in results) else "failed"
         job["updated_at"] = time.time()
+        conversation = job.get("conversation")
+        LOGGER.info("assistant job=%s status=%s", job_id, job["status"])
+    if conversation:
+        from assistant_sessions import STORE, format_actions
+        STORE.append(*conversation, "assistant", format_actions(results, texts) or texts["failed"])
 
 
 def get_action_job(job_id: str):
@@ -417,12 +490,13 @@ def get_action_job(job_id: str):
         return None
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
-        return dict(job) if job else None
+        return {key: value for key, value in job.items() if key != "conversation"} if job else None
 
 
 def run_chat(
     message: str, session_id: str, page_context: Dict[str, Any], *,
     timeout_s: float = 120.0, defer_mutations: bool = False,
+    isolated_session: bool = False, conversation=None,
 ):
     message = str(message or "").strip()
     session_id = str(session_id or "").strip()
@@ -440,18 +514,32 @@ def run_chat(
     executable = configured_bin or shutil.which("openclaw") or (str(user_bin) if user_bin.is_file() else None)
     if not executable:
         raise RuntimeError("OpenClaw CLI is not installed")
-    context_json = json.dumps(page_context, ensure_ascii=False, separators=(",", ":"))
+    # Keep only preferences that help planning. Browser URLs, field dumps and
+    # claimed online state are neither authoritative nor useful model context.
+    context = {key: str(page_context[key])[:120] for key in ("view", "floor", "robot_id")
+               if isinstance(page_context.get(key), str) and page_context[key]}
+    context_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     api_port = int(os.environ.get("MAP_API_PORT", "8001"))
+    robot_context = _load_robot_context(api_port)
     point_catalog = json.dumps(_load_map_point_catalog(api_port), ensure_ascii=False, separators=(",", ":"))
     prompt = SYSTEM_INSTRUCTIONS.format(
-        page_context=context_json[:MAX_CONTEXT_CHARS],
-        point_catalog=point_catalog[:MAX_CONTEXT_CHARS],
-        message=message,
+        page_context=context_json,
+        point_catalog=point_catalog,
+        robot_context=json.dumps(robot_context, ensure_ascii=False, separators=(",", ":")),
+        status_templates=json.dumps(EN, ensure_ascii=False, separators=(",", ":")),
+        message=json.dumps(message, ensure_ascii=False),
     )
     command = [
         executable, "agent", "--json", "--agent", os.environ.get("OPENCLAW_AGENT_ID", "main"),
+        "--thinking", os.environ.get("OPENCLAW_THINKING", "low"),
         "--timeout", str(max(10, min(int(timeout_s), 300))), "--message", prompt,
     ]
+    # Use the Gateway's verified default unless a deployment explicitly pins a
+    # supported model. Do not leave an unavailable target hardcoded in the bridge.
+    if os.environ.get("OPENCLAW_MODEL"):
+        command[2:2] = ["--model", os.environ["OPENCLAW_MODEL"]]
+    if isolated_session:
+        command[2:2] = ["--session-key", f"agent:{os.environ.get('OPENCLAW_AGENT_ID', 'main')}:{session_id}"]
     command_env = os.environ.copy()
     command_env.setdefault("OPENCLAW_ALLOW_INSECURE_PRIVATE_WS", "1")
     try:
@@ -469,26 +557,40 @@ def run_chat(
     if not raw_reply:
         raise RuntimeError("OpenClaw returned an empty reply")
     parsed = _parse_agent_reply(raw_reply)
-    actions = [action for action in parsed["actions"][:3] if isinstance(action, dict)]
+    language, texts = response_texts(message, parsed)
+    decision = parsed.get("decision") or ("chat" if not parsed["actions"] else None)
+    actions = _validate_actions(parsed["actions"], decision)
+    robot_id = next((action["arguments"]["robot_id"] for action in actions if action["arguments"].get("robot_id")), None)
+    metadata = {"language": language, "status_text": texts, "robot_id": robot_id, "decision": decision}
+    envelope = payload.get("result", payload) if isinstance(payload, dict) else {}
+    meta = envelope.get("meta", {}) if isinstance(envelope, dict) else {}
+    agent_meta = meta.get("agentMeta", {}) if isinstance(meta, dict) else {}
+    usage = agent_meta.get("usage", {})
+    LOGGER.info("assistant session=%s decision=%s language=%s robot=%s actions=%s model=%s prompt_tokens=%s cache_read=%s output_tokens=%s",
+                session_id, decision, language, robot_id, [action["name"] for action in actions],
+                agent_meta.get("model"), agent_meta.get("promptTokens"), usage.get("cacheRead"), usage.get("output"))
     if defer_mutations and any(ACTION_SPECS.get(str(action.get("name") or ""), ("", "", False))[2] for action in actions):
         job_id = uuid.uuid4().hex
         with _JOBS_LOCK:
             _JOBS[job_id] = {
                 "job_id": job_id, "status": "queued", "results": [],
                 "created_at": time.time(), "updated_at": time.time(),
+                "conversation": conversation,
+                **metadata,
             }
         threading.Thread(
-            target=_run_action_job, args=(job_id, actions, message, api_port),
+            target=_run_action_job, args=(job_id, actions, api_port),
             daemon=True, name=f"openclaw-action-{job_id[:8]}",
         ).start()
         return {
-            "reply": parsed["reply"] or "收到，正在执行中。",
+            "reply": parsed["reply"] or texts["accepted"],
             "actions": [], "job_id": job_id, "job_status": "queued", "session_id": session_id,
+            **metadata,
         }
     results = []
     for action in actions:
         try:
-            results.append(_execute_action(action, message, api_port))
-        except (ValueError, RuntimeError) as err:
+            results.append(_execute_action({**action, "_texts": texts}, api_port))
+        except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
             results.append({"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)})
-    return {"reply": parsed["reply"] or raw_reply, "actions": results, "session_id": session_id}
+    return {"reply": parsed["reply"] or raw_reply, "actions": results, "session_id": session_id, **metadata}

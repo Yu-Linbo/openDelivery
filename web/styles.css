@@ -3128,6 +3128,10 @@ body.bag-replay-open {
 .openclaw-admin-link { color: #7dd3fc; font-size: 11px; text-decoration: none; white-space: nowrap; }
 .openclaw-admin-link:hover { color: #bae6fd; text-decoration: underline; }
 .openclaw-chat-head button { min-width: 0; padding: 2px 4px; border: 0; color: #94a3b8; background: transparent; font-size: 22px; }
+.openclaw-chat-tools { display: flex; align-items: center; gap: 8px; }
+.openclaw-chat-tools [hidden] { display: none !important; }
+.openclaw-chat-tools #openclaw-chat-reset { color: #7dd3fc; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.openclaw-chat-tools #openclaw-chat-reset:disabled { opacity: .5; cursor: wait; }
 .openclaw-chat-messages { min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .openclaw-chat-message { max-width: 88%; padding: 9px 11px; border-radius: 11px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.55; }
 .openclaw-chat-message.assistant { align-self: flex-start; border: 1px solid #334155; background: #1e293b; }

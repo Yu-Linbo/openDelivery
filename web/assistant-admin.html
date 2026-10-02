@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenClaw 会话管理</title>
+    <link rel="stylesheet" href="./assistant-admin.css?v=20261001-v1">
+  </head>
+  <body>
+    <header>
+      <div><h1>OpenClaw 会话管理</h1><p>查看当前对话和开启新对话前保留的历史消息。</p></div>
+      <nav><a href="./">返回工作台</a><button id="refresh" type="button">刷新</button></nav>
+    </header>
+    <p id="status" role="status">正在读取…</p>
+    <p id="login" hidden>请使用网站账号登录后查看会话。<a href="/login?next=%2Fopendelivery%2Fassistant-admin.html">登录</a></p>
+    <main>
+      <aside aria-label="会话列表"><div id="sessions"></div></aside>
+      <section aria-label="会话消息"><h2 id="title">选择一个对话</h2><p id="session-info"></p><div id="messages" aria-live="polite"></div></section>
+    </main>
+    <script src="./assistant-admin.js?v=20261001-v1" defer></script>
+  </body>
+</html>

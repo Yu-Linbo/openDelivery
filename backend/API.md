@@ -214,8 +214,25 @@ These endpoints are not primary Web user workflows. Keep them backend-only and u
   - Body: `{ "message": "...", "session_id": "opendelivery-...", "context": { ... } }`
   - Proxies a stateful turn to the local OpenClaw Gateway. OpenClaw returns structured actions; the backend validates them against a fixed OpenDelivery API allowlist and executes confirmed operations.
   - Mutating actions return a background `job_id` immediately so reverse proxies do not time out.
+  - Logged-in users must submit their current server-owned session. New conversations use a unique OpenClaw `--session-key`; the original conversation and guest requests continue using the existing main session.
+  - AI receives a live robot snapshot and map point catalog and decides the user's intent, robot, destinations, and complete ordered plan. It should prefer a ready/idle online robot when none is specified, or explicitly include simulation startup when needed. The backend neither interprets request keywords nor rewrites robot selection or adds steps.
+  - AI responses include `decision` (`execute`, `query`, `clarify`, `chat`). Only `execute` can contain mutations; query actions are read-only, clarification/chat have no actions. The entire action list is validated before any execution. An action's boolean `include_result` requests the raw API response.
+  - Replies include `language`, `status_text`, and the selected `robot_id`; status text follows the request language, independently of the frontend locale. All route legs are awaited, including the return leg of a pickup round trip. Plans support up to eight actions including prerequisites.
+- `POST /api/assistant/session`
+  - Body: `{ "session_id": "...", "history": [{ "role": "user", "text": "..." }] }`.
+  - Returns `{ "authenticated": true/false, "user": "...", "session": {...} }`. On the first authenticated visit, imports up to 50 existing browser messages. Subsequent visits load the current persisted conversation. Guests do not create a server session.
+- `POST /api/assistant/reset`
+  - Body: `{ "session_id": "current session id" }`. Login required (403 for guests). Archives the current conversation and returns an empty new session. A stale session id returns 409 without creating another conversation.
+- `GET /api/assistant/sessions` / `GET /api/assistant/sessions/{session_id}`
+  - Login required. Lists the current user's active and archived conversations, or returns that conversation's messages. Other users' sessions return 404.
+  - Admin UI: `/opendelivery/assistant-admin.html` (or `assistant-admin.html` on a local frontend).
 - `GET /api/assistant/jobs/{job_id}`
   - Returns concise progress and terminal results for a background assistant action sequence.
+  - Final action results are also saved to the conversation that started the job, even if it has since been archived.
+
+Assistant histories are persisted in `backend/data/assistant_sessions.sqlite` (override with `OPEN_DELIVERY_ASSISTANT_DB`), excluded from git. Identity comes from `X-Auth-User`, accepted only when the TCP peer matches `OPEN_DELIVERY_AUTH_PROXIES` (default `100.64.0.2`, the existing linbo.lol proxy). `guest`, missing headers, and headers from other peers are anonymous. Do not add browser/client addresses to this trusted list.
+
+The linbo.lol nginx `/opendelivery/api/` location must overwrite `X-Auth-User` with `$linbo_user`, the identity returned by its existing `auth_request`. See [assistant deployment](../docs/assistant-sessions.md).
 
 - `GET /api/ros/threads/status`
   - Backend ROS bridge thread status.

@@ -34,11 +34,33 @@ class OpenClawChatTest(unittest.TestCase):
         self.assertEqual(command[:2], ["/usr/bin/openclaw", "agent"])
         self.assertIn("main", command)
         self.assertNotIn("--session-id", command)
+        self.assertNotIn("--model", command)
+        self.assertEqual(command[command.index("--thinking") + 1], "low")
         self.assertNotIn("shell", run.call_args.kwargs)
         self.assertIn("startup_sim", command[-1])
         self.assertIn("开始任务", command[-1])
         self.assertIn("The backend validates and executes actions", command[-1])
         self.assertIn("前台取货点", command[-1])
+
+    @mock.patch.object(openclaw_chat, "_load_robot_context", return_value={"available": False})
+    @mock.patch.object(openclaw_chat, "_load_map_point_catalog")
+    @mock.patch.object(openclaw_chat.shutil, "which", return_value="/usr/bin/openclaw")
+    @mock.patch.object(openclaw_chat.subprocess, "run")
+    def test_large_map_catalog_remains_complete_and_browser_facts_are_filtered(self, run, which, catalog, robots):
+        points = [{"floor_id": "test_101", "id": "point_" + str(i), "name": "候选点位" * 20, "type": "custom"}
+                  for i in range(100)]
+        catalog.return_value = points
+        run.return_value = mock.Mock(returncode=0, stdout='{"reply":"ok","decision":"chat","actions":[]}', stderr="")
+        openclaw_chat.run_chat("Explain the map without executing.", "opendelivery-12345678", {
+            "robot_id": "robot1", "view": "monitor", "floor": "test_101",
+            "page_url": "https://example.com/private?token=secret", "online_robots": ["untrusted-online"],
+        })
+        prompt = run.call_args.args[0][-1]
+        raw_catalog = prompt.split("Map points: ", 1)[1].split("\nBrowser: ", 1)[0]
+        self.assertEqual(json.loads(raw_catalog), points)
+        self.assertIn("robot1", prompt)
+        self.assertNotIn("token=secret", prompt)
+        self.assertNotIn("untrusted-online", prompt)
 
     @mock.patch.object(openclaw_chat.shutil, "which", return_value="/usr/bin/openclaw")
     @mock.patch.object(openclaw_chat.subprocess, "run")
@@ -48,7 +70,7 @@ class OpenClawChatTest(unittest.TestCase):
             openclaw_chat.run_chat("hello", "opendelivery-12345678", {})
 
     @mock.patch.object(openclaw_chat, "urlopen")
-    def test_executes_confirmed_startup_through_allowlisted_api(self, urlopen):
+    def test_executes_ai_startup_through_allowlisted_api(self, urlopen):
         startup = mock.MagicMock()
         startup.__enter__.return_value.read.return_value = b'{"ok": true}'
         status = mock.MagicMock()
@@ -56,45 +78,12 @@ class OpenClawChatTest(unittest.TestCase):
         urlopen.side_effect = [startup, status]
         result = openclaw_chat._execute_action(
             {"name": "startup_sim", "arguments": {"robot_id": "robot1"}},
-            "仿真上线 robot1", 8001,
+            8001,
         )
         self.assertTrue(result["ok"])
         request = urlopen.call_args_list[0].args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:8001/api/ros/lifecycle/startup")
         self.assertEqual(result["summary"], "robot1 仿真已上线，状态 ready")
-
-    def test_mutation_requires_matching_confirmation(self):
-        result = openclaw_chat._execute_action(
-            {"name": "shutdown_sim", "arguments": {"robot_id": "robot1"}},
-            "robot1 状态如何", 8001,
-        )
-        self.assertTrue(result["confirmation_required"])
-        self.assertNotIn("navigate_to_point", result["summary"])
-
-    def test_plain_stop_never_confirms_sim_shutdown(self):
-        result = openclaw_chat._execute_action(
-            {"name": "shutdown_sim", "arguments": {"robot_id": "robot1"}},
-            "停止", 8001,
-        )
-        self.assertTrue(result["confirmation_required"])
-
-    @mock.patch.object(openclaw_chat, "urlopen")
-    def test_start_execution_confirms_planned_startup(self, urlopen):
-        startup = mock.MagicMock()
-        startup.__enter__.return_value.read.return_value = b'{"ok":true}'
-        status = mock.MagicMock()
-        status.__enter__.return_value.read.return_value = b'[{"robot_id":"robot1","online":true,"robot_status":"ready"}]'
-        urlopen.side_effect = [startup, status]
-        result = openclaw_chat._execute_action(
-            {"name": "startup_sim", "arguments": {"robot_id": "robot1"}},
-            "开始执行", 8001,
-        )
-        self.assertTrue(result["ok"])
-
-    def test_continue_and_start_task_confirm_planned_actions(self):
-        for message in ("已经上线成功了，继续吧", "开始任务"):
-            with self.subTest(message=message):
-                self.assertTrue(openclaw_chat._confirmed(message, "navigate_to_point"))
 
     @mock.patch.object(openclaw_chat.time, "sleep")
     @mock.patch.object(openclaw_chat, "urlopen")
@@ -119,7 +108,7 @@ class OpenClawChatTest(unittest.TestCase):
         urlopen.side_effect = [detail, stopped]
         result = openclaw_chat._execute_action(
             {"name": "stop_task", "arguments": {"robot_id": "robot1"}},
-            "停止", 8001,
+            8001,
         )
         self.assertEqual(result["summary"], "robot1 任务已停止")
         body = json.loads(urlopen.call_args_list[1].args[0].data)
@@ -139,7 +128,7 @@ class OpenClawChatTest(unittest.TestCase):
         urlopen.side_effect = [assets, dispatched]
         result = openclaw_chat._execute_action(
             {"name": "navigate_to_point", "arguments": {"robot_id": "robot1", "floor_id": "test_101", "point": "前台取货点"}},
-            "去1楼取货点", 8001,
+            8001,
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["task_id"], "task_1")
@@ -161,14 +150,14 @@ class OpenClawChatTest(unittest.TestCase):
         ]
         result = openclaw_chat._execute_action(
             {"name": "pickup_and_return", "arguments": {"robot_id": "robot1", "floor_id": "test_101", "point": "前台取货点"}},
-            "去1楼前台取货后回来", 8001,
+            8001,
         )
         self.assertTrue(result["ok"])
         outbound = json.loads(urlopen.call_args_list[2].args[0].data)
         returning = json.loads(urlopen.call_args_list[3].args[0].data)
         self.assertEqual(outbound["floor_id"], "test_101")
         self.assertEqual(returning, {"robot_id": "robot1", "x": 3.0, "y": 4.0, "yaw": 1.0, "floor_id": "test_102"})
-        wait.assert_called_once_with("robot1", "pickup_1", 8001)
+        self.assertEqual([call.args[1] for call in wait.call_args_list], ["pickup_1", "return_1"])
 
     @mock.patch.object(openclaw_chat, "_wait_for_navigation_terminal")
     @mock.patch.object(openclaw_chat, "_execute_action")
@@ -183,22 +172,9 @@ class OpenClawChatTest(unittest.TestCase):
         ]
         with openclaw_chat._JOBS_LOCK:
             openclaw_chat._JOBS["a" * 32] = {"status": "queued", "results": []}
-        openclaw_chat._run_action_job("a" * 32, actions, "开始执行", 8001)
+        openclaw_chat._run_action_job("a" * 32, actions, 8001)
         self.assertEqual([call.args[1] for call in wait.call_args_list], ["task_1", "task_2"])
         self.assertEqual(openclaw_chat.get_action_job("a" * 32)["status"], "completed")
-
-    @mock.patch.object(openclaw_chat, "urlopen")
-    def test_short_online_command_is_explicit_confirmation(self, urlopen):
-        startup = mock.MagicMock()
-        startup.__enter__.return_value.read.return_value = b'{"ok": true}'
-        status = mock.MagicMock()
-        status.__enter__.return_value.read.return_value = b'[{"robot_id":"robot1","online":true}]'
-        urlopen.side_effect = [startup, status]
-        result = openclaw_chat._execute_action(
-            {"name": "startup_sim", "arguments": {"robot_id": "robot1"}},
-            "上线 robot1", 8001,
-        )
-        self.assertTrue(result["ok"])
 
     @mock.patch.object(openclaw_chat.Path, "is_file", return_value=True)
     @mock.patch.object(openclaw_chat.shutil, "which", return_value=None)

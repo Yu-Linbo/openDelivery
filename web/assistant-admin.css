@@ -1,0 +1,23 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #0b1220; color: #e2e8f0; }
+* { box-sizing: border-box; }
+body { margin: 0 auto; padding: 24px; max-width: 1280px; }
+header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 18px; overflow-wrap: anywhere; }
+p { color: #94a3b8; line-height: 1.6; }
+nav { display: flex; gap: 16px; align-items: center; }
+a { color: #7dd3fc; }
+button { font: inherit; color: inherit; background: #1e293b; border: 1px solid #475569; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 3px; }
+main { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 20px; }
+aside, section { min-width: 0; background: #111c31; border: 1px solid #334155; border-radius: 12px; padding: 16px; }
+#sessions { display: grid; gap: 8px; max-height: 75vh; overflow-y: auto; }
+.session { width: 100%; text-align: left; display: grid; gap: 8px; overflow-wrap: anywhere; }
+.session[aria-pressed="true"] { border-color: #7dd3fc; background: #16415a; }
+.session small, #session-info { color: #94a3b8; font-size: 12px; overflow-wrap: anywhere; }
+#messages { display: flex; flex-direction: column; gap: 12px; max-height: 65vh; overflow-y: auto; }
+.message { max-width: 90%; border-radius: 10px; border: 1px solid #334155; padding: 12px; background: #1e293b; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.message.user { align-self: flex-end; background: #075985; }
+.message small { display: block; color: #cbd5e1; font-size: 11px; margin-bottom: 6px; }
+[hidden] { display: none !important; }
+@media (max-width: 640px) { body { padding: 16px; } main { grid-template-columns: minmax(0, 1fr); } #sessions { max-height: 240px; } }
