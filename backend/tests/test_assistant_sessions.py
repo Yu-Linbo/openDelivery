@@ -21,7 +21,7 @@ class AssistantSessionsTest(unittest.TestCase):
 
     def request(self, path, method="POST", user="linbo", peer="100.64.0.2", **data):
         handler = mock.Mock()
-        handler.headers = {"X-Auth-User": user, "Content-Length": "0"}
+        handler.headers = {"X-Auth-User": user, "Content-Length": "0", "Host": "localhost:8001"}
         handler.client_address = (peer, 1234)
         handler._read_json_body.return_value = data
         self.assertTrue(sessions.handle_request(handler, path, method))
@@ -44,13 +44,35 @@ class AssistantSessionsTest(unittest.TestCase):
 
     def test_guest_and_forged_identity_cannot_reset_or_read_history(self):
         first = self.store.ensure("linbo")
-        for user, peer in [("guest", "100.64.0.2"), ("linbo", "127.0.0.1"), ("linbo", "100.64.0.3")]:
+        for user, peer in [("guest", "100.64.0.2"), ("linbo", "192.168.1.20"), ("linbo", "100.64.0.3")]:
             with self.subTest(user=user, peer=peer):
                 for path, method in [("/api/assistant/reset", "POST"), ("/api/assistant/sessions", "GET"),
                                      ("/api/assistant/sessions/" + first["id"], "GET")]:
                     _, status = self.request(path, method, user, peer, session_id=first["id"])
                     self.assertEqual(status, 403)
         self.assertEqual(len(self.store.list("linbo")), 1)
+
+    def test_localhost_has_default_owner_and_ignores_forged_identity(self):
+        for peer, host, origin in [("127.0.0.1", "localhost:8001", "http://localhost:8000"),
+                                   ("::1", "[::1]:8001", "http://[::1]:8000")]:
+            with self.subTest(peer=peer):
+                self.assertEqual(sessions.authenticated_user({"Host": host, "Origin": origin,
+                                 "X-Auth-User": "another-user"}, peer), "linbo")
+        data, status = self.request("/api/assistant/session", peer="127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["user"], "linbo")
+        _, status = self.request("/api/assistant/reset", peer="127.0.0.1", session_id=data["session"]["id"])
+        self.assertEqual(status, 200)
+
+    def test_local_login_denies_external_origin_and_dns_rebinding(self):
+        for headers in [{"Host": "attacker.example:8001"}, {"Host": "localhost:8001", "Origin": "https://attacker.example"},
+                        {"Host": "localhost:8001", "Origin": "null"}, {"Host": "[invalid"}]:
+            with self.subTest(headers=headers):
+                self.assertIsNone(sessions.authenticated_user(headers, "127.0.0.1"))
+        with mock.patch.dict(os.environ, {"OPEN_DELIVERY_LOCAL_USER": ""}):
+            self.assertIsNone(sessions.authenticated_user({"Host": "localhost:8001"}, "127.0.0.1"))
+        self.assertIsNone(sessions.authenticated_user({"Host": "localhost:8001"}, "192.168.1.20"))
 
     def test_guest_bootstrap_does_not_create_a_session(self):
         data, status = self.request("/api/assistant/session", user="guest", session_id="opendelivery-guest")

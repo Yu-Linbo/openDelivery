@@ -1,13 +1,18 @@
 """Persistent, user-owned assistant conversations behind the shared login proxy."""
 
 import ipaddress
+import logging
 import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from openclaw_chat import SESSION_RE
+import diagnostic_logging as diagnostics
+
+LOGGER = logging.getLogger("opendelivery.sessions")
 
 
 def authenticated_user(headers, peer):
@@ -16,11 +21,36 @@ def authenticated_user(headers, peer):
     trusted = os.environ.get("OPEN_DELIVERY_AUTH_PROXIES", "100.64.0.2").split(",")
     try:
         address = ipaddress.ip_address(peer)
-        if not any(address in ipaddress.ip_network(item.strip()) for item in trusted if item.strip()):
-            return None
+        is_proxy = any(address in ipaddress.ip_network(item.strip()) for item in trusted if item.strip())
     except ValueError:
         return None
-    user = str(headers.get("X-Auth-User") or "").strip()
+    if is_proxy and headers.get("X-Auth-User") is not None:
+        user = str(headers.get("X-Auth-User") or "").strip()
+    elif address.is_loopback:
+        # Local workstation access uses a fixed owner, never a client-supplied
+        # identity. Check Host and Origin too, since the API allows CORS.
+        def is_local_host(host):
+            if host == "localhost":
+                return True
+            try:
+                return ipaddress.ip_address(host or "").is_loopback
+            except ValueError:
+                return False
+
+        try:
+            host = urlsplit("//" + str(headers.get("Host") or "")).hostname
+            origin = headers.get("Origin")
+            if not is_local_host(host):
+                return None
+            if origin:
+                source = urlsplit(str(origin))
+                if source.scheme not in ("http", "https") or not is_local_host(source.hostname):
+                    return None
+        except ValueError:
+            return None
+        user = os.environ.get("OPEN_DELIVERY_LOCAL_USER", "linbo").strip()
+    else:
+        return None
     return user if user and user != "guest" and len(user) <= 100 else None
 
 
@@ -120,6 +150,7 @@ def handle_request(handler, path, method):
     if not path.startswith("/api/assistant/") or path.startswith("/api/assistant/jobs/"):
         return False
     user = authenticated_user(handler.headers, handler.client_address[0])
+    diagnostics.update_context(user=user or "guest")
     if method == "POST" and path in ("/api/assistant/session", "/api/assistant/reset", "/api/assistant/chat"):
         try:
             if int(handler.headers.get("Content-Length") or 0) > 512 * 1024:
@@ -133,6 +164,10 @@ def handle_request(handler, path, method):
             return True
         if path == "/api/assistant/session":
             session = STORE.ensure(user, data.get("session_id"), data.get("history")) if user else None
+            diagnostics.event(LOGGER, logging.INFO, "assistant.session_resolved", authenticated=bool(user),
+                              session_id=session["id"] if session else None,
+                              legacy=bool(session and session["legacy"]),
+                              peer=handler.client_address[0])
             handler._send_json({"authenticated": bool(user), "user": user, "session": session})
             return True
         if path == "/api/assistant/reset":
@@ -140,7 +175,10 @@ def handle_request(handler, path, method):
                 handler._send_json({"error": "请登录后开启新对话"}, 403)
                 return True
             try:
-                handler._send_json({"session": STORE.reset(user, data.get("session_id"))})
+                session = STORE.reset(user, data.get("session_id"))
+                diagnostics.event(LOGGER, logging.INFO, "assistant.session_reset", previous_session_id=data.get("session_id"),
+                                  session_id=session["id"])
+                handler._send_json({"session": session})
             except ValueError as err:
                 handler._send_json({"error": str(err)}, 409)
             return True
@@ -157,6 +195,7 @@ def handle_request(handler, path, method):
             return True
         if session:
             STORE.append(user, session["id"], "user", message)
+        diagnostics.update_context(session_id=session["id"] if session else str(data.get("session_id") or "")[:96])
         try:
             out = run_chat(message, data.get("session_id"), data.get("context") or {},
                            defer_mutations=True, isolated_session=bool(session and not session["legacy"]),

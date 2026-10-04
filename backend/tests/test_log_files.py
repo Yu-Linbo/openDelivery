@@ -54,7 +54,7 @@ class LogFilesTest(unittest.TestCase):
     def test_formatter_severity_and_time(self):
         record = logging.LogRecord('opendelivery.server', logging.WARNING, '', 0, 'failed %s', ('robot1',), None)
         record.created = 12.5
-        self.assertEqual(diagnostic_logging.RosFormatter().format(record), '[WARN] [12.500000000] [opendelivery.server]: failed robot1')
+        self.assertEqual(diagnostic_logging.RosFormatter().format(record), '[WARN] [12.500000000] [opendelivery.server]: time=1970-01-01T00:00:12.500+00:00 failed robot1')
 
 
 if __name__ == '__main__':

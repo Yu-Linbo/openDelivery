@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import diagnostic_logging as diagnostics
 import math
 import os
 import re
@@ -859,14 +860,20 @@ class OpenDeliveryTfBridgeNode(Node):
     def _process_commands(self) -> None:
         for cmd in ros_command_queue.drain_commands():
             response_id = str(cmd.get("_response_id") or "")
-            try:
-                asynchronous = self._handle_web_command(cmd)
-                if response_id and not asynchronous:
-                    ros_command_queue.complete_command(response_id, result={"ok": True})
-            except Exception as ex:  # noqa: BLE001
-                self.get_logger().error(f"web command failed: {ex}")
-                if response_id:
-                    ros_command_queue.complete_command(response_id, error=str(ex))
+            fields = {**cmd.get("_log_context", {}), "command_id": cmd.get("_command_id"),
+                      "command_type": cmd.get("type") or cmd.get("mode"), "robot_id": cmd.get("robot_id"), "task_id": cmd.get("task_id")}
+            with diagnostics.context(**fields):
+                logger = logging.getLogger("opendelivery.commands")
+                try:
+                    asynchronous = self._handle_web_command(cmd)
+                    diagnostics.event(logger, logging.DEBUG if cmd.get("type") == "teleop" else logging.INFO,
+                                      "ros.command_dispatched", asynchronous=bool(asynchronous))
+                    if response_id and not asynchronous:
+                        ros_command_queue.complete_command(response_id, result={"ok": True})
+                except Exception as ex:  # noqa: BLE001
+                    diagnostics.event(logger, logging.ERROR, "ros.command_failed", error_type=type(ex).__name__, error=str(ex), exc_info=True)
+                    if response_id:
+                        ros_command_queue.complete_command(response_id, error=str(ex))
         self._tick_teleop()
 
     def _ensure_teleop_interfaces(self, rid: str) -> None:

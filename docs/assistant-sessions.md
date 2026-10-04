@@ -18,7 +18,9 @@ AI 返回 `decision`（`execute` / `query` / `clarify` / `chat`）及完整 `act
 proxy_set_header X-Auth-User $linbo_user;
 ```
 
-`$linbo_user` 已由 `/etc/nginx/snippets/linbo-auth.conf` 的 `auth_request_set` 获取。该指令覆盖客户端自行提交的身份头。后端只信任来自现有 Tailscale 代理 `100.64.0.2` 的身份；本机或直接访问后端的请求按游客处理。代理地址迁移时通过 `OPEN_DELIVERY_AUTH_PROXIES` 配置准确的新地址。
+`$linbo_user` 已由 `/etc/nginx/snippets/linbo-auth.conf` 的 `auth_request_set` 获取。该指令覆盖客户端自行提交的身份头。后端只信任来自现有 Tailscale 代理 `100.64.0.2` 的身份；代理地址迁移时通过 `OPEN_DELIVERY_AUTH_PROXIES` 配置准确的新地址。
+
+本机 `localhost:8000` 默认登录为 `linbo`，复用该用户的当前与历史会话。该入口要求后端 TCP 来源是回环地址，且请求 Host 和浏览器 Origin 都是 localhost/回环地址；来自局域网、公网或外部网页的请求不会获得本地身份。客户端传入的身份头不能改变本地用户。通过 `OPEN_DELIVERY_LOCAL_USER` 可以指定本地用户，设为空字符串可关闭本地默认登录。网站游客仍不能 reset 或查看历史。
 
 旧的 `https://linbo.lol/openclaw/` 在 443 端口没有管理代理。兼容旧书签的两个精确路由可导向新的会话管理页：
 

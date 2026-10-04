@@ -51,17 +51,20 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
 
     def do_POST(self):
-        self.headers["X-Auth-User"] = self.user
+        if self.user != "local":
+            self.headers["X-Auth-User"] = self.user
         if not assistant_sessions.handle_request(self, urlparse(self.path).path, "POST"):
             self.send_error(404)
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/__user":
-            Handler.user = "linbo" if urlparse(self.path).query == "linbo" else "guest"
+            selected = urlparse(self.path).query
+            Handler.user = selected if selected in ("linbo", "local") else "guest"
             self._send_json({"ok": True})
             return
-        self.headers["X-Auth-User"] = self.user
+        if self.user != "local":
+            self.headers["X-Auth-User"] = self.user
         if assistant_sessions.handle_request(self, path, "GET"):
             return
         if path == "/":
@@ -105,6 +108,14 @@ with tempfile.TemporaryDirectory() as temp, \
         "open " + url,
         "click #openclaw-chat-trigger",
         ev("""(async()=>{await new Promise(r=>setTimeout(r,100));
+          OpenDeliveryI18n.setLocale('en');await new Promise(r=>setTimeout(r,40));
+          const welcome=document.querySelector('#openclaw-chat-messages .assistant');
+          if(!welcome.textContent.startsWith('Hello. I can query robot status'))throw Error('English welcome absent');
+          if(welcome.hasAttribute('data-i18n-ignore'))throw Error('Welcome cannot follow UI language');
+          OpenDeliveryI18n.setLocale('zh-CN');await new Promise(r=>setTimeout(r,40));
+          if(!welcome.textContent.startsWith('你好，我可以查询机器人状态'))throw Error('Chinese welcome absent');
+          OpenDeliveryI18n.setLocale('en');return 'welcome follows selected language';})()"""),
+        ev("""(async()=>{await new Promise(r=>setTimeout(r,100));
           if(!document.getElementById('openclaw-chat-reset').hidden||!document.getElementById('openclaw-admin-link').hidden)throw Error('guest controls visible');
           const r=await fetch('/api/assistant/reset',{method:'POST',body:'{}'});if(r.status!==403)throw Error('guest reset allowed');
           const s=await fetch('/api/assistant/sessions');if(s.status!==403)throw Error('guest admin allowed');
@@ -122,6 +133,9 @@ with tempfile.TemporaryDirectory() as temp, \
         "click #openclaw-chat-reset",
         ev("""(async()=>{for(let i=0;i<100&&document.getElementById('openclaw-chat-reset').disabled;i++)await new Promise(r=>setTimeout(r,20));
           if(document.querySelector('.openclaw-chat-message.user'))throw Error('reset retained messages');
+          await new Promise(r=>setTimeout(r,40));
+          if(!document.querySelector('#openclaw-chat-messages .assistant').textContent.startsWith('Hello. I can query robot status'))throw Error('New session welcome ignores selected English');
+          OpenDeliveryI18n.setLocale('zh-CN');
           const p=await(await fetch('/api/assistant/sessions')).json();if(p.sessions.length!==2)throw Error('archive missing');
           return 'new chat and archive passed';})()"""),
         "fill #openclaw-chat-input <img src=x onerror=alert(1)> 新消息",
@@ -155,6 +169,13 @@ with tempfile.TemporaryDirectory() as temp, \
           for(let i=0;i<100&&document.getElementById('login').hidden;i++)await new Promise(r=>setTimeout(r,20));
           if(document.getElementById('login').hidden||document.querySelector('#messages .message'))throw Error('logout retained admin access');
           return 'expired login denies admin and clears messages';})()"""),
+        ev("""(async()=>{await fetch('/__user?local');location.href='/';return 'switch to direct localhost access';})()"""),
+        "click #openclaw-chat-trigger",
+        ev("""(async()=>{for(let i=0;i<100&&document.getElementById('openclaw-chat-reset').hidden;i++)await new Promise(r=>setTimeout(r,20));
+          if(document.getElementById('openclaw-chat-reset').hidden||document.getElementById('openclaw-admin-link').hidden)throw Error('localhost default login controls absent');
+          const state=await(await fetch('/api/assistant/session',{method:'POST',body:'{}'})).json();
+          if(!state.authenticated||state.user!=='linbo')throw Error('localhost default owner absent');
+          return 'localhost defaults to logged-in owner with new chat and admin';})()"""),
         "errors",
     ]
     args = ['--session', 'assistant-test', '--args', '--no-sandbox,--no-zygote,--single-process,--disable-dev-shm-usage,--disable-gpu']

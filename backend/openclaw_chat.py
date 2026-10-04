@@ -1,6 +1,7 @@
 """Small, validated bridge between the web API and the OpenClaw CLI."""
 
 import json
+import contextvars
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from assistant_language import EN, ZH, response_texts
+import diagnostic_logging as diagnostics
 
 
 SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,95}")
@@ -80,14 +82,15 @@ ACTION_SPECS = {
 
 
 def _read_json(url: str, timeout: float = 15.0):
-    with urlopen(Request(url, method="GET"), timeout=timeout) as response:
+    with urlopen(Request(url, method="GET", headers=diagnostics.trace_headers()), timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _load_robot_context(api_port: int):
     try:
         payload = _read_json(f"http://127.0.0.1:{api_port}/api/robot/status/cache", timeout=5)
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as err:
+        diagnostics.event(LOGGER, logging.WARNING, "assistant.facts_unavailable", source="robot_status", error=str(err))
         return {"available": False}
     rows = payload.get("items", []) if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
@@ -148,7 +151,8 @@ def _load_map_point_catalog(api_port: int):
     """Expose real candidates to the model; keep coordinates server-side."""
     try:
         floors_payload = _read_json(f"http://127.0.0.1:{api_port}/api/floors", timeout=5)
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as err:
+        diagnostics.event(LOGGER, logging.WARNING, "assistant.facts_unavailable", source="floors", error=str(err))
         return []
     catalog = []
     for floor_id in (floors_payload.get("floors") or [])[:32]:
@@ -160,7 +164,8 @@ def _load_map_point_catalog(api_port: int):
                 f"http://127.0.0.1:{api_port}/api/maps/{quote(floor_id, safe='')}/assets",
                 timeout=5,
             )
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as err:
+            diagnostics.event(LOGGER, logging.WARNING, "assistant.facts_unavailable", source="map_points", floor_id=floor_id, error=str(err))
             continue
         for point in (assets.get("points") or [])[:100]:
             if isinstance(point, dict):
@@ -209,7 +214,7 @@ def _post_navigation(robot_id: str, destination: dict, api_port: int):
     body = {"robot_id": robot_id, **{key: destination[key] for key in ("x", "y", "yaw", "floor_id")}}
     request = Request(
         f"http://127.0.0.1:{api_port}/api/robot/motion/goto",
-        data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST",
+        data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json", **diagnostics.trace_headers()}, method="POST",
     )
     with urlopen(request, timeout=125) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -288,7 +293,7 @@ def _execute_action(action: dict, api_port: int):
                 "type": "task_command", "robot_id": robot_id,
                 "task_id": task_id, "command": "terminate",
             }).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
+            headers={"Content-Type": "application/json", **diagnostics.trace_headers()}, method="POST",
         )
         with urlopen(request, timeout=15) as response:
             json.loads(response.read().decode("utf-8"))
@@ -321,7 +326,7 @@ def _execute_action(action: dict, api_port: int):
             return {"name": name, "ok": True, "summary": _summarize_action_result(name, result, texts)}
     path = path_template.format(robot_id=quote(robot_id, safe=""), floor_id=quote(str(arguments.get("floor_id") or ""), safe=""))
     data = None
-    headers = {}
+    headers = diagnostics.trace_headers()
     if method == "POST":
         body = {"robot_id": robot_id}
         if name == "startup_sim":
@@ -358,19 +363,36 @@ def _wait_for_navigation_terminal(
     *, texts=None,
 ):
     texts = texts or ZH
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
     seen = False
     last_status = ""
+    failures = 0
+    reported = None
+    next_report = started
+    diagnostics.event(LOGGER, logging.INFO, "assistant.navigation_wait_started", robot_id=robot_id, task_id=task_id, timeout_s=timeout_s)
     while time.monotonic() < deadline:
         try:
             detail = _read_json(
                 f"http://127.0.0.1:{api_port}/api/robot/{quote(robot_id, safe='')}/detail",
                 timeout=5,
             )
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as err:
+            failures += 1
+            now = time.monotonic()
+            if failures == 1 or now >= next_report:
+                diagnostics.event(LOGGER, logging.WARNING, "assistant.navigation_poll_failed", robot_id=robot_id,
+                                  task_id=task_id, poll_failures=failures, error=str(err))
+                next_report = now + 30
             time.sleep(2)
             continue
         task = detail.get("task") if isinstance(detail, dict) else None
+        state = (str((task or {}).get("task_id") or ""), str((task or {}).get("task_status") or "")) if isinstance(task, dict) else ("", "")
+        now = time.monotonic()
+        if state != reported or now >= next_report:
+            diagnostics.event(LOGGER, logging.INFO, "assistant.navigation_observed", robot_id=robot_id, task_id=task_id,
+                              observed_task_id=state[0], task_status=state[1], duration_ms=round((now-started)*1000), poll_failures=failures)
+            reported, next_report = state, now + 30
         if isinstance(task, dict) and str(task.get("task_id") or "") == task_id:
             seen = True
             last_status = str(task.get("task_status") or "")
@@ -380,19 +402,31 @@ def _wait_for_navigation_terminal(
                 raise RuntimeError(texts["navigation_failed"].format(status=last_status))
         time.sleep(2)
     reason = f" ({last_status})" if seen and last_status else ""
+    diagnostics.event(LOGGER, logging.ERROR, "assistant.navigation_timed_out", robot_id=robot_id, task_id=task_id,
+                      task_seen=seen, task_status=last_status, poll_failures=failures, timeout_s=timeout_s)
     raise RuntimeError(texts["navigation_timeout"].format(status=reason))
 
 
 def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.0, *, texts=None):
     texts = texts or ZH
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
     last_status = ""
+    failures = 0
+    reported = None
+    next_report = started
+    diagnostics.event(LOGGER, logging.INFO, "assistant.robot_wait_started", robot_id=robot_id, timeout_s=timeout_s)
     while time.monotonic() < deadline:
-        request = Request(f"http://127.0.0.1:{api_port}/api/robot/status/cache", method="GET")
+        request = Request(f"http://127.0.0.1:{api_port}/api/robot/status/cache", method="GET", headers=diagnostics.trace_headers())
         try:
             with urlopen(request, timeout=5) as response:
                 rows = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+            failures += 1
+            now = time.monotonic()
+            if failures == 1 or now >= next_report:
+                diagnostics.event(LOGGER, logging.WARNING, "assistant.robot_poll_failed", robot_id=robot_id, poll_failures=failures, error=str(err))
+                next_report = now + 30
             rows = []
         # Production wraps presence rows in {"items": [...]}; continue to
         # accept the historical bare-list shape for backward compatibility.
@@ -407,9 +441,17 @@ def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.
                 row.get("robot_status") or row.get("live_robot_status")
                 or row.get("persisted_robot_status") or row.get("status") or ""
             )
+            state = (row.get("online") is True, last_status)
+            now = time.monotonic()
+            if state != reported or now >= next_report:
+                diagnostics.event(LOGGER, logging.INFO, "assistant.robot_observed", robot_id=robot_id,
+                                  online=state[0], robot_status=last_status, duration_ms=round((now-started)*1000), poll_failures=failures)
+                reported, next_report = state, now + 30
             if row.get("online") is True and last_status.lower() in ("", "ready", "idle", "online"):
                 return last_status or "online"
         time.sleep(2)
+    diagnostics.event(LOGGER, logging.ERROR, "assistant.robot_wait_timed_out", robot_id=robot_id,
+                      robot_status=last_status, poll_failures=failures, timeout_s=timeout_s)
     raise RuntimeError(texts["startup_timeout"].format(robot_id=robot_id, status=f" ({last_status})" if last_status else ""))
 
 
@@ -441,48 +483,71 @@ def _summarize_action_result(name: str, result: Any, texts=None) -> str:
 
 
 def _run_action_job(job_id: str, actions: list, api_port: int):
+    with diagnostics.context(job_id=job_id, stage="execution"):
+        _run_action_job_logged(job_id, actions, api_port)
+
+
+def _run_action_job_logged(job_id: str, actions: list, api_port: int):
+    started = time.monotonic()
     results = []
     with _JOBS_LOCK:
         _JOBS[job_id]["status"] = "running"
         texts = _JOBS[job_id].get("status_text") or ZH
-    for action in actions:
+    diagnostics.event(LOGGER, logging.INFO, "assistant.job_started", action_count=len(actions))
+    for index, action in enumerate(actions, 1):
         if not isinstance(action, dict):
             continue
-        try:
-            LOGGER.info("assistant job=%s action=%s robot=%s started", job_id, action.get("name"), (action.get("arguments") or {}).get("robot_id"))
-            result = _execute_action({**action, "_texts": texts}, api_port)
-        except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
-            result = {"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)}
-        LOGGER.info("assistant job=%s action=%s accepted=%s confirmation_required=%s", job_id, action.get("name"), result.get("ok"), result.get("confirmation_required", False))
-        results.append(result)
-        with _JOBS_LOCK:
-            _JOBS[job_id]["results"] = list(results)
-        if not result.get("ok"):
-            break
-        if str(action.get("name") or "") == "navigate_to_point":
+        arguments = action.get("arguments") or {}
+        with diagnostics.context(step=index, action=action.get("name"), robot_id=arguments.get("robot_id"),
+                                 floor_id=arguments.get("floor_id"), point=arguments.get("point")):
+            action_started = time.monotonic()
+            diagnostics.event(LOGGER, logging.INFO, "assistant.action_started")
             try:
-                _wait_for_navigation_terminal(
-                    str((action.get("arguments") or {}).get("robot_id") or ""),
-                    str(result.get("task_id") or ""), api_port,
-                    texts=texts,
-                )
-                result["summary"] = texts["arrived"]
-            except RuntimeError as err:
-                result = {**result, "ok": False, "error": str(err)}
-            results[-1] = result
+                result = _execute_action({**action, "_texts": texts}, api_port)
+            except Exception as err:
+                result = {"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)}
+                diagnostics.event(LOGGER, logging.ERROR, "assistant.action_exception", error_type=type(err).__name__,
+                                  error=str(err), exc_info=not isinstance(err, (ValueError, RuntimeError, HTTPError, URLError, TimeoutError)))
+            diagnostics.event(LOGGER, logging.INFO if result.get("ok") else logging.ERROR, "assistant.action_result",
+                              ok=result.get("ok"), task_id=result.get("task_id"), error=result.get("error"),
+                              duration_ms=round((time.monotonic()-action_started)*1000))
+            results.append(result)
             with _JOBS_LOCK:
                 _JOBS[job_id]["results"] = list(results)
             if not result.get("ok"):
                 break
+            if str(action.get("name") or "") == "navigate_to_point":
+                try:
+                    _wait_for_navigation_terminal(str(arguments.get("robot_id") or ""),
+                                                  str(result.get("task_id") or ""), api_port, texts=texts)
+                    result["summary"] = texts["arrived"]
+                except Exception as err:
+                    result = {**result, "ok": False, "error": str(err)}
+                    diagnostics.event(LOGGER, logging.ERROR, "assistant.navigation_failed", task_id=result.get("task_id"),
+                                      error_type=type(err).__name__, error=str(err), exc_info=not isinstance(err, RuntimeError))
+                results[-1] = result
+                with _JOBS_LOCK:
+                    _JOBS[job_id]["results"] = list(results)
+                if not result.get("ok"):
+                    break
+            diagnostics.event(LOGGER, logging.INFO, "assistant.action_completed", task_id=result.get("task_id"),
+                              duration_ms=round((time.monotonic()-action_started)*1000))
     with _JOBS_LOCK:
         job = _JOBS[job_id]
         job["status"] = "completed" if results and all(item.get("ok") for item in results) else "failed"
         job["updated_at"] = time.time()
         conversation = job.get("conversation")
-        LOGGER.info("assistant job=%s status=%s", job_id, job["status"])
+        status = job["status"]
+    diagnostics.event(LOGGER, logging.INFO if status == "completed" else logging.ERROR, "assistant.job_finished", status=status,
+                      completed_actions=sum(bool(item.get("ok")) for item in results), planned_actions=len(actions),
+                      duration_ms=round((time.monotonic()-started)*1000),
+                      error=next((item.get("error") for item in results if not item.get("ok")), None))
     if conversation:
         from assistant_sessions import STORE, format_actions
-        STORE.append(*conversation, "assistant", format_actions(results, texts) or texts["failed"])
+        try:
+            STORE.append(*conversation, "assistant", format_actions(results, texts) or texts["failed"])
+        except Exception:
+            diagnostics.event(LOGGER, logging.ERROR, "assistant.job_history_write_failed", exc_info=True)
 
 
 def get_action_job(job_id: str):
@@ -498,6 +563,24 @@ def run_chat(
     timeout_s: float = 120.0, defer_mutations: bool = False,
     isolated_session: bool = False, conversation=None,
 ):
+    started = time.monotonic()
+    with diagnostics.context(session_id=str(session_id or "")[:96], stage="validation"):
+        diagnostics.event(LOGGER, logging.INFO, "assistant.request_started", message_chars=len(str(message or "")),
+                          isolated_session=isolated_session)
+        try:
+            result = _run_chat(message, session_id, page_context, timeout_s=timeout_s, defer_mutations=defer_mutations,
+                               isolated_session=isolated_session, conversation=conversation)
+        except Exception as err:
+            diagnostics.event(LOGGER, logging.WARNING if isinstance(err, ValueError) else logging.ERROR, "assistant.request_failed",
+                              error_type=type(err).__name__, error=str(err), duration_ms=round((time.monotonic()-started)*1000),
+                              exc_info=not isinstance(err, (ValueError, RuntimeError, TimeoutError)))
+            raise
+        diagnostics.event(LOGGER, logging.INFO, "assistant.request_completed", decision=result.get("decision"),
+                          job_id=result.get("job_id"), duration_ms=round((time.monotonic()-started)*1000))
+        return result
+
+
+def _run_chat(message, session_id, page_context, *, timeout_s, defer_mutations, isolated_session, conversation):
     message = str(message or "").strip()
     session_id = str(session_id or "").strip()
     if not message:
@@ -520,6 +603,7 @@ def run_chat(
                if isinstance(page_context.get(key), str) and page_context[key]}
     context_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     api_port = int(os.environ.get("MAP_API_PORT", "8001"))
+    diagnostics.update_context(stage="facts")
     robot_context = _load_robot_context(api_port)
     point_catalog = json.dumps(_load_map_point_catalog(api_port), ensure_ascii=False, separators=(",", ":"))
     prompt = SYSTEM_INSTRUCTIONS.format(
@@ -542,13 +626,21 @@ def run_chat(
         command[2:2] = ["--session-key", f"agent:{os.environ.get('OPENCLAW_AGENT_ID', 'main')}:{session_id}"]
     command_env = os.environ.copy()
     command_env.setdefault("OPENCLAW_ALLOW_INSECURE_PRIVATE_WS", "1")
+    diagnostics.update_context(stage="model")
+    model_started = time.monotonic()
+    diagnostics.event(LOGGER, logging.INFO, "assistant.model_started", agent=os.environ.get("OPENCLAW_AGENT_ID", "main"),
+                      thinking=os.environ.get("OPENCLAW_THINKING", "low"), timeout_s=timeout_s, prompt_chars=len(prompt),
+                      robots_available=robot_context.get("available"))
     try:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout_s + 5, env=command_env)
     except subprocess.TimeoutExpired as err:
         raise TimeoutError("OpenClaw response timed out") from err
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "OpenClaw request failed").strip().splitlines()[-1]
+        detail = ((proc.stderr or proc.stdout or "").strip() or "OpenClaw request failed").splitlines()[-1]
+        diagnostics.event(LOGGER, logging.ERROR, "assistant.model_failed", return_code=proc.returncode,
+                          error=detail, duration_ms=round((time.monotonic()-model_started)*1000))
         raise RuntimeError(detail[:500])
+    diagnostics.update_context(stage="plan_validation")
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError as err:
@@ -566,9 +658,10 @@ def run_chat(
     meta = envelope.get("meta", {}) if isinstance(envelope, dict) else {}
     agent_meta = meta.get("agentMeta", {}) if isinstance(meta, dict) else {}
     usage = agent_meta.get("usage", {})
-    LOGGER.info("assistant session=%s decision=%s language=%s robot=%s actions=%s model=%s prompt_tokens=%s cache_read=%s output_tokens=%s",
-                session_id, decision, language, robot_id, [action["name"] for action in actions],
-                agent_meta.get("model"), agent_meta.get("promptTokens"), usage.get("cacheRead"), usage.get("output"))
+    diagnostics.event(LOGGER, logging.INFO, "assistant.plan_validated", decision=decision, language=language,
+                      robot_id=robot_id, actions=[action["name"] for action in actions], model=agent_meta.get("model"),
+                      prompt_tokens=agent_meta.get("promptTokens"), input_tokens=usage.get("input"), cache_read=usage.get("cacheRead"),
+                      output_tokens=usage.get("output"), duration_ms=round((time.monotonic()-model_started)*1000))
     if defer_mutations and any(ACTION_SPECS.get(str(action.get("name") or ""), ("", "", False))[2] for action in actions):
         job_id = uuid.uuid4().hex
         with _JOBS_LOCK:
@@ -578,8 +671,10 @@ def run_chat(
                 "conversation": conversation,
                 **metadata,
             }
+        diagnostics.event(LOGGER, logging.INFO, "assistant.job_queued", job_id=job_id, action_count=len(actions))
+        log_context = contextvars.copy_context()
         threading.Thread(
-            target=_run_action_job, args=(job_id, actions, api_port),
+            target=lambda *args: log_context.run(_run_action_job, *args), args=(job_id, actions, api_port),
             daemon=True, name=f"openclaw-action-{job_id[:8]}",
         ).start()
         return {
@@ -588,9 +683,14 @@ def run_chat(
             **metadata,
         }
     results = []
-    for action in actions:
-        try:
-            results.append(_execute_action({**action, "_texts": texts}, api_port))
-        except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
-            results.append({"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)})
+    diagnostics.update_context(stage="execution")
+    for index, action in enumerate(actions, 1):
+        with diagnostics.context(step=index, action=action["name"]):
+            try:
+                result = _execute_action({**action, "_texts": texts}, api_port)
+            except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as err:
+                result = {"name": str(action.get("name") or "unknown"), "ok": False, "error": str(err)}
+            results.append(result)
+            diagnostics.event(LOGGER, logging.INFO if result.get("ok") else logging.ERROR, "assistant.action_result",
+                              ok=result.get("ok"), error=result.get("error"))
     return {"reply": parsed["reply"] or raw_reply, "actions": results, "session_id": session_id, **metadata}

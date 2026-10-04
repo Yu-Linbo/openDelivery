@@ -7231,10 +7231,10 @@ function initOpenClawChat() {
     trigger.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) setTimeout(() => input.focus(), 0);
   };
-  const append = (role, text) => {
+  const append = (role, text, isWelcome = false) => {
     const item = document.createElement("div");
     item.className = `openclaw-chat-message ${role}`;
-    item.setAttribute("data-i18n-ignore", "");
+    if (!isWelcome) item.setAttribute("data-i18n-ignore", "");
     item.textContent = text;
     messages.appendChild(item);
     messages.scrollTop = messages.scrollHeight;
@@ -7245,11 +7245,14 @@ function initOpenClawChat() {
     if (!authenticated) guestHistory = history.slice();
     try { localStorage.setItem(storageHistoryKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
   };
-  history.forEach((item) => append(item.role === "user" ? "user" : "assistant", item.text));
   const renderHistory = () => {
     messages.replaceChildren();
-    history.forEach((item) => append(item.role === "user" ? "user" : "assistant", item.text));
+    history.forEach((item, index) => append(
+      item.role === "user" ? "user" : "assistant", item.text,
+      index === 0 && item.role === "assistant" && item.text === welcome,
+    ));
   };
+  renderHistory();
   const applySession = (session) => {
     sessionId = session.id;
     history = session.messages.map((item) => ({ role: item.role, text: item.text })).slice(-50);

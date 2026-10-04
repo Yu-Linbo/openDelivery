@@ -15,4 +15,9 @@ assert.equal(parse('[2026-09-30T12:00:00+0800] opening bag', 0).node, 'robot_log
 assert.equal(parse('  traceback <script>alert(1)</script>', 0).level, 'RAW');
 assert.equal(parse('[INFO] [0.000000000] [clock]: zero', 0).epoch, 0);
 assert.equal(parse('[INFO] [12.123456789] [node]: hello', 0).raw, '[INFO] [12.123456789] [node]: hello');
-console.log('9 parser cases passed');
+const event = parse('[ERROR] [1791104118.123000000] [opendelivery.assistant]: time=2026-10-04T08:55:18.123+00:00 event="assistant.navigation_failed" task_id="web_nav_1" error="navigation Failed"', 0);
+assert.equal(event.level, 'ERROR');
+assert.equal(event.node, 'opendelivery.assistant');
+assert.equal(event.epoch, 1791104118.123);
+assert.ok(event.message.includes('task_id="web_nav_1"'));
+console.log('10 parser cases passed');

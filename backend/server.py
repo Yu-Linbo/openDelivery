@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import contextvars
 import json
 import gzip
 import math
@@ -537,61 +538,71 @@ class RosNodeManager:
             log_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             log_dir = None
-        log_fp = None
+        collector = None
         log_path = None
         if log_dir is not None:
             safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(node_id))[:120] or "node"
             log_path = log_dir / f"managed_{safe_id}.log"
             try:
-                log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
-                log_fp.write(
-                    f"[INFO] [{time.time():.9f}] [node_manager]: managed start node_id={node_id!r}\n"
+                # Preflight the destination before attaching a subprocess pipe.
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+                collector = subprocess.Popen(
+                    [sys.executable, str(_BACKEND_DIR / "managed_logging.py"), "--path", str(log_path), "--node", str(node_id)],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, start_new_session=True,
                 )
-                log_fp.write(f"[DEBUG] [{time.time():.9f}] [node_manager]: command={full_cmd!r}\n")
-                log_fp.flush()
             except OSError:
-                if log_fp:
-                    try:
-                        log_fp.close()
-                    except OSError:
-                        pass
-                log_fp = None
+                diagnostic_logging.event(LOGGER, logging.WARNING, "managed.log_unavailable", node_id=node_id, exc_info=True)
                 log_path = None
-        if log_path:
-            LOGGER.info("starting managed node id=%r log=%s", node_id, log_path)
-        else:
-            LOGGER.warning("starting managed node id=%r without a log file", node_id)
         try:
             proc = subprocess.Popen(
                 ["bash", "-lc", full_cmd],
                 cwd=str(self._root_dir),
-                stdout=log_fp if log_fp else subprocess.DEVNULL,
-                stderr=subprocess.STDOUT if log_fp else subprocess.DEVNULL,
+                stdout=collector.stdin if collector else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if collector else subprocess.DEVNULL,
                 env=os.environ.copy(),
                 preexec_fn=os.setsid,
             )
+        except Exception:
+            diagnostic_logging.event(LOGGER, logging.ERROR, "managed.start_failed", node_id=node_id, exc_info=True)
+            raise
         finally:
-            if log_fp:
-                try:
-                    log_fp.close()
-                except OSError:
-                    pass
+            if collector:
+                collector.stdin.close()
         with self._lock:
             self._procs[node_id] = proc
+        diagnostic_logging.event(LOGGER, logging.INFO, "managed.started", node_id=node_id, pid=proc.pid,
+                                 log_path=str(log_path) if log_path else None, collector_pid=collector.pid if collector else None,
+                                 command=diagnostic_logging.safe_text(start_cmd))
+        log_context = contextvars.copy_context()
+        def watch():
+            return_code = proc.wait()
+            requested = bool(getattr(proc, "_opendelivery_stop_requested", False))
+            diagnostic_logging.event(LOGGER, logging.INFO if requested or return_code == 0 else logging.ERROR,
+                                     "managed.exited", node_id=node_id, pid=proc.pid, return_code=return_code,
+                                     stop_requested=requested, log_path=str(log_path) if log_path else None)
+            if collector:
+                code = collector.wait()
+                if code:
+                    diagnostic_logging.event(LOGGER, logging.ERROR, "managed.collector_failed", node_id=node_id, return_code=code)
+        threading.Thread(target=lambda: log_context.run(watch), daemon=True, name=f"managed-log-{node_id}").start()
 
     def _stop_node(self, spec):
         node_id = spec["id"]
         with self._lock:
             proc = self._procs.get(node_id)
         if proc and proc.poll() is None:
+            proc._opendelivery_stop_requested = True
+            diagnostic_logging.event(LOGGER, logging.INFO, "managed.stop_requested", node_id=node_id, pid=proc.pid)
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=3.0)
-            except Exception:
+            except Exception as err:
+                diagnostic_logging.event(LOGGER, logging.WARNING, "managed.stop_escalated", node_id=node_id, pid=proc.pid, error=str(err))
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
-                    pass
+                    diagnostic_logging.event(LOGGER, logging.ERROR, "managed.stop_failed", node_id=node_id, pid=proc.pid, exc_info=True)
         stop_cmd = (spec.get("stop_cmd") or "").strip()
         if stop_cmd:
             self._run_shell(stop_cmd)
@@ -2292,8 +2303,9 @@ def _extract_log_bag_selection(bag_values: List[str]) -> dict:
     return out
 
 
-class ApiHandler(BaseHTTPRequestHandler):
+class ApiHandler(diagnostic_logging.RequestLoggingMixin, BaseHTTPRequestHandler):
     def _send_json(self, payload, status=200, *, content_length=True):
+        self.record_response_error(payload, status)
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         use_gzip = len(raw) >= 16 * 1024 and "gzip" in self.headers.get("Accept-Encoding", "").lower()
         if use_gzip:
@@ -2366,6 +2378,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             self._send_json({"error": "body must be a JSON object"}, 400)
             return None
+        diagnostic_logging.update_context(**{key: diagnostic_logging.safe_text(data[key], 128)
+            for key in ("robot_id", "node_id", "floor_id", "task_id", "action", "command")
+            if isinstance(data.get(key), str)})
         return data
 
     def do_OPTIONS(self):
@@ -3780,12 +3795,14 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _shutdown_signal)
     signal.signal(signal.SIGINT, _shutdown_signal)
-    LOGGER.info("map api listening on http://%s:%s", host, port)
+    diagnostic_logging.event(LOGGER, logging.INFO, "server.started", host=host, port=port,
+                             pid=os.getpid(), log_dir=str(_BACKEND_DIR / "logs"))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        diagnostic_logging.event(LOGGER, logging.INFO, "server.stopping", pid=os.getpid())
         try:
             import robot_motion_api as rma
             rma.stop_all_teleop()
