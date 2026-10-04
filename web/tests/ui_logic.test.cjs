@@ -99,3 +99,62 @@ test('a failed settings read keeps stale values unavailable for submission', asy
   assert.equal(fields[0].disabled, true);
   assert.match(context.settingsMessage.textContent, /network/);
 });
+
+function sensorContext() {
+  const ticks = [];
+  const requests = [];
+  const context = {
+    sensorPollGeneration: 0, sensorPollInFlight: false, sensorPollTimer: null,
+    sensorPollControllers: new Set(), latestPathByRobot: {}, latestScanByRobot: {},
+    API_BASE_URL: 'http://api', AbortController,
+    plannedPathToggle: { checked: true }, scan2dToggle: { checked: false }, scanStreamActive: false,
+    startScanStream() {}, stopScanStream() {},
+    getRobotsOnCurrentMap: () => [{ id: 'robot2' }], paints: [],
+    scheduleMapPaint() { context.paints.push(context.latestPathByRobot.robot2); },
+    setTimeout, clearTimeout, setInterval: callback => { ticks.push(callback); return ticks.length; }, clearInterval() {},
+    fetchJsonOptional: (url, options) => {
+      const request = deferred(); requests.push({ ...request, url, options });
+      options.signal.addEventListener('abort', () => request.reject(Error('aborted')));
+      return request.promise;
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(section(app, 'function stopSensorPolling()', 'function stopScanStream()'), context);
+  vm.runInContext(section(app, 'async function pollRobotSensor(', 'function bindMapInteractions()'), context);
+  return { context, ticks, requests };
+}
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('second path on the same map updates without reloading, and fetch bypasses caches', async () => {
+  const { context, ticks, requests } = sensorContext();
+  context.startSensorPolling();
+  assert.equal(requests[0].options.cache, 'no-store');
+  requests[0].resolve({ points: [[1, 1], [2, 2]] }); await flush();
+  const next = ticks[0]();
+  requests[1].resolve({ points: [[3, 3], [4, 4]] }); await next;
+  assert.equal(context.latestPathByRobot.robot2.points[0][0], 3);
+  assert.equal(context.paints.length, 2);
+  context.stopSensorPolling();
+});
+
+test('a slow scan cannot block painting a new path', async () => {
+  const { context, requests } = sensorContext();
+  context.scan2dToggle.checked = true;
+  context.startSensorPolling();
+  requests.find(r => r.url.endsWith('planned_path')).resolve({ points: [[9, 9]] }); await flush();
+  assert.equal(context.paints.length, 1);
+  context.stopSensorPolling(); await flush();
+});
+
+test('restart discards stale responses and a failed sensor does not stop the next poll', async () => {
+  const { context, requests, ticks } = sensorContext();
+  context.startSensorPolling();
+  context.startSensorPolling();
+  assert.equal(requests[0].options.signal.aborted, true);
+  requests[0].resolve({ points: [[1, 1]] });
+  requests[1].reject(Error('temporary network failure')); await flush();
+  const next = ticks[1]();
+  requests[2].resolve({ points: [[8, 8]] }); await next;
+  assert.equal(context.latestPathByRobot.robot2.points[0][0], 8);
+  context.stopSensorPolling();
+});

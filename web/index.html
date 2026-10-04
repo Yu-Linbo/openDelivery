@@ -316,9 +316,11 @@
                     <span class="map-editor-section__title">点位设置 <span class="map-editor-unsaved-badge">未保存</span></span>
                     <div class="map-editor-control-grid">
                       <label class="reloc-field">名称<input data-map-editor="point-name" type="text" maxlength="80" placeholder="如 A座电梯" /></label>
+                      <label class="reloc-field">英文名称<input data-map-editor="point-name-en" type="text" maxlength="80" placeholder="可选，如 Reception pickup" /></label>
                       <label class="reloc-field">类型<select data-map-editor="point-type"><option value="elevator_inside">电梯内点</option><option value="elevator_waiting">电梯等待点</option><option value="standby">待机点</option><option value="custom">自定义点位</option><option value="relocalization">重定位点</option></select></label>
                     </div>
                     <button type="button" data-map-editor="pick-point">点击取点</button>
+                    <button type="button" class="btn-secondary" data-map-editor="point-rename" disabled>更新所选点名称</button>
                     <span class="map-editor-point-hint">取点时先点击位置，再点击方向；按住已有点位可直接拖动。</span>
                     <div class="map-waypoint-list" data-map-editor="point-list"></div>
                     <div class="map-editor-scope-actions">
@@ -704,9 +706,9 @@
       </form>
       <p id="openclaw-chat-status" class="openclaw-chat-status" role="status"></p>
     </section>
-    <script src="./i18n.js?v=20261001-assistant-routing-v2"></script>
-    <script src="./map_editor.js?v=20261001-review-v2"></script>
-    <script src="./app.js?v=20261004-assistant-welcome"></script>
+    <script src="./i18n.js?v=20261004-task-feedback"></script>
+    <script src="./map_editor.js?v=20261004-point-names"></script>
+    <script src="./app.js?v=20261004-task-feedback"></script>
     <script src="./log_viewer.js?v=20261001-logs-v3"></script>
   </body>
 </html>

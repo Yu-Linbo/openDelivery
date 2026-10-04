@@ -126,7 +126,9 @@ class AssistantSessionsTest(unittest.TestCase):
         openclaw_chat._JOBS[job_id] = {"status": "queued", "results": [], "conversation": ("linbo", first["id"])}
         try:
             openclaw_chat._run_action_job(job_id, [{"name": "startup_sim"}], 8001)
-            self.assertEqual(self.store.get("linbo", first["id"])["messages"][0]["text"], "完成")
+            messages = self.store.get("linbo", first["id"])["messages"]
+            self.assertIn("完成", [item["text"] for item in messages])
+            self.assertEqual(messages[-1]["text"], "任务已完成，计划中的 1 个步骤全部执行完毕。")
             self.assertEqual(self.store.get("linbo", second["id"])["messages"], [])
         finally:
             openclaw_chat._JOBS.pop(job_id)

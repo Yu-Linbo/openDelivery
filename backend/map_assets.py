@@ -95,7 +95,14 @@ def _normalize_point(raw: Dict[str, Any], used: set) -> Dict[str, Any]:
     if not all(math.isfinite(value) for value in (x, y, yaw)):
         raise ValueError("point x, y, yaw must be finite")
     used.add(point_id)
-    return {"id": point_id, "name": name, "type": point_type, "x": x, "y": y, "yaw": yaw}
+    point = {"id": point_id, "name": name, "type": point_type, "x": x, "y": y, "yaw": yaw}
+    for key in ("name_zh", "name_en"):
+        if key in raw:
+            if not isinstance(raw[key], str) or len(raw[key].strip()) > 80:
+                raise ValueError(key + " must be a string of at most 80 chars")
+            if raw[key].strip():
+                point[key] = raw[key].strip()
+    return point
 
 
 def load_points(map_dir: Path, floor: str) -> List[Dict[str, Any]]:

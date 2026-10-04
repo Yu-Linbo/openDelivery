@@ -5,7 +5,7 @@
   if (!root) return;
   const $ = (name) => root.querySelector(`[data-map-editor="${name}"]`);
   const canvas = $("canvas"), ctx = canvas.getContext("2d");
-  const names = ["floor","map-name","load-map","loading","layer-section","layer","tool","brush","raster-value","semantic-picker","semantic-trigger","semantic-menu","semantic-label","semantic-selected-swatch","semantic-selected-name","semantic-selected-value","point-section","pick-point","point-name","point-type","point-list","layer-undo","layer-discard","layer-save","point-undo","point-discard","point-save","metadata","message","show-grid","show-meter-grid","show-semantic","show-points","coordinates"];
+  const names = ["floor","map-name","load-map","loading","layer-section","layer","tool","brush","raster-value","semantic-picker","semantic-trigger","semantic-menu","semantic-label","semantic-selected-swatch","semantic-selected-name","semantic-selected-value","point-section","pick-point","point-name","point-name-en","point-rename","point-type","point-list","layer-undo","layer-discard","layer-save","point-undo","point-discard","point-save","metadata","message","show-grid","show-meter-grid","show-semantic","show-points","coordinates"];
   const ui = Object.fromEntries(names.map((name) => [name, $(name)]));
   const s = { name:"", pgm:null, meta:null, raster:null, savedRaster:null, semantic:null, savedSemantic:null, points:[], savedPoints:[], dirty:new Set(), undo:[], activePanel:"layers", selectedPointId:"", pointPickMode:"", pointPickStep:0, pointPickTargetId:"", pointPickAnchor:null, pointPickCursor:null, moveSnapshotTaken:false, scale:1, panX:0, panY:0, painting:false, panning:false, movingId:"", lastX:0, lastY:0, loadToken:0 };
   const clonePoints = (rows) => rows.map((row) => ({ ...row }));
@@ -143,7 +143,7 @@
     return{x:(c*x+n*y)/s.meta.resolution,y:s.pgm.height-(-n*x+c*y)/s.meta.resolution};
   }
   function pointTypeLabel(type){return type==="elevator"||type==="elevator_inside"?"电梯内点":type==="elevator_waiting"?"电梯等待点":type==="standby"?"待机点":type==="relocalization"?"重定位点":"自定义点位";}
-  function selectPoint(point){s.selectedPointId=point?.id||"";pointList();render();}
+  function selectPoint(point){s.selectedPointId=point?.id||"";ui["point-name"].value=point?.name_zh||point?.name||"";ui["point-name-en"].value=point?.name_en||"";pointList();render();}
   function drawPoint(point) {
     const p=toPixel(point),unit=1/s.scale;
     const pointColor=point.type==="elevator"||point.type==="elevator_inside"?"#a78bfa":point.type==="elevator_waiting"?"#f472b6":point.type==="standby"?"#22c55e":point.type==="relocalization"?"#38bdf8":"#fb923c";
@@ -153,7 +153,7 @@
     ctx.fillStyle=pointColor;ctx.strokeStyle="#0f172a";ctx.lineWidth=2*unit;ctx.beginPath();ctx.arc(0,0,radius,0,Math.PI*2);ctx.fill();ctx.stroke();
     ctx.rotate(-(Number(point.yaw||0)-Number(s.meta.origin[2]||0)));
     const arrowScale=radius/(7*unit);ctx.scale(arrowScale,arrowScale);ctx.fillStyle="#0f172a";ctx.beginPath();ctx.moveTo(5*unit,0);ctx.lineTo(-3*unit,-3.5*unit);ctx.lineTo(-1*unit,0);ctx.lineTo(-3*unit,3.5*unit);ctx.closePath();ctx.fill();ctx.restore();
-    const label=String(point.name||point.id),labelX=p.x+9*unit,labelBaseline=p.y-7*unit;
+    const label=String(window.OpenDeliveryI18n?.pointName(point)||point.name||point.id),labelX=p.x+9*unit,labelBaseline=p.y-7*unit;
     ctx.save();ctx.font=`${11*unit}px "Fira Code", monospace`;const labelWidth=ctx.measureText(label).width+10*unit,labelTop=labelBaseline-12*unit;
     ctx.fillStyle="rgba(15, 23, 42, 0.88)";ctx.strokeStyle=selected?"#facc15":pointColor;ctx.lineWidth=1*unit;ctx.beginPath();
     if(typeof ctx.roundRect==="function")ctx.roundRect(labelX-5*unit,labelTop,labelWidth,17*unit,5*unit);else ctx.rect(labelX-5*unit,labelTop,labelWidth,17*unit);
@@ -178,7 +178,8 @@
     ctx.restore();
   }
   function pointList() {
-    ui["point-list"].innerHTML=s.points.map((point)=>`<div class="map-waypoint-item${point.id===s.selectedPointId?" is-selected":""}" data-select-point="${esc(point.id)}"><div><strong>${esc(point.name||point.id)}</strong><span>${pointTypeLabel(point.type)}</span></div><div class="map-waypoint-item__actions"><button type="button" class="btn-secondary" data-repick-point="${esc(point.id)}">重选</button><button type="button" data-delete-point="${esc(point.id)}">删除</button></div></div>`).join("")||'<span class="reloc-message-block">本地图暂无点位</span>';
+    ui["point-rename"].disabled=!s.selectedPointId;
+    ui["point-list"].innerHTML=s.points.map((point)=>`<div class="map-waypoint-item${point.id===s.selectedPointId?" is-selected":""}" data-select-point="${esc(point.id)}"><div><strong>${esc(window.OpenDeliveryI18n?.pointName(point)||point.name||point.id)}</strong><span>${pointTypeLabel(point.type)}</span></div><div class="map-waypoint-item__actions"><button type="button" class="btn-secondary" data-repick-point="${esc(point.id)}">重选</button><button type="button" data-delete-point="${esc(point.id)}">删除</button></div></div>`).join("")||'<span class="reloc-message-block">本地图暂无点位</span>';
     ui.metadata.innerHTML=[["尺寸",`${s.pgm.width} × ${s.pgm.height} px`],["分辨率",`${s.meta.resolution} m/px`],["原点",s.meta.origin.join(", ")],["点位",s.points.length]].map(([key,value])=>`<div><dt>${key}</dt><dd>${esc(value)}</dd></div>`).join("");
   }
   function nearest(p){let found=null,distance=16/s.scale;s.points.forEach((point)=>{const at=toPixel(point),d=Math.hypot(at.x-p.x,at.y-p.y);if(d<=distance){found=point;distance=d;}});return found;}
@@ -200,7 +201,7 @@
         if(s.pointPickMode==="replace"){
           const target=s.points.find((point)=>point.id===s.pointPickTargetId);if(target){Object.assign(target,s.pointPickAnchor,{yaw});s.selectedPointId=target.id;}
         }else{
-          const name=ui["point-name"].value.trim(),point={id:pointId(name),name,type:ui["point-type"].value,...s.pointPickAnchor,yaw};s.points.push(point);s.selectedPointId=point.id;ui["point-name"].value="";
+          const name=ui["point-name"].value.trim(),point={id:pointId(name),name,name_en:ui["point-name-en"].value.trim(),type:ui["point-type"].value,...s.pointPickAnchor,yaw};s.points.push(point);s.selectedPointId=point.id;ui["point-name"].value="";ui["point-name-en"].value="";
         }
         mark("points");cancelPointPick(false);pointList();render();message("点位位置和方向已更新，保存后生效");return;
       }
@@ -298,6 +299,14 @@
   ui["layer-section"].addEventListener("pointerdown",()=>activatePanel("layers"));
   ui["point-section"].addEventListener("pointerdown",()=>activatePanel("points"));
   ui.layer.addEventListener("change",()=>{tools();activatePanel("layers");});
+  ui["point-rename"].addEventListener("click",()=>{
+    const point=s.points.find((row)=>row.id===s.selectedPointId),name=ui["point-name"].value.trim();
+    if(!point||!name||s.saving)return;
+    snapshot("points");point.name=name;if(point.name_zh)point.name_zh=name;
+    const english=ui["point-name-en"].value.trim();if(english)point.name_en=english;else delete point.name_en;
+    mark("points");pointList();render();message("点位名称已更新，保存后生效");
+  });
+  document.addEventListener("openDelivery:languagechange",()=>{if(s.pgm){pointList();render();}});
   ui["pick-point"].addEventListener("click",()=>{if(s.pointPickMode)cancelPointPick();else startPointPick("add");});
   ui["semantic-trigger"].addEventListener("click",(event)=>{event.stopPropagation();setSemanticMenu(ui["semantic-menu"].hidden);});
   ui["semantic-menu"].addEventListener("click",(event)=>{const button=event.target.closest("[data-semantic-value]");if(!button)return;ui["semantic-label"].value=button.dataset.semanticValue;semanticSelectionStyle();setSemanticMenu(false);});

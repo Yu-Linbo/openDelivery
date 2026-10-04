@@ -1,6 +1,7 @@
 """Small, validated bridge between the web API and the OpenClaw CLI."""
 
 import json
+import copy
 import contextvars
 import logging
 import os
@@ -23,6 +24,7 @@ SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,95}")
 MAX_MESSAGE_CHARS = 4000
 _JOBS = {}
 _JOBS_LOCK = threading.Lock()
+_JOB_PROGRESS = contextvars.ContextVar("assistant_job_progress", default=None)
 LOGGER = logging.getLogger("opendelivery.assistant")
 MAX_ACTIONS = 8
 
@@ -176,6 +178,7 @@ def _load_map_point_catalog(api_port: int):
                     "floor_id": floor_id,
                     "id": str(point.get("id") or ""),
                     "name": str(point.get("name") or ""),
+                    **{key: point[key] for key in ("name_zh", "name_en") if point.get(key)},
                     "type": str(point.get("type") or ""),
                 })
     return catalog[:500]
@@ -188,7 +191,7 @@ def _resolve_map_point(floor_id: str, query: str, api_port: int, *, texts=None):
     wanted = str(query or "").strip()
     if not wanted:
         raise ValueError("point is required")
-    exact = [p for p in points if wanted in {str(p.get("id") or ""), str(p.get("name") or "")}]
+    exact = [p for p in points if wanted in {str(p.get("id") or ""), str(p.get("name") or ""), str(p.get("name_zh") or ""), str(p.get("name_en") or "")}]
     if len(exact) == 1:
         return exact[0]
     typed = [p for p in points if wanted == str(p.get("type") or "")]
@@ -315,11 +318,13 @@ def _execute_action(action: dict, api_port: int):
         arguments = {**arguments, **point, "floor_id": floor_id}
         if name == "pickup_and_return":
             return_pose = _current_robot_pose(robot_id, api_port, texts=texts)
+            _emit_progress(texts["pickup_outbound"].format(robot_id=robot_id))
             outbound = _post_navigation(robot_id, arguments, api_port)
             outbound_task_id = str(outbound.get("task_id") or "")
             if not outbound_task_id:
                 raise RuntimeError(texts["task_missing"])
             _wait_for_navigation_terminal(robot_id, outbound_task_id, api_port, texts=texts)
+            _emit_progress(texts["pickup_return"].format(robot_id=robot_id))
             result = _post_navigation(robot_id, return_pose, api_port)
             return_task_id = str(result.get("task_id") or "")
             if not return_task_id:
@@ -399,6 +404,7 @@ def _wait_for_navigation_terminal(
         if isinstance(task, dict) and str(task.get("task_id") or "") == task_id:
             seen = True
             last_status = str(task.get("task_status") or "")
+            _navigation_progress(robot_id, task, detail, texts)
             if last_status == "Finished":
                 return last_status
             if last_status in ("Failed", "Terminated"):
@@ -450,6 +456,8 @@ def _wait_for_robot_online(robot_id: str, api_port: int, timeout_s: float = 120.
                 diagnostics.event(LOGGER, logging.INFO, "assistant.robot_observed", robot_id=robot_id,
                                   online=state[0], robot_status=last_status, duration_ms=round((now-started)*1000), poll_failures=failures)
                 reported, next_report = state, now + 30
+            phase = last_status if row.get("online") is True else "offline"
+            _emit_progress(texts["startup_progress"].format(robot_id=robot_id, phase=texts.get("phase_" + phase, phase)))
             if row.get("online") is True and last_status.lower() in ("", "ready", "idle", "online"):
                 return last_status or "online"
         time.sleep(2)
@@ -485,9 +493,57 @@ def _summarize_action_result(name: str, result: Any, texts=None) -> str:
     return texts["query"]
 
 
+def _emit_progress(message):
+    callback = _JOB_PROGRESS.get()
+    if callback:
+        callback(message)
+
+
+def _navigation_progress(robot_id, task, detail, texts):
+    total = max(1, int(task.get("total_count") or len(task.get("work_queue") or []) or 1))
+    current = max(0, int(task.get("current_index") or 0))
+    phase = str(task.get("task_status") or "Waiting")
+    queue = task.get("work_queue") or []
+    if phase == "Navigating" and current < len(queue):
+        parts = str(queue[current]).split(":")
+        if len(parts) > 1 and parts[0] == "navigation":
+            phase = parts[1]
+    floor = str((detail.get("status") or {}).get("floor") or "")
+    _emit_progress(texts["progress"].format(robot_id=robot_id, floor=" · " + floor if floor else "",
+                   index=min(current + 1, total), total=total, phase=texts.get("phase_" + phase, phase)))
+
+
+def _publish_job_event(job_id, message, kind="progress", *, status=None):
+    with _JOBS_LOCK:
+        job = _JOBS[job_id]
+        events = job.setdefault("events", [])
+        if events and events[-1]["message"] == message and events[-1]["kind"] == kind:
+            return
+        seq = job.get("event_seq", 0) + 1
+        job["event_seq"] = seq
+        job["updated_at"] = time.time()
+        events.append({"seq": seq, "message": message, "kind": kind, "created_at": job["updated_at"]})
+        job["events"] = events[-200:]
+        if kind == "terminal":
+            job["terminal_text"] = message
+            if status:
+                job["status"] = status
+        conversation = job.get("conversation")
+    if conversation:
+        from assistant_sessions import STORE
+        try:
+            STORE.append(*conversation, "assistant", message)
+        except Exception:
+            diagnostics.event(LOGGER, logging.ERROR, "assistant.job_history_write_failed", exc_info=True)
+
+
 def _run_action_job(job_id: str, actions: list, api_port: int):
-    with diagnostics.context(job_id=job_id, stage="execution"):
-        _run_action_job_logged(job_id, actions, api_port)
+    token = _JOB_PROGRESS.set(lambda message: _publish_job_event(job_id, message))
+    try:
+        with diagnostics.context(job_id=job_id, stage="execution"):
+            _run_action_job_logged(job_id, actions, api_port)
+    finally:
+        _JOB_PROGRESS.reset(token)
 
 
 def _run_action_job_logged(job_id: str, actions: list, api_port: int):
@@ -504,6 +560,9 @@ def _run_action_job_logged(job_id: str, actions: list, api_port: int):
         with diagnostics.context(step=index, action=action.get("name"), robot_id=arguments.get("robot_id"),
                                  floor_id=arguments.get("floor_id"), point=arguments.get("point")):
             action_started = time.monotonic()
+            _emit_progress(texts["step"].format(index=index, total=len(actions),
+                           action=texts.get("action_" + action.get("name", ""), texts["action_query"]),
+                           robot_id=arguments.get("robot_id") or ""))
             diagnostics.event(LOGGER, logging.INFO, "assistant.action_started")
             try:
                 result = _execute_action({**action, "_texts": texts}, api_port)
@@ -533,24 +592,17 @@ def _run_action_job_logged(job_id: str, actions: list, api_port: int):
                     _JOBS[job_id]["results"] = list(results)
                 if not result.get("ok"):
                     break
+            _emit_progress(result.get("summary") or texts["completed"])
             diagnostics.event(LOGGER, logging.INFO, "assistant.action_completed", task_id=result.get("task_id"),
                               duration_ms=round((time.monotonic()-action_started)*1000))
-    with _JOBS_LOCK:
-        job = _JOBS[job_id]
-        job["status"] = "completed" if results and all(item.get("ok") for item in results) else "failed"
-        job["updated_at"] = time.time()
-        conversation = job.get("conversation")
-        status = job["status"]
+    status = "completed" if results and all(item.get("ok") for item in results) else "failed"
+    terminal = texts["plan_completed"].format(count=len(results)) if status == "completed" else (
+        texts["failed"] + str(next((item.get("error") for item in results if not item.get("ok")), "unknown error")))
+    _publish_job_event(job_id, terminal, "terminal", status=status)
     diagnostics.event(LOGGER, logging.INFO if status == "completed" else logging.ERROR, "assistant.job_finished", status=status,
                       completed_actions=sum(bool(item.get("ok")) for item in results), planned_actions=len(actions),
                       duration_ms=round((time.monotonic()-started)*1000),
                       error=next((item.get("error") for item in results if not item.get("ok")), None))
-    if conversation:
-        from assistant_sessions import STORE, format_actions
-        try:
-            STORE.append(*conversation, "assistant", format_actions(results, texts) or texts["failed"])
-        except Exception:
-            diagnostics.event(LOGGER, logging.ERROR, "assistant.job_history_write_failed", exc_info=True)
 
 
 def get_action_job(job_id: str):
@@ -558,7 +610,7 @@ def get_action_job(job_id: str):
         return None
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
-        return {key: value for key, value in job.items() if key != "conversation"} if job else None
+        return copy.deepcopy({key: value for key, value in job.items() if key != "conversation"}) if job else None
 
 
 def run_chat(
@@ -669,11 +721,14 @@ def _run_chat(message, session_id, page_context, *, timeout_s, defer_mutations, 
         job_id = uuid.uuid4().hex
         with _JOBS_LOCK:
             _JOBS[job_id] = {
-                "job_id": job_id, "status": "queued", "results": [],
+                "job_id": job_id, "status": "queued", "results": [], "events": [], "event_seq": 0,
                 "created_at": time.time(), "updated_at": time.time(),
                 "conversation": conversation,
                 **metadata,
             }
+        if conversation:
+            from assistant_sessions import STORE
+            STORE.append(*conversation, "assistant", parsed["reply"] or texts["accepted"])
         diagnostics.event(LOGGER, logging.INFO, "assistant.job_queued", job_id=job_id, action_count=len(actions))
         log_context = contextvars.copy_context()
         threading.Thread(

@@ -84,6 +84,15 @@ class MapAssetsTest(unittest.TestCase):
                 [{"id": "bad", "name": "bad", "type": "custom", "x": float("nan"), "y": 0}],
             )
 
+    def test_bilingual_names_survive_save_and_load_without_changing_identity(self):
+        points = [{"id": "pickup", "name": "取货", "name_zh": "取货", "name_en": "Pickup",
+                   "type": "custom", "x": 1, "y": 2, "yaw": .3}]
+        map_assets.save_points(self.map_dir, self.floor, points)
+        self.assertEqual(map_assets.load_points(self.map_dir, self.floor), points)
+        points[0]["name_en"] = "x" * 81
+        with self.assertRaisesRegex(ValueError, "name_en"):
+            map_assets.save_points(self.map_dir, self.floor, points)
+
     def test_add_relocalization_point_is_persisted_and_unique(self):
         point = map_assets.add_relocalization_point(
             self.map_dir, self.floor, "relocalization_1", "重定位点 1", 1.2, -0.4, 0.5

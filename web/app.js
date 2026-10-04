@@ -315,6 +315,8 @@ const latestScanByRobot = {};
 const latestPathByRobot = {};
 let sensorPollTimer = null;
 let sensorPollInFlight = false;
+let sensorPollGeneration = 0;
+const sensorPollControllers = new Set();
 let scanStream = null;
 let scanStreamActive = false;
 let scanStreamRetryAt = 0;
@@ -585,8 +587,8 @@ async function postGazeboSetModelState(payload) {
   return data;
 }
 
-async function fetchJsonOptional(path) {
-  const res = await fetch(path);
+async function fetchJsonOptional(path, options = undefined) {
+  const res = await fetch(path, options);
   if (res.status === 404) {
     return null;
   }
@@ -1012,7 +1014,7 @@ function drawMapPointsOverlay() {
     ctx.strokeStyle = "#0f172a";
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(sx, sy, point.type === "custom" || point.type === "relocalization" ? 5 : 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    const label = String(point.name || point.id);
+    const label = String(window.OpenDeliveryI18n?.pointName(point) || point.name || point.id);
     const labelX = sx + 9;
     const labelBaseline = sy - 7;
     ctx.font = '11px "Fira Code", monospace';
@@ -1035,7 +1037,7 @@ function drawMapPointsOverlay() {
 function renderMapWaypointList() {
   if (!mapWaypointList) return;
   if (!mapPoints.length) { mapWaypointList.innerHTML = '<span class="reloc-message-block">本地图暂无点位</span>'; return; }
-  mapWaypointList.innerHTML = mapPoints.map((point) => `<div class="map-waypoint-item"><span><strong>${escapeHtml(point.name || point.id)}</strong>${escapeHtml(pointTypeLabel(point.type))} · ${Number(point.x).toFixed(2)}, ${Number(point.y).toFixed(2)}</span><button type="button" data-delete-map-point="${escapeHtml(point.id)}">删除</button></div>`).join("");
+  mapWaypointList.innerHTML = mapPoints.map((point) => `<div class="map-waypoint-item"><span><strong>${escapeHtml(window.OpenDeliveryI18n?.pointName(point) || point.name || point.id)}</strong>${escapeHtml(pointTypeLabel(point.type))} · ${Number(point.x).toFixed(2)}, ${Number(point.y).toFixed(2)}</span><button type="button" data-delete-map-point="${escapeHtml(point.id)}">删除</button></div>`).join("");
 }
 
 async function saveMapPoints() {
@@ -3017,6 +3019,10 @@ function onMouseUp() {
 }
 
 function stopSensorPolling() {
+  sensorPollGeneration += 1;
+  sensorPollControllers.forEach((controller) => controller.abort());
+  sensorPollControllers.clear();
+  sensorPollInFlight = false;
   if (sensorPollTimer) {
     clearInterval(sensorPollTimer);
     sensorPollTimer = null;
@@ -3171,56 +3177,51 @@ async function postSaveMap(mapName, robotIdForMapping = "") {
   return payload;
 }
 
+async function pollRobotSensor(robotId, sensor, generation) {
+  const controller = new AbortController();
+  sensorPollControllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const data = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${encodeURIComponent(robotId)}/${sensor}`, {
+      cache: "no-store", signal: controller.signal,
+    });
+    if (generation !== sensorPollGeneration) return;
+    const cache = sensor === "planned_path" ? latestPathByRobot : latestScanByRobot;
+    if (data) cache[robotId] = data;
+    else delete cache[robotId];
+    scheduleMapPaint();
+  } catch {
+    // A dropped sample must not stop later paths, scans or other robots.
+  } finally {
+    clearTimeout(timeout);
+    sensorPollControllers.delete(controller);
+  }
+}
+
 function startSensorPolling() {
   stopSensorPolling();
+  const generation = sensorPollGeneration;
   const wantScan = scan2dToggle && scan2dToggle.checked;
   const wantPath = plannedPathToggle && plannedPathToggle.checked;
-  if (wantScan) {
-    startScanStream();
-  } else {
-    stopScanStream();
-  }
-  if (!wantScan && !wantPath) {
-    return;
-  }
-  sensorPollTimer = setInterval(async () => {
-    if (sensorPollInFlight) {
-      return;
-    }
+  if (wantScan) startScanStream();
+  else stopScanStream();
+  if (!wantScan && !wantPath) return;
+  const poll = async () => {
+    if (generation !== sensorPollGeneration || sensorPollInFlight) return;
     sensorPollInFlight = true;
     try {
-      const here = getRobotsOnCurrentMap();
-      if (here.length === 0) {
-        return;
-      }
-      const ws = scan2dToggle && scan2dToggle.checked;
-      const wp = plannedPathToggle && plannedPathToggle.checked;
-      await Promise.all(
-        here.map(async (r) => {
-        const id = encodeURIComponent(r.id);
-        if (ws && !scanStreamActive) {
-          const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/scan_2d`);
-          if (d) {
-            latestScanByRobot[r.id] = d;
-          } else {
-            delete latestScanByRobot[r.id];
-          }
-        }
-        if (wp) {
-          const d = await fetchJsonOptional(`${API_BASE_URL}/api/robot/${id}/planned_path`);
-          if (d) {
-            latestPathByRobot[r.id] = d;
-          } else {
-            delete latestPathByRobot[r.id];
-          }
-        }
-        })
-      );
-      scheduleMapPaint();
+      const requests = [];
+      getRobotsOnCurrentMap().forEach((robot) => {
+        if (plannedPathToggle?.checked) requests.push(pollRobotSensor(robot.id, "planned_path", generation));
+        if (scan2dToggle?.checked && !scanStreamActive) requests.push(pollRobotSensor(robot.id, "scan_2d", generation));
+      });
+      await Promise.allSettled(requests);
     } finally {
-      sensorPollInFlight = false;
+      if (generation === sensorPollGeneration) sensorPollInFlight = false;
     }
-  }, 250);
+  };
+  poll();
+  sensorPollTimer = setInterval(poll, 250);
 }
 
 function bindMapInteractions() {
@@ -4371,7 +4372,7 @@ function drawBagReplayPoints() {
     bagReplayCtx.arc(screen.x, screen.y, 5.5, 0, Math.PI * 2);
     bagReplayCtx.fill();
     bagReplayCtx.stroke();
-    const label = String(point.name || point.id || "point");
+    const label = String(window.OpenDeliveryI18n?.pointName(point) || point.name || point.id || "point");
     bagReplayCtx.font = '11px "Fira Code", monospace';
     const width = bagReplayCtx.measureText(label).width + 8;
     bagReplayCtx.fillStyle = "rgba(15, 23, 42, 0.9)";
@@ -7190,6 +7191,12 @@ function initRobotDetailUi() {
   });
 }
 
+document.addEventListener("openDelivery:languagechange", () => {
+  renderMapWaypointList();
+  scheduleMapPaint();
+  if (bagReplayState.mapPgm) renderBagReplayFrame();
+});
+
 function initOpenClawChat() {
   const trigger = document.getElementById("openclaw-chat-trigger");
   const panel = document.getElementById("openclaw-chat-panel");
@@ -7320,6 +7327,70 @@ function initOpenClawChat() {
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); form.requestSubmit(); }
   });
+  const pendingKey = () => `${storageHistoryKey}_pending_job`;
+  const followJob = async (pending) => {
+    const texts = pending.texts;
+    let cursor = pending.cursor || 0;
+    let lastLegacyUpdate = "";
+    for (let attempt = 0; attempt < 3000; attempt += 1) {
+      let job;
+      try {
+        job = await fetchJson(`${API_BASE_URL}/api/assistant/jobs/${encodeURIComponent(pending.job_id)}`, { cache: "no-store" });
+      } catch (error) {
+        if (/not found|404/.test(error.message || "")) throw error;
+        status.textContent = texts.job_reconnecting || "Reconnecting to task progress…";
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        continue;
+      }
+      const rows = Array.isArray(job.results) ? job.results : [];
+      const events = Array.isArray(job.events) ? job.events : null;
+      if (events) {
+        events.filter((item) => item.seq > cursor).forEach((item) => {
+          if (!pending.resuming || !history.some((row) => row.role === "assistant" && row.text === item.message)) {
+            append("assistant", item.message);
+            saveMessage("assistant", item.message);
+          }
+          cursor = item.seq;
+          status.textContent = item.kind === "terminal" ? "" : item.message;
+        });
+      } else {
+        const update = rows.map((action) => action.ok
+          ? action.summary || texts.completed : `${texts.failed}${action.error || "unknown error"}`).join("\n");
+        if (update && update !== lastLegacyUpdate) {
+          append("assistant", update); saveMessage("assistant", update); lastLegacyUpdate = update;
+        }
+      }
+      pending.resuming = false;
+      pending.cursor = cursor;
+      try { localStorage.setItem(pendingKey(), JSON.stringify(pending)); } catch { /* optional recovery */ }
+      if (job.status === "completed" || job.status === "failed") {
+        if (!events?.some((item) => item.seq <= cursor && item.kind === "terminal")) {
+          const final = job.terminal_text || (job.status === "failed"
+            ? `${texts.failed}${job.error || rows.find((item) => !item.ok)?.error || "unknown error"}`
+            : (texts.plan_completed || texts.completed).replace("{count}", String(rows.length)));
+          append("assistant", final); saveMessage("assistant", final);
+        }
+        status.classList.toggle("error", job.status === "failed");
+        status.textContent = job.status === "failed" ? job.terminal_text || texts.failed : "";
+        try { localStorage.removeItem(pendingKey()); } catch { /* ignore */ }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    throw new Error(texts.job_timeout);
+  };
+  const resumeJob = async () => {
+    let pending;
+    try { pending = JSON.parse(localStorage.getItem(pendingKey()) || "null"); } catch { return; }
+    if (!pending || pending.session_id !== sessionId || !/^[a-f0-9]{32}$/.test(pending.job_id) || send?.disabled) return;
+    pending.resuming = true;
+    if (send) send.disabled = true;
+    if (reset) reset.disabled = true;
+    try { await followJob(pending); }
+    catch (error) { status.classList.add("error"); status.textContent = error.message || String(error); }
+    finally { if (send) send.disabled = false; if (reset) reset.disabled = false; }
+  };
+  refreshSession().then(resumeJob).catch(() => {});
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const message = input.value.trim();
@@ -7351,32 +7422,9 @@ function initOpenClawChat() {
         const accepted = result.reply || responseTexts.accepted;
         append("assistant", accepted);
         saveMessage("assistant", accepted);
-        let lastJobUpdate = "";
-        let jobFinished = false;
-        // Each navigation can take up to 15 minutes and plans may have several
-        // legs. Follow the actual background job until it reaches a terminal state.
-        for (let attempt = 0; attempt < 3000; attempt += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-          const job = await fetchJson(`${API_BASE_URL}/api/assistant/jobs/${encodeURIComponent(result.job_id)}`, { cache: "no-store" });
-          const rows = Array.isArray(job.results) ? job.results : [];
-          const update = rows.map((action) => {
-            if (action.confirmation_required) return action.summary || responseTexts.confirmation;
-            if (!action.ok) return `${responseTexts.failed}${action.error || "unknown error"}`;
-            return action.summary || responseTexts.completed;
-          }).join("\n");
-          if (update && update !== lastJobUpdate) {
-            lastJobUpdate = update;
-            append("assistant", update);
-            saveMessage("assistant", update);
-          }
-          if (job.status === "completed" || job.status === "failed") {
-            jobFinished = true;
-            if (job.status === "failed" && !update) throw new Error(job.error || responseTexts.failed);
-            break;
-          }
-        }
-        if (!jobFinished) throw new Error(responseTexts.job_timeout);
-        status.textContent = "";
+        const pending = { job_id: result.job_id, session_id: sessionId, texts: responseTexts, cursor: 0 };
+        try { localStorage.setItem(pendingKey(), JSON.stringify(pending)); } catch { /* optional recovery */ }
+        await followJob(pending);
         return;
       }
       let reply = result.reply || responseTexts.empty_reply;

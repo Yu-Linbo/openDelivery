@@ -10,6 +10,10 @@ AI 返回 `decision`（`execute` / `query` / `clarify` / `chat`）及完整 `act
 
 回复及执行结果使用本轮提问的语言；英文、中文使用后端模板，其他语言使用模型提供的状态模板。会话消息不参与工作台界面翻译，切换界面语言不会改写回复。请求是否授权执行由 AI 结合语义和上下文判断，支持不同语言和表达方式。是否展示原始 API 数据也由 AI 的 `include_result` 字段决定。
 
+异步任务会在对话中逐步报告动作开始、机器人上线状态、当前导航子任务，以及最终完成或失败。进度来自实际机器人状态；相同状态去重，同一地图进入下一个子任务仍会产生新的进度。登录用户的进度消息写入原会话，因此开启新对话后仍可在 admin 查看旧任务反馈。刷新页面会恢复当前任务的进度订阅，避免重复显示已保存消息。任务跟踪目前保存在后端内存，后端重启后无法恢复订阅，已写入会话的消息仍保留。
+
+地图中的标准点位名称跟随界面中英文切换。自定义名称可在地图编辑器中选择点位、填写“英文名称”、点击“更新所选点名称”，再保存点位；后端保存可选的 `name_zh` 和 `name_en`，AI 也可以使用这些名称匹配同一个点位 ID。轨迹接口禁止缓存，每个路径响应独立刷新画布，慢速扫描请求不会阻塞下一段轨迹。
+
 ## 反向代理
 
 在现有 `/etc/nginx/sites-available/vps-stack-web` 的 `/opendelivery/api/` location 中加入：
@@ -38,6 +42,12 @@ location = /openclaw/ { return 302 /opendelivery/assistant-admin.html; }
 ```sh
 python3 -m unittest discover -s backend/tests -p 'test_assistant_sessions.py'
 python3 -m unittest discover -s backend/tests -p 'test_openclaw_chat.py'
+python3 -m unittest discover -s backend/tests -p 'test_assistant_progress.py'
+python3 -m unittest discover -s backend/tests -p 'test_sensor_api.py'
+node web/tests/ui_logic.test.cjs
+AGENT_BROWSER_BIN=/path/to/agent-browser python3 web/tests/task_feedback_browser.py
 ```
 
 验证范围包括：游客与伪造身份不能 reset/读取历史、跨用户隔离、旧消息持久化、重复 reset 返回冲突、新 OpenClaw 会话键、后台操作结果写回原会话。
+
+任务反馈浏览器回归使用临时数据库和模拟状态，不发送机器人命令或调用模型；覆盖同地图第二段轨迹自动刷新、点位双语、任务中途刷新续接，以及完成和失败反馈。

@@ -2319,7 +2319,7 @@ class ApiHandler(diagnostic_logging.RequestLoggingMixin, BaseHTTPRequestHandler)
             raw = gzip.compress(raw, compresslevel=5)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        if urlparse(self.path).path.startswith("/api/assistant/"):
+        if urlparse(self.path).path.startswith(("/api/assistant/", "/api/robot/")):
             self.send_header("Cache-Control", "no-store")
         if use_gzip:
             self.send_header("Content-Encoding", "gzip")

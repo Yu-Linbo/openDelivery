@@ -206,7 +206,7 @@ def handle_request(handler, path, method):
             handler._send_json({"error": str(err)}, 400 if isinstance(err, ValueError) else
                                504 if isinstance(err, TimeoutError) else 503)
             return True
-        if session:
+        if session and not out.get("job_id"):
             text = format_actions(out["actions"], out.get("status_text")) if out.get("actions") else out["reply"]
             STORE.append(user, session["id"], "assistant", text)
         handler._send_json(out)

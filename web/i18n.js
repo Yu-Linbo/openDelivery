@@ -262,6 +262,22 @@
     "点击取点": "Pick point",
     "取消取点": "Cancel picking",
     "撤销点位": "Undo point",
+    "英文名称": "English name",
+    "可选，如 Reception pickup": "Optional, e.g. Reception pickup",
+    "更新所选点名称": "Update selected point names",
+    "点位名称已更新，保存后生效": "Point names updated; save to apply.",
+    "前台取货点": "Reception pickup point",
+    "呼梯点": "Elevator call point",
+    "候梯点": "Elevator waiting point",
+    "出梯点": "Elevator exit point",
+    "进梯点": "Elevator entry point",
+    "梯内点": "Inside-elevator point",
+    "卧室": "Bedroom",
+    "客厅": "Living room",
+    "卫生间": "Bathroom",
+    "厨房": "Kitchen",
+    "餐厅": "Dining room",
+    "走廊": "Corridor",
     "电梯等待点": "Elevator waiting point",
     "电梯内点": "Inside-elevator point",
     "重定位点": "Relocalization point",
@@ -911,6 +927,11 @@
     get locale() { return locale; },
     setLocale,
     t: (source) => translate(source),
+    pointName: (point) => {
+      if (!point) return "";
+      const explicit = locale === "en" ? point.name_en : point.name_zh;
+      return String(explicit || translate(point.name || point.id || ""));
+    },
     apply
   };
 
