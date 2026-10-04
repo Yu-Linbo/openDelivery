@@ -38,6 +38,14 @@ class FakeRosNodeManager:
 
 
 class MultiRobotSimulationLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        # Fake managers do not stop real processes. Startup recovery still
+        # invokes these /proc-based cleaners, so isolate them explicitly.
+        for method in ('_terminate_stale_robot_processes', '_terminate_stale_world_processes'):
+            patcher = mock.patch.object(robot_lifecycle.RobotLifecycleOrchestrator, method)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def tearDown(self):
         ros_node_store.clear()
 

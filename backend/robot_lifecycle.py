@@ -422,6 +422,10 @@ class RobotLifecycleOrchestrator:
             try:
                 args = entry.joinpath("cmdline").read_bytes().split(b"\0")
                 argv = [part.decode(errors="replace") for part in args if part]
+                env = dict(part.split(b'=', 1) for part in entry.joinpath('environ').read_bytes().split(b'\0')
+                           if b'=' in part)
+                if env.get(b'ROS_DOMAIN_ID', b'0').decode() != os.environ.get('ROS_DOMAIN_ID', '0'):
+                    continue
             except (OSError, ProcessLookupError):
                 continue
             if not argv:
@@ -456,6 +460,10 @@ class RobotLifecycleOrchestrator:
             try:
                 args = entry.joinpath("cmdline").read_bytes().split(b"\0")
                 argv = [part.decode(errors="replace") for part in args if part]
+                env = dict(part.split(b'=', 1) for part in entry.joinpath('environ').read_bytes().split(b'\0')
+                           if b'=' in part)
+                if env.get(b'ROS_DOMAIN_ID', b'0').decode() != os.environ.get('ROS_DOMAIN_ID', '0'):
+                    continue
             except (OSError, ProcessLookupError):
                 continue
             joined = " ".join(argv)

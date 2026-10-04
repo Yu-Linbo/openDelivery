@@ -35,7 +35,10 @@ Nav2、任务执行器和 Web 直接目标接口统一使用 `/<robot>/navigatio
 action 名称。
 
 ROS 2 Foxy 的 BT action 偶发在 controller 已接收路径后以 `send_goal failed` 中止外层
-`NavigateToPose`。执行器仅对 `STATUS_ABORTED` 使用有上限的延迟重试，默认重试 2 次、
+`NavigateToPose`。Foxy 内置行为树的 blackboard 默认超时只有 10 ms，且不会读取新版
+`default_server_timeout` 参数。项目安装自己的行为树，给全部 ROS action/service
+节点的 `server_timeout` 端口设置 2000 ms；保留 1 Hz 重规划和原有恢复步骤。
+执行器仅对 `STATUS_ABORTED` 使用有上限的延迟重试，默认重试 2 次、
 间隔 1 秒；Pause、Terminate 或新任务会取消等待中的重试。其他终态仍立即如实上报，避免
 真正不可达的目标被无限重试。
 

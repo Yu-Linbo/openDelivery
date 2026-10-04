@@ -6,10 +6,9 @@ bt_navigator:
     robot_base_frame: "@@ROBOT@@/base_footprint"
     odom_topic: "/@@ROBOT@@/odom"
     bt_loop_duration: 10
-    # Foxy's 20 ms default is too short when planner/controller callbacks share
-    # a loaded simulator host; a late goal acknowledgement otherwise aborts the
-    # whole NavigateToPose action with "send_goal failed".
-    default_server_timeout: 2000
+    # Foxy hardcodes a 10 ms BT blackboard timeout and does not read the later
+    # default_server_timeout parameter. Our BT XML sets server_timeout on each
+    # action/service port to allow goal acknowledgements on a loaded host.
     enable_groot_monitoring: False
     groot_zmq_publisher_port: 1666
     groot_zmq_server_port: 1667
@@ -146,7 +145,15 @@ local_costmap:
       footprint: "[[0.26, 0.16], [0.26, -0.16], [-0.21, -0.16], [-0.21, 0.16]]"
       footprint_padding: 0.01
       track_unknown_space: @@LOCAL_TRACK_UNKNOWN_SPACE@@
-      plugins: ["voxel_layer", "inflation_layer"]
+      # The front-mounted 180 degree lidar cannot observe the rear footprint.
+      # Seed known space from the current map rather than rejecting every turn
+      # into unobserved rear cells. Unknown map cells and live obstacles remain.
+      map_topic: "@@OCC_GRID_TOPIC@@"
+      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: "@@OCC_GRID_TOPIC@@"
+        map_subscribe_transient_local: @@MAP_SUBSCRIBE_TRANSIENT_LOCAL@@
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -253,7 +260,7 @@ recoveries_server:
       plugin: "nav2_recoveries/Wait"
     global_frame: "@@ROBOT@@/odom"
     robot_base_frame: "@@ROBOT@@/base_footprint"
-    transform_timeout: 0.3
+    transform_tolerance: 0.6
     use_sim_time: true
     simulate_ahead_time: 2.0
     max_rotational_vel: 0.6

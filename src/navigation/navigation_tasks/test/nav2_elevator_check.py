@@ -54,7 +54,13 @@ class ElevatorProbe(Node):
         static.header.frame_id = 'map'
         static.child_frame_id = f'{ROBOT}/odom'
         static.transform.rotation.w = 1.0
-        self.static_tf.sendTransform(static)
+        laser = TransformStamped()
+        laser.header.frame_id = f'{ROBOT}/base_footprint'
+        laser.child_frame_id = f'{ROBOT}/laser_link'
+        laser.transform.translation.x = 0.23
+        laser.transform.translation.z = 0.245
+        laser.transform.rotation.w = 1.0
+        self.static_tf.sendTransform([static, laser])
         config = (ROOT / 'src/navigation/nav_bringup/config/nav2_params.yaml').read_text()
         # Read the production footprint without interpreting launch placeholders.
         line = next(line.strip() for line in config.splitlines() if line.strip().startswith('footprint:'))
@@ -166,19 +172,21 @@ class ElevatorProbe(Node):
     def scan_tick(self):
         scan = LaserScan()
         scan.header.stamp = self.get_clock().now().to_msg()
-        scan.header.frame_id = f'{ROBOT}/base_footprint'
-        scan.angle_min, scan.angle_max = -math.pi, math.pi
-        scan.angle_increment = 2*math.pi/180
-        scan.range_min, scan.range_max = .05, 5.0
-        angles = self.yaw + np.linspace(-math.pi, math.pi, 181)
-        distances = np.arange(.025, 5.001, .025)
-        x = self.x + np.cos(angles)[:,None]*distances
-        y = self.y + np.sin(angles)[:,None]*distances
+        # Match the real OP1's front-mounted 180 degree lidar. A centered 360
+        # degree scan hides the rear unknown-cell trap seen in Gazebo.
+        scan.header.frame_id = f'{ROBOT}/laser_link'
+        scan.angle_min, scan.angle_max = -1.5708, 1.5708
+        scan.angle_increment = (scan.angle_max-scan.angle_min)/719
+        scan.range_min, scan.range_max = .10, 12.0
+        angles = self.yaw + np.linspace(scan.angle_min, scan.angle_max, 720)
+        distances = np.arange(.10, 12.001, .025)
+        x = self.x + .23*math.cos(self.yaw) + np.cos(angles)[:,None]*distances
+        y = self.y + .23*math.sin(self.yaw) + np.sin(angles)[:,None]*distances
         ix = np.floor((x-self.origin[0])/self.resolution).astype(int)
         iy = np.floor((y-self.origin[1])/self.resolution).astype(int)
         valid = (ix>=0)&(ix<self.width)&(iy>=0)&(iy<self.height)
         hits = ~valid | self.occupied[np.clip(iy,0,self.height-1), np.clip(ix,0,self.width-1)]
-        scan.ranges = np.min(np.where(hits, distances, 5.0), axis=1).astype(np.float32).tolist()
+        scan.ranges = np.min(np.where(hits, distances, 12.0), axis=1).astype(np.float32).tolist()
         self.scan.publish(scan)
 
     def wait(self, seconds):
@@ -237,11 +245,24 @@ def main():
                 # Let launch send each child SIGINT once instead of delivering
                 # both a process-group signal and launch's forwarded signal.
                 process.send_signal(signal.SIGINT)
+            else:
+                # A production reload may terminate this launch by name. Its
+                # children can outlive it; still clean our isolated group.
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+            # launch can exit before an unresponsive child. This process group
+            # belongs only to this check, so ensure no ROS participants remain.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             (OUT/'trajectory.json').write_text(json.dumps(simulation.trajectory))
             simulation.probe_executor.shutdown()
             simulation.probe_executor.remove_node(simulation)

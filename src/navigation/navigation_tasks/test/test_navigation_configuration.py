@@ -1,5 +1,6 @@
 """Check the installed launch templates match task-layer endpoint semantics."""
 import importlib.util
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import yaml
 
@@ -42,6 +43,14 @@ def test_materialized_params_keep_original_goal_and_matching_stop_window(tmp_pat
     assert local['footprint'] == global_['footprint']
     assert local['footprint_padding'] == global_['footprint_padding'] == 0.01
     assert 'robot_radius' not in local and 'robot_radius' not in global_
+    assert local['plugins'][0] == 'static_layer'
+    assert local['static_layer']['map_topic'] == global_['static_layer']['map_topic'] == '/robotcheck/map'
+    assert local['static_layer']['map_subscribe_transient_local'] is True
+    assert local['track_unknown_space'] is True
+    recovery = config['recoveries_server']['ros__parameters']
+    assert recovery['robot_base_frame'] == local['robot_base_frame']
+    assert recovery['global_frame'] == local['global_frame']
+    assert recovery['transform_tolerance'] == local['transform_tolerance']
 
 
 def test_task_executor_and_nav2_share_navigate_action_namespace(tmp_path, monkeypatch):
@@ -61,3 +70,29 @@ def test_task_executor_and_nav2_share_navigate_action_namespace(tmp_path, monkey
             break
     else:
         raise AssertionError('NavigateToPose remap missing')
+
+
+def test_stack_uses_tree_with_foxy_action_and_service_acknowledgement_timeouts(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path / 'ros'))
+    from launch import LaunchContext
+    from launch.actions import IncludeLaunchDescription
+    module = load_module(ROOT / 'params/launch/nav_bringup/stack.launch.py')
+    monkeypatch.setattr(module, 'get_package_share_directory',
+                        lambda package: str(ROOT / 'src/navigation' / package))
+    context = LaunchContext()
+    context.launch_configurations.update(robot_name='robotcheck', grid_mode='localize',
+                                        use_sim_time='false', autostart='true', robot_settings_file='')
+    group = module._launch_setup(context)[0]
+    include = next(action for action in group.get_sub_entities()
+                   if isinstance(action, IncludeLaunchDescription))
+    arguments = dict(include.launch_arguments)
+    Path(arguments['params_file']).unlink()
+    tree = ET.parse(arguments['default_bt_xml_filename'])
+    # A YAML parameter from newer Nav2 releases does not change Foxy's
+    # hardcoded 10 ms blackboard timeout: each ROS BT port must override it.
+    for tag in ('ComputePathToPose', 'FollowPath', 'ClearEntireCostmap', 'Spin', 'Wait'):
+        nodes = tree.findall('.//' + tag)
+        assert nodes, tag
+        assert all(int(node.get('server_timeout', '0')) >= 1000 for node in nodes), tag
+    assert len(tree.findall('.//RecoveryNode')) == 3
+    assert tree.find('.//RateController').get('hz') == '1.0'

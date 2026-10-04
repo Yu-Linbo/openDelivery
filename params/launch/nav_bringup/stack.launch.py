@@ -149,11 +149,7 @@ def _launch_setup(context, *_args, **_kwargs):
         map_subscribe_transient_local=map_subscribe_transient_local,
         robot_settings_file=robot_settings_file,
     )
-    bt_xml = os.path.join(
-        get_package_share_directory("nav2_bt_navigator"),
-        "behavior_trees",
-        "navigate_w_replanning_and_recovery.xml",
-    )
+    bt_xml = os.path.join(pkg_nav, "config", "navigate_w_replanning_and_recovery.xml")
     navigation_namespace = f"{robot_name}/navigation"
 
     return [

@@ -44,6 +44,7 @@ import robot_settings
 import log_files
 import logging
 import diagnostic_logging
+import navigation_processes
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -603,6 +604,12 @@ class RosNodeManager:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except Exception:
                     diagnostic_logging.event(LOGGER, logging.ERROR, "managed.stop_failed", node_id=node_id, pid=proc.pid, exc_info=True)
+        if node_id.startswith('navigation_'):
+            robot_id = node_id[len('navigation_'):]
+            pids = navigation_processes.stop_navigation(robot_id)
+            diagnostic_logging.event(LOGGER, logging.INFO, 'managed.navigation_stopped',
+                                     node_id=node_id, robot_id=robot_id, matched_pids=pids)
+            return
         stop_cmd = (spec.get("stop_cmd") or "").strip()
         if stop_cmd:
             self._run_shell(stop_cmd)
