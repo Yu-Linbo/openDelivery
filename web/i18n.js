@@ -277,7 +277,6 @@
     "卫生间": "Bathroom",
     "厨房": "Kitchen",
     "餐厅": "Dining room",
-    "走廊": "Corridor",
     "电梯等待点": "Elevator waiting point",
     "电梯内点": "Inside-elevator point",
     "重定位点": "Relocalization point",

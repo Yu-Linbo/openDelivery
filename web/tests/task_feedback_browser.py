@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +50,8 @@ def fake_chat(message, session_id, context, **kwargs):
 class Handler(BaseHTTPRequestHandler):
     path_version = 1
     jid = ''
+    session_unavailable = False
+    session_reads = 0
 
     def log_message(self, *args):
         pass
@@ -71,13 +73,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.auth()
+        if self.session_unavailable and urlparse(self.path).path == '/api/assistant/session':
+            self._send_json({'error': 'temporary session outage'}, 503)
+            return
         if not assistant_sessions.handle_request(self, urlparse(self.path).path, 'POST'):
             self.send_error(404)
 
     def do_GET(self):
         self.auth()
         path = urlparse(self.path).path
-        if path == '/__second_path':
+        if path == '/__remote':
+            mode = unquote(urlparse(self.path).query)
+            session = assistant_sessions.STORE.ensure('browser-progress-test')
+            if mode == 'reset':
+                assistant_sessions.STORE.reset('browser-progress-test', session['id'])
+            else:
+                texts = ['Remote history %d: %s' % (n, 'saved message ' * 30) for n in range(20)] if mode == 'bulk' else [mode]
+                for text in texts:
+                    assistant_sessions.STORE.append('browser-progress-test', session['id'], 'assistant', text)
+            self._send_json({'ok': True})
+        elif path == '/__session_service':
+            Handler.session_unavailable = urlparse(self.path).query == 'unavailable'
+            self._send_json({'reads': Handler.session_reads})
+        elif path.startswith('/api/assistant/sessions/'):
+            Handler.session_reads += 1
+            if self.session_unavailable:
+                self._send_json({'error': 'temporary session outage'}, 503)
+            else:
+                assistant_sessions.handle_request(self, path, 'GET')
+        elif path == '/__second_path':
             Handler.path_version = 2
             self._send_json({'ok': True})
         elif path.endswith('/planned_path'):
@@ -112,6 +136,7 @@ const paints=[];function scheduleMapPaint(){paints.push(latestPathByRobot.robot2
 function startScanStream(){}function stopScanStream(){}function getRobotsOnCurrentMap(){return[{id:'robot2'}];}
 async function fetchJson(url,options){const r=await fetch(url,options),p=await r.json();if(!r.ok)throw Error(p.error);return p;}
 window.scriptErrors=[];window.addEventListener('error',e=>scriptErrors.push(e.message));
+window.waitUntil=async(predicate)=>{const deadline=Date.now()+9000;while(!predicate()){if(Date.now()>deadline)throw Error('automatic sync timed out');await new Promise(r=>setTimeout(r,100));}};
 '''
             source = '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles.css"></head><body>' + panel
             source += '<script src="/i18n.js"></script><script>' + prelude + optional_js + poll_js + chat_js + '\nstartSensorPolling();</script></body></html>'
@@ -172,6 +197,38 @@ await new Promise(r=>setTimeout(r,1800));
 if(!document.getElementById('openclaw-chat-messages').textContent.includes('执行失败：'))throw Error('failure feedback missing');
 if(scriptErrors.length)throw Error(scriptErrors.join(';'));
 return 'Chinese failure feedback and zero JavaScript errors passed';})()'''),
+        ev('''(async()=>{const box=document.getElementById('openclaw-chat-messages');
+await fetch('/__remote?bulk');await waitUntil(()=>box.textContent.includes('Remote history 19:'));
+const input=document.getElementById('openclaw-chat-input');input.value='unfinished draft';
+box.scrollTop=0;const first=box.firstChild;
+await new Promise(r=>setTimeout(r,3300));
+if(box.firstChild!==first)throw Error('unchanged history rebuilt');
+await fetch('/__remote?Automatic%20update');await waitUntil(()=>box.textContent.includes('Automatic update'));
+if(input.value!=='unfinished draft')throw Error('draft lost during sync');
+if(box.scrollTop!==0)throw Error('reading position lost during sync');
+if([...box.children].filter(n=>n.textContent==='Automatic update').length!==1)throw Error('remote message duplicated');
+return 'idle conversation auto-sync preserves draft, reading position and unchanged DOM';})()'''),
+        ev('''(async()=>{await fetch('/__session_service?unavailable');
+await fetch('/__remote?Recovered%20message');await new Promise(r=>setTimeout(r,3400));
+await fetch('/__session_service?available');
+await waitUntil(()=>document.getElementById('openclaw-chat-messages').textContent.includes('Recovered message'));
+return 'automatic sync recovers from temporary session outage';})()'''),
+        'click #openclaw-chat-close',
+        ev('''(async()=>{await new Promise(r=>setTimeout(r,500));
+const before=(await (await fetch('/__session_service?available')).json()).reads;
+await new Promise(r=>setTimeout(r,3400));
+const after=(await (await fetch('/__session_service?available')).json()).reads;
+if(after!==before)throw Error('closed panel still polls');
+await fetch('/__remote?Changed%20while%20closed');
+return 'closed assistant panel pauses polling';})()'''),
+        'click #openclaw-chat-trigger',
+        ev('''(async()=>{const box=document.getElementById('openclaw-chat-messages');
+await waitUntil(()=>box.textContent.includes('Changed while closed'));
+await fetch('/__remote?reset');await waitUntil(()=>!box.textContent.includes('Changed while closed'));
+await fetch('/__remote?New%20session%20message');await waitUntil(()=>box.textContent.includes('New session message'));
+if(document.getElementById('openclaw-chat-input').value!=='unfinished draft')throw Error('draft lost after remote reset');
+if(scriptErrors.length)throw Error(scriptErrors.join(';'));
+return 'reopening syncs immediately and remote reset switches to the new conversation';})()'''),
         'screenshot /tmp/opendelivery-task-feedback.png']
     args = ['--session', 'task-feedback-test', '--args', '--no-sandbox,--no-zygote,--single-process,--disable-dev-shm-usage,--disable-gpu']
     try:

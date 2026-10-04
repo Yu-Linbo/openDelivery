@@ -7236,7 +7236,10 @@ function initOpenClawChat() {
   const setOpen = (open) => {
     panel.hidden = !open;
     trigger.setAttribute("aria-expanded", open ? "true" : "false");
-    if (open) setTimeout(() => input.focus(), 0);
+    if (open) {
+      setTimeout(() => input.focus(), 0);
+      syncConversation();
+    }
   };
   const append = (role, text, isWelcome = false) => {
     const item = document.createElement("div");
@@ -7252,26 +7255,36 @@ function initOpenClawChat() {
     if (!authenticated) guestHistory = history.slice();
     try { localStorage.setItem(storageHistoryKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
   };
-  const renderHistory = () => {
+  const renderHistory = (preserveScroll = false) => {
+    const previousTop = messages.scrollTop;
+    const nearBottom = messages.scrollHeight - messages.clientHeight - previousTop < 32;
     messages.replaceChildren();
     history.forEach((item, index) => append(
       item.role === "user" ? "user" : "assistant", item.text,
       index === 0 && item.role === "assistant" && item.text === welcome,
     ));
+    if (preserveScroll && !nearBottom) messages.scrollTop = previousTop;
   };
   renderHistory();
   const applySession = (session) => {
+    const next = session.messages.map((item) => ({ role: item.role, text: item.text })).slice(-50);
+    if (!next.length) next.push({ role: "assistant", text: welcome });
+    const switched = sessionId !== session.id;
+    const changed = switched || JSON.stringify(history) !== JSON.stringify(next);
     sessionId = session.id;
-    history = session.messages.map((item) => ({ role: item.role, text: item.text })).slice(-50);
-    if (!history.length) history = [{ role: "assistant", text: welcome }];
-    renderHistory();
+    history = next;
+    if (switched) {
+      status.textContent = "";
+      status.classList.remove("error");
+    }
+    if (changed) renderHistory(true);
     try { localStorage.setItem(storageHistoryKey, JSON.stringify(history)); } catch { /* ignore quota errors */ }
   };
   const refreshSession = () => {
     if (sessionRequest) return sessionRequest;
     sessionRequest = (async () => {
       const state = await fetchJson(`${API_BASE_URL}/api/assistant/session`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", cache: "no-store",
         body: JSON.stringify({ session_id: guestSessionId, history: guestHistory }),
       });
       authenticated = state.authenticated === true;
@@ -7280,14 +7293,14 @@ function initOpenClawChat() {
       if (adminLink) adminLink.hidden = !authenticated;
       if (authenticated && state.session) applySession(state.session);
       else {
+        const changed = sessionId !== guestSessionId || JSON.stringify(history) !== JSON.stringify(guestHistory);
         sessionId = guestSessionId;
         history = guestHistory.slice();
-        renderHistory();
+        if (changed) renderHistory(true);
       }
     })().finally(() => { sessionRequest = null; });
     return sessionRequest;
   };
-  refreshSession().catch(() => { /* server checks all restricted actions */ });
   reset?.addEventListener("click", async () => {
     if (!authenticated || send?.disabled || reset.disabled) return;
     reset.disabled = true;
@@ -7320,7 +7333,6 @@ function initOpenClawChat() {
   });
   trigger.addEventListener("click", () => {
     setOpen(panel.hidden);
-    if (!panel.hidden && !send?.disabled) refreshSession().catch(() => {});
   });
   close?.addEventListener("click", () => setOpen(false));
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !panel.hidden) setOpen(false); });
@@ -7390,6 +7402,37 @@ function initOpenClawChat() {
     catch (error) { status.classList.add("error"); status.textContent = error.message || String(error); }
     finally { if (send) send.disabled = false; if (reset) reset.disabled = false; }
   };
+  let syncRequest = null;
+  const canSync = () => !panel.hidden && document.visibilityState !== "hidden" && !send?.disabled;
+  const syncConversation = () => {
+    if (!canSync() || syncRequest) return;
+    const expectedSession = sessionId;
+    syncRequest = (async () => {
+      if (authenticated) {
+        try {
+          const result = await fetchJson(`${API_BASE_URL}/api/assistant/sessions/${encodeURIComponent(expectedSession)}`, {
+            credentials: "same-origin", cache: "no-store",
+          });
+          if (!canSync() || sessionId !== expectedSession || sessionRequest) return;
+          if (result.session?.active) applySession(result.session);
+          else await refreshSession();
+        } catch {
+          if (!canSync() || sessionId !== expectedSession || sessionRequest) return;
+          await refreshSession();
+        }
+      } else {
+        await refreshSession();
+      }
+      if (canSync()) await resumeJob();
+    })().catch(() => { /* the next tick retries without replacing messages */ })
+      .finally(() => { syncRequest = null; });
+  };
+  setInterval(syncConversation, 3000);
+  document.addEventListener("visibilitychange", syncConversation);
+  window.addEventListener("focus", syncConversation);
+  window.addEventListener("storage", (event) => {
+    if (!event.key || event.key === sessionKey || event.key.startsWith(historyKey)) syncConversation();
+  });
   refreshSession().then(resumeJob).catch(() => {});
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
