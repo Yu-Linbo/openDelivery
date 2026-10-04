@@ -32,8 +32,16 @@ def test_materialized_params_keep_original_goal_and_matching_stop_window(tmp_pat
     assert controller['goal_checker']['stateful'] is False
     assert controller['FollowPath']['debug_trajectory_details'] is False
     assert controller['FollowPath']['BaseObstacle.scale'] == 0.005
+    assert 'BaseObstacle' in controller['FollowPath']['critics']
+    assert 'ObstacleFootprint' in controller['FollowPath']['critics']
+    assert controller['FollowPath']['ObstacleFootprint.scale'] > 0
     assert controller['FollowPath']['GoalAlign.forward_point_distance'] < controller['goal_checker']['xy_goal_tolerance']
     assert controller['progress_checker']['required_movement_radius'] < controller['goal_checker']['xy_goal_tolerance']
+    local = config['local_costmap']['local_costmap']['ros__parameters']
+    global_ = config['global_costmap']['global_costmap']['ros__parameters']
+    assert local['footprint'] == global_['footprint']
+    assert local['footprint_padding'] == global_['footprint_padding'] == 0.01
+    assert 'robot_radius' not in local and 'robot_radius' not in global_
 
 
 def test_task_executor_and_nav2_share_navigate_action_namespace(tmp_path, monkeypatch):

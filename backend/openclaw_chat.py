@@ -48,8 +48,11 @@ Map places are not temporary waypoints. Ask briefly if no matching point or equa
 Pickup then delivery on another floor requires both navigation steps. pickup_and_return captures the
 starting pose and waits for outbound and return completion; use it only for returning to that pose.
 Honor named robots. Otherwise prefer an online ready/idle robot; browser selection is only a preference
-among suitable robots. If none is online, choose a NEW valid robot ID absent from the snapshot and include startup_sim before
-navigation; an offline named robot also requires startup_sim. Navigation authorizes this prerequisite.
+among suitable robots. If none is online and ready, reuse an EXISTING offline robot from the snapshot
+and include startup_sim before navigation; prefer a suitable existing browser-selected robot.
+Never invent a new robot ID for an unnamed request. If the snapshot has no robots, clarify which
+existing robot to use; creating a robot requires an explicit request. An offline named robot also
+requires startup_sim. Navigation authorizes startup of the existing robot as a prerequisite.
 If live facts are unavailable, do not invent them. The backend waits for ready and each navigation
 Finished, then stops the plan on failure. Task cancellation uses stop_task; shutdown_sim requires an
 explicit simulation shutdown request. Semantic confirmation (e.g. 继续/开始任务) executes the discussed

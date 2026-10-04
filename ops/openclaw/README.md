@@ -33,12 +33,14 @@ openclaw config validate
 
 `AGENTS.md`、skills 目录同步到 `~/.openclaw/workspace/`。operations skill 同步到该 agent 的 `codex-home/skills/`；`codex.settings.toml` 安装到该 agent 的 config.toml 时须保留已有 projects trust 配置。只重新加载 Gateway 和 Python 后端，不停止 ROS/Gazebo。
 
-模型更换后必须用无执行的真实计划请求核实 `agentMeta.model`、`requestShaping.thinking` 和原始 turn_context，不能只检查配置。验证应覆盖在线机器人、全部离线需新编号、英中文回复、否定请求，以及多站顺序计划。
+模型更换后必须用无执行的真实计划请求核实 `agentMeta.model`、`requestShaping.thinking` 和原始 turn_context，不能只检查配置。验证应覆盖在线机器人、全部离线时复用已有机器人、空快照不自动创建、英中文回复、否定请求，以及多站顺序计划。
 
 ## 实测结果
 
 最近真实用户会话 `opendelivery-4a76d395403440dd850d42f8b38ffab8` 的英文配送计划包含两次导航，平台日志记录 job `023c78aab7f14b0ba4dc1613b60aa999` 已 completed。此前一轮模型输入 22231 tokens，其中 19968 命中缓存。另一个旧 main 会话报告约 79925 tokens 上下文，历史累积也是成本来源。
 
 最终 3 个隔离规划测试均通过，机器人执行线程被拦截：在线 robot1 的英文取货送货；仅离线 robot1 时中文计划选择新 robot2 并先上线；英文否定执行请求返回 chat/空 actions。原始轨迹均确认 gpt-5.6-sol / low，每轮只有一次模型采样、零工具调用，输入分别 12298 / 12303 / 12279 tokens。测试使用固定机器人快照和两点目录；该数值不是线上费用承诺，真实输入取决于地图规模、历史和缓存。之前类似验证约 19350 tokens 输入。
+
+上述“离线时新建 robot2”为 10 月 1 日的旧策略。10 月 4 日起按最新要求改为优先上线已有离线机器人，空快照返回澄清，自动新建编号不再作为导航前置步骤。
 
 现有相关 Python 检查合计 56 项通过（11 bridge、18 assistant、19 web monitor、8 i18n），skill 校验和 git diff --check 通过；后端重载后游客 session 接口正常。目标 6.1 Sol 的真实验证仍被账户权限阻止。

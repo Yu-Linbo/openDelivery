@@ -46,7 +46,12 @@ ROS 2 Foxy 的 BT action 偶发在 controller 已接收路径后以 `send_goal f
 DWB 和 Nav2 到达窗口统一为 0.10 m，朝向窗口为 0.15 rad；Nav2 在最终旋转期间
 继续检查位置，避免进入窗口后漂出仍报告成功。末端进展检测半径缩小到 0.05 m，
 朝向评分点偏移缩小到 0.05 m，软膨胀成本权重从 0.02 调到 0.005，
-避免靠墙合法目标的接近收益被软障碍惩罚压过；硬障碍拒绝及 0.28 m 碰撞半径保持原配置。
+避免靠墙合法目标的接近收益被软障碍惩罚压过。硬障碍拒绝保留，碰撞外形改为覆盖
+全部 Gazebo 碰撞部件的矩形：前端 x=0.26 m、后端 x=-0.21 m、两侧 y=±0.16 m，
+另加 0.01 m 余量。局部和全局 costmap 使用同一外形，DWB 同时启用
+`BaseObstacle` 与 `ObstacleFootprint`，检查中心及朝向对应的完整外形。
+原来的 0.28 m 圆形加余量后直径 0.58 m，会封死约 0.55 m 的电梯门；
+软膨胀半径仍为 0.55 m，未通过缩小真实车体或关闭障碍层来过门。
 任务执行器在 Nav2 成功后，
 通过 `map → <robot>/base_footprint` 的新鲜 TF 独立核对原始目标的位置和朝向。
 TF 超过 1 s、缺失或误差超限时，最多等待 2 s 让定位更新，随后按原有有界策略重试，
@@ -71,9 +76,14 @@ TF 超过 1 s、缺失或误差超限时，最多等待 2 s 让定位更新，�
 ```bash
 python3 -m pytest -q src/navigation/navigation_tasks/test
 python3 src/navigation/navigation_tasks/test/nav2_closed_loop_check.py
+python3 src/navigation/navigation_tasks/test/nav2_elevator_check.py
 ```
 
 第二个是显式运行的 Nav2 软件闭环检查，使用隔离的 ROS domain 93、合成地图、
 激光、TF、里程计和差速运动模型，检查直行、原地转向、绕障及障碍内目标失败。
 它不会启动真实机器人；结果及日志保存在 `/tmp/od-navigation-check`。
+第三个使用隔离的 ROS domain 94、现有 robot2 的身份和四个真实楼层地图，
+验证候梯点到梯内点、梯内转向以及出梯。每次运动都核对带余量的矩形外形
+与地图障碍格是否相交；结果及日志保存在 `/tmp/od-elevator-check`。
+检查使用真实 Nav2 与软件运动模型，不注册机器人，也不向生产 ROS 域发命令。
 真实机器人仍需验证定位精度、底盘制动及狭窄通道表现。

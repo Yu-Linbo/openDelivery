@@ -10,6 +10,22 @@ from assistant_language import EN, ZH, response_texts
 
 
 class AssistantRoutingTest(unittest.TestCase):
+    @mock.patch.object(chat, "_load_robot_context", return_value={"available": True, "robots": [
+        {"id": "robot1", "online": False, "status": "shutdown", "task_status": "idle"},
+        {"id": "robot2", "online": False, "status": "ready", "task_status": "idle"},
+    ]})
+    @mock.patch.object(chat, "_load_map_point_catalog", return_value=[])
+    @mock.patch.object(chat.shutil, "which", return_value="/usr/bin/openclaw")
+    @mock.patch.object(chat.subprocess, "run", return_value=mock.Mock(returncode=0, stderr="", stdout='{"reply":"Which existing robot should I use?","decision":"clarify","actions":[]}'))
+    def test_robot_reuse_policy_and_all_existing_ids_are_supplied_to_ai(self, run, which, catalog, context):
+        chat.run_chat("Take the delivery upstairs", "opendelivery-reuse-policy", {"robot_id": "robot2"})
+        prompt = run.call_args.args[0][-1]
+        self.assertIn('"id":"robot1","online":false', prompt)
+        self.assertIn('"id":"robot2","online":false', prompt)
+        self.assertIn('reuse an EXISTING offline robot', prompt)
+        self.assertIn('Never invent a new robot ID', prompt)
+        self.assertNotIn('choose a NEW valid robot ID', prompt)
+
     @mock.patch.object(chat, "_read_json", return_value={"items": [
         {"id": "robot2", "online": True, "live_robot_status": "navigating", "live_task_status": "running"},
         {"id": "robot1", "online": True, "live_robot_status": "ready", "live_task_status": "idle"},

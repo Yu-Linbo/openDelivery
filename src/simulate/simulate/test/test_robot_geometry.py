@@ -1,11 +1,14 @@
 """Validate the expanded Gazebo geometry, not Xacro string fragments."""
 import math
+import json
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 MODEL = Path(__file__).resolve().parents[1] / 'urdf/simple_2d_robot.urdf.xacro'
 
@@ -87,3 +90,24 @@ def test_ground_clearance_support_and_lidar_height(model):
         radius = float(collision.findtext('geometry/cylinder/radius'))
         assert abs(wheel_center[2]-radius) < 1e-6
         assert wheel_center[2]+radius < center[2]-extents[2]
+
+
+def test_navigation_footprint_covers_all_gazebo_collisions(model):
+    config = MODEL.parents[3] / 'navigation/nav_bringup/config/nav2_params.yaml'
+    text = config.read_text()
+    footprints = re.findall(r'^\s+footprint: (.+)$', text, re.MULTILINE)
+    assert len(footprints) == 2  # global + local
+    assert footprints[0] == footprints[1]
+    polygon = np.array(json.loads(yaml.safe_load(footprints[0])))
+    minimum, maximum = polygon.min(axis=0), polygon.max(axis=0)
+    # Include all fixed body parts and wheels after Gazebo's URDF conversion;
+    # a narrower navigation envelope must not discard camera/shell collisions.
+    for link in model.findall('link'):
+        link_position, link_rotation = transform(link.findtext('pose', '0 0 0 0 0 0'))
+        for collision in link.findall('collision'):
+            center, rotation = transform(collision.findtext('pose', '0 0 0 0 0 0'))
+            half = half_extents(collision.find('geometry'))
+            corners = np.array([[x,y,z] for x in (-half[0],half[0]) for y in (-half[1],half[1]) for z in (-half[2],half[2])])
+            corners = (corners @ rotation.T + center) @ link_rotation.T + link_position
+            assert np.all(corners[:,:2] >= minimum - 1e-6), collision.get('name')
+            assert np.all(corners[:,:2] <= maximum + 1e-6), collision.get('name')

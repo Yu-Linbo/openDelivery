@@ -22,7 +22,8 @@ DEFAULT_SETTINGS = {
 SETTING_LIMITS = {
     "max_linear_speed": (0.05, 2.0),
     "max_angular_speed": (0.1, 3.0),
-    # The OP1 footprint radius is 0.22 m. Smaller inflation values are unsafe.
+    # This controls soft obstacle costs, not the robot's physical collision
+    # envelope. The full OP1 footprint remains enforced by the Nav2 costmaps.
     "inflation_radius": (0.22, 3.0),
 }
 
