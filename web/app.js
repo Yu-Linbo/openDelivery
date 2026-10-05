@@ -4300,25 +4300,13 @@ function resetBagReplayView() {
   const width = bagReplayCanvas.clientWidth || 900;
   const height = bagReplayCanvas.clientHeight || 560;
   const pgm = bagReplayState.mapPgm;
-  let minX = 0;
-  let minY = 0;
-  let maxX = pgm.width;
-  let maxY = pgm.height;
-  const poses = bagReplayTimeline("poses");
-  const stride = Math.max(1, Math.ceil(poses.length / 2000));
-  for (let index = 0; index < poses.length; index += stride) {
-    const pixel = bagReplayWorldToPixel(poses[index]);
-    if (!pixel) continue;
-    minX = Math.min(minX, pixel.x);
-    minY = Math.min(minY, pixel.y);
-    maxX = Math.max(maxX, pixel.x);
-    maxY = Math.max(maxY, pixel.y);
-  }
-  const spanX = Math.max(1, maxX - minX);
-  const spanY = Math.max(1, maxY - minY);
+  // Recorded poses can belong to another floor or a temporary localization
+  // frame. Fit the loaded map rather than expanding it around those poses.
+  const spanX = Math.max(1, pgm.width);
+  const spanY = Math.max(1, pgm.height);
   bagReplayState.viewScale = Math.min(width / spanX, height / spanY) * 0.92;
-  bagReplayState.panX = (width - spanX * bagReplayState.viewScale) / 2 - minX * bagReplayState.viewScale;
-  bagReplayState.panY = (height - spanY * bagReplayState.viewScale) / 2 - minY * bagReplayState.viewScale;
+  bagReplayState.panX = (width - spanX * bagReplayState.viewScale) / 2;
+  bagReplayState.panY = (height - spanY * bagReplayState.viewScale) / 2;
 }
 
 function drawBagReplayGrid(width, height) {
@@ -4407,6 +4395,26 @@ function drawBagReplayPath(path) {
   bagReplayCtx.restore();
 }
 
+function bagReplayTrailIsContinuous(previous, pose) {
+  if (!previous || previous.segment_index !== pose.segment_index ||
+      previous.frame_id !== pose.frame_id) return false;
+  const maxGapSeconds = 2;
+  const maxSpeedMetersPerSecond = 3;
+  const localizationToleranceMeters = 1;
+  const elapsed = Number(pose.t) - Number(previous.t);
+  const distance = Math.hypot(
+    Number(pose.x) - Number(previous.x),
+    Number(pose.y) - Number(previous.y)
+  );
+  // Check raw adjacent samples, before decimation: a floor switch can reset
+  // localization between two of the points selected for drawing. Allow normal
+  // motion up to 3 m/s with 1 m of localization tolerance, but break recording
+  // gaps and coordinate resets instead of drawing a fictitious journey.
+  return Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= maxGapSeconds &&
+    Number.isFinite(distance) &&
+    distance <= localizationToleranceMeters + maxSpeedMetersPerSecond * elapsed;
+}
+
 function drawBagReplayTrail(time) {
   if (!bagReplayCtx) return;
   const poses = bagReplayTimeline("poses");
@@ -4416,24 +4424,32 @@ function drawBagReplayTrail(time) {
   const stride = Math.max(1, Math.ceil(poses.length / 1500));
   const activeMap = String(bagReplayMapAt(time) || "");
   const activeSegment = bagReplaySegmentAt(time);
+  const pgm = bagReplayState.mapPgm;
   bagReplayCtx.save();
   bagReplayCtx.strokeStyle = "rgba(34, 197, 94, 0.58)";
   bagReplayCtx.lineWidth = 1.6;
   bagReplayCtx.beginPath();
   let started = false;
-  const indexes = [];
-  for (let index = 0; index < end; index += stride) indexes.push(index);
-  if (end > 0 && indexes[indexes.length - 1] !== end - 1) indexes.push(end - 1);
-  for (const index of indexes) {
+  let previous = null;
+  for (let index = 0; index < end; index += 1) {
     const pose = poses[index];
     const compatibleSegment = bagReplaySegmentsCompatible(pose, activeSegment, time);
     const poseMap = String(bagReplayMapAt(Number(pose.t)) || "");
     if (!compatibleSegment || (activeMap && poseMap && poseMap !== activeMap)) {
       started = false;
+      previous = null;
       continue;
     }
     const pixel = bagReplayWorldToPixel(pose);
-    if (!pixel) continue;
+    if (!pixel || !Number.isFinite(pixel.x) || !Number.isFinite(pixel.y) ||
+        (pgm && (pixel.x < 0 || pixel.y < 0 || pixel.x > pgm.width || pixel.y > pgm.height))) {
+      started = false;
+      previous = null;
+      continue;
+    }
+    if (!bagReplayTrailIsContinuous(previous, pose)) started = false;
+    previous = pose;
+    if (started && index % stride !== 0 && index !== end - 1) continue;
     const screen = bagReplayPixelToScreen(pixel);
     if (!started) {
       bagReplayCtx.moveTo(screen.x, screen.y);
@@ -4442,7 +4458,7 @@ function drawBagReplayTrail(time) {
       bagReplayCtx.lineTo(screen.x, screen.y);
     }
   }
-  if (started) bagReplayCtx.stroke();
+  bagReplayCtx.stroke();
   bagReplayCtx.restore();
 }
 

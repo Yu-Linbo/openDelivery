@@ -67,12 +67,20 @@ tail -n 100 backend/logs/managed_robot1.log
 
 关联文本读取限末尾 2 MiB，日志列表每页渲染 250 行。表格在播放器内部滚动，窄屏依次展示画面、状态与日志；bag 列表、下载和离线回放保持原有流程。多 bag 按各自 segment 的源时间转换为连续播放时间，不将录制间隔误算为播放时间。无时间的原文保留在列表末尾，缺失或损坏的关联日志不影响 bag 播放。若 bag 自带 rosout，则优先使用该时间线；超过每主题 12000 条时按间隔采样并提示。原始日志仍可随 bag 下载。
 
+## 回放轨迹与楼层
+
+播放器按录制的 `current_map` 切换楼层，视野适配当前地图。轨迹只连接当前地图中连续的有效位姿；楼层、bag 分段或坐标系变化，以及地图外的临时定位坐标会断开轨迹。连续性检查先检查所有原始样本，再抽样绘制，避免抽样漏过切层瞬间。
+
+相邻样本间隔超过 2 秒，或位移超过“1 米定位容差 + 3 米/秒 × 时间间隔”时，开始新的轨迹段，避免重定位形成异常长线。这些规则仅影响轨迹显示，完整 bag 时间线仍保留。可参考[配送演示与真实 bag 验证](videos/README.md)。
+
 ## 验证
 
 ```bash
 python3 -m unittest discover -s backend/tests -p 'test_diagnostic_logging.py'
 python3 -m unittest discover -s backend/tests -p 'test_log*.py'
 python3 -m unittest discover -s backend/tests -p 'test_web*.py'
+python3 -m unittest discover -s backend/tests -p 'test_bag_replay.py'
+node web/tests/bag_replay.test.cjs
 node web/tests/log_parser.test.cjs
 colcon build --packages-select log_bag --symlink-install
 ctest --test-dir build/log_bag --output-on-failure
