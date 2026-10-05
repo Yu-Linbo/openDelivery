@@ -1,0 +1,782 @@
+{
+  "prompt": "Bring robot2 online and get my delivery from floor 1 to floor 4.",
+  "job_id": "3497959d6c6e4ff291a0f5cdb11349f4",
+  "status": "completed",
+  "results": [
+    {
+      "name": "startup_sim",
+      "ok": true,
+      "summary": "robot2 simulation is online; status: ready"
+    },
+    {
+      "name": "navigate_to_point",
+      "ok": true,
+      "summary": "Arrived at the destination.",
+      "task_id": "web_nav_1791190690362_eafb11"
+    },
+    {
+      "name": "navigate_to_point",
+      "ok": true,
+      "summary": "Arrived at the destination.",
+      "task_id": "web_nav_1791190700902_9dd0f4"
+    }
+  ],
+  "terminal_text": "Task completed. All 3 planned steps finished.",
+  "chat_checkpoints": [
+    {
+      "time": 26.43,
+      "title": "02  OpenClaw replies and starts the delivery",
+      "text": "Hello. I can query robot status, maps, ROS nodes, and logs, and perform confirmed operations.\nBring robot2 online and get my delivery from floor 1 to floor 4.\nI\u2019ll bring robot2 online, send it to the front-desk pickup point on floor 1, then deliver to the elevator waiting point on floor 4.\nStep 1/3: Starting simulation \u2014 robot2"
+    },
+    {
+      "time": 123.33,
+      "title": "06  Back to OpenClaw: current reply and delivery progress",
+      "text": "Hello. I can query robot status, maps, ROS nodes, and logs, and perform confirmed operations.\nBring robot2 online and get my delivery from floor 1 to floor 4.\nI\u2019ll bring robot2 online, send it to the front-desk pickup point on floor 1, then deliver to the elevator waiting point on floor 4.\nStep 1/3: Starting simulation \u2014 robot2\nrobot2: Waiting to come online\nrobot2: Initializing\nrobot2: Localizing\nrobot2: Ready\nrobot2 simulation is online; status: ready\nStep 2/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Going to the destination\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Completed\nArrived at the destination.\nStep 3/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/6: Going to the elevator waiting point\nrobot2 \u00b7 test_101 \u00b7 Subtask 2/6: Calling the elevator\nrobot2 \u00b7 test_101 \u00b7 Subtask 3/6: Entering the elevator"
+    },
+    {
+      "time": 177.1,
+      "title": "10  OpenClaw stays available while we explore the console",
+      "text": "Bring robot2 online and get my delivery from floor 1 to floor 4.\nI\u2019ll bring robot2 online, send it to the front-desk pickup point on floor 1, then deliver to the elevator waiting point on floor 4.\nStep 1/3: Starting simulation \u2014 robot2\nrobot2: Waiting to come online\nrobot2: Initializing\nrobot2: Localizing\nrobot2: Ready\nrobot2 simulation is online; status: ready\nStep 2/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Going to the destination\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Completed\nArrived at the destination.\nStep 3/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/6: Going to the elevator waiting point\nrobot2 \u00b7 test_101 \u00b7 Subtask 2/6: Calling the elevator\nrobot2 \u00b7 test_101 \u00b7 Subtask 3/6: Entering the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Arriving on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Transferring to the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Localizing on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 5/6: Leaving the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Going to the destination\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Completed\nArrived at the destination.\nTask completed. All 3 planned steps finished."
+    },
+    {
+      "time": 216.93,
+      "title": "13  OpenClaw: complete execution feedback",
+      "text": "Bring robot2 online and get my delivery from floor 1 to floor 4.\nI\u2019ll bring robot2 online, send it to the front-desk pickup point on floor 1, then deliver to the elevator waiting point on floor 4.\nStep 1/3: Starting simulation \u2014 robot2\nrobot2: Waiting to come online\nrobot2: Initializing\nrobot2: Localizing\nrobot2: Ready\nrobot2 simulation is online; status: ready\nStep 2/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Going to the destination\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Completed\nArrived at the destination.\nStep 3/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/6: Going to the elevator waiting point\nrobot2 \u00b7 test_101 \u00b7 Subtask 2/6: Calling the elevator\nrobot2 \u00b7 test_101 \u00b7 Subtask 3/6: Entering the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Arriving on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Transferring to the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Localizing on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 5/6: Leaving the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Going to the destination\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Completed\nArrived at the destination.\nTask completed. All 3 planned steps finished."
+    }
+  ],
+  "complete_feedback_text": "Bring robot2 online and get my delivery from floor 1 to floor 4.\nI\u2019ll bring robot2 online, send it to the front-desk pickup point on floor 1, then deliver to the elevator waiting point on floor 4.\nStep 1/3: Starting simulation \u2014 robot2\nrobot2: Waiting to come online\nrobot2: Initializing\nrobot2: Localizing\nrobot2: Ready\nrobot2 simulation is online; status: ready\nStep 2/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Going to the destination\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/1: Completed\nArrived at the destination.\nStep 3/3: Navigating to the destination \u2014 robot2\nrobot2 \u00b7 test_101 \u00b7 Subtask 1/6: Going to the elevator waiting point\nrobot2 \u00b7 test_101 \u00b7 Subtask 2/6: Calling the elevator\nrobot2 \u00b7 test_101 \u00b7 Subtask 3/6: Entering the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Arriving on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Transferring to the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 4/6: Localizing on the target floor\nrobot2 \u00b7 test_104 \u00b7 Subtask 5/6: Leaving the elevator\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Going to the destination\nrobot2 \u00b7 test_104 \u00b7 Subtask 6/6: Completed\nArrived at the destination.\nTask completed. All 3 planned steps finished.",
+  "stored_message_count": 24,
+  "all_stored_feedback_present": true,
+  "chapters": [
+    {
+      "time": 0.0,
+      "title": "01  Ask OpenClaw in everyday language"
+    },
+    {
+      "time": 25.43,
+      "title": "02  OpenClaw replies and starts the delivery"
+    },
+    {
+      "time": 38.65,
+      "title": "03  Robot startup and live connection status"
+    },
+    {
+      "time": 60.92,
+      "title": "04  Live map, laser scan, semantics and planned route"
+    },
+    {
+      "time": 73.03,
+      "title": "05  Robot details and the delivery task"
+    },
+    {
+      "time": 122.32,
+      "title": "06  Back to OpenClaw: current reply and delivery progress"
+    },
+    {
+      "time": 135.64,
+      "title": "07  Gazebo simulation and live overhead camera"
+    },
+    {
+      "time": 147.8,
+      "title": "08  ROS nodes and lifecycle controls"
+    },
+    {
+      "time": 163.96,
+      "title": "09  Robot settings"
+    },
+    {
+      "time": 176.07,
+      "title": "10  OpenClaw stays available while we explore the console"
+    },
+    {
+      "time": 189.29,
+      "title": "11  Map editor: occupancy, semantic layers and saved points"
+    },
+    {
+      "time": 202.89,
+      "title": "12  Delivery progress and destination"
+    },
+    {
+      "time": 215.92,
+      "title": "13  OpenClaw: complete execution feedback"
+    },
+    {
+      "time": 225.13,
+      "title": "OpenClaw conversation: request, replies, progress and final result"
+    },
+    {
+      "time": 259.33,
+      "title": "Complete mission bag replay / brief TXT preview"
+    }
+  ],
+  "replay": {
+    "duration": 140.521147,
+    "bags": [
+      "log_bag/robot2/backup/bags/20261005T165809+0800_terminal_bag"
+    ],
+    "available_maps": [
+      "test_101",
+      "test_102",
+      "test_103",
+      "test_104"
+    ],
+    "skipped": [],
+    "timelines": {
+      "poses": 3397,
+      "statuses": 281,
+      "tasks": 54,
+      "maps": 2,
+      "paths": 845,
+      "scans": 516,
+      "images": 8
+    },
+    "txt_rows_shown": 151,
+    "txt_shown_seconds": 5,
+    "full_replay_completed": true,
+    "end_time": 140.521147,
+    "observed_playback": [
+      {
+        "time": 0,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 1.8704000000000016,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 3.670400000000002,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 5.8702,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 8.036800000000007,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 10.036800000000005,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 11.936599999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 14.103199999999994,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 16.103199999999994,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 18.13639999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 20.136399999999995,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 22.169599999999992,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 24.336199999999987,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 26.16939999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 28.369399999999995,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 30.46919999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 32.46899999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 34.50239999999998,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 36.50239999999998,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 38.56879999999998,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 40.56879999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 42.6354,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 44.602,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 46.70199999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 48.76859999999999,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 50.701799999999984,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 52.734999999999985,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 54.801599999999986,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 56.8348,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 58.73480000000001,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 60.90120000000001,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 62.73460000000003,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 64.93460000000003,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 66.9344,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 68.8344,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 70.8676,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 72.9008,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 74.9342,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 76.8674,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 78.93399999999998,
+        "duration": 140.521147,
+        "map": "test_101",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 81.06719999999999,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 83.10039999999995,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 84.93359999999994,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 87.20019999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 89.2003999999999,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 91.20019999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 93.26679999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 95.23319999999993,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 97.33319999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 99.2997999999999,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 101.46639999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 103.49959999999996,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 105.59959999999997,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 107.66619999999996,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 109.69939999999994,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 111.73279999999994,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 113.79939999999993,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 115.73259999999993,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 117.73239999999991,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 119.76559999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 121.73219999999993,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 123.76539999999994,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 125.89859999999996,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 127.86539999999997,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 129.7652,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 131.8652,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 133.93179999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 135.79839999999993,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 137.8649999999999,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 139.83139999999992,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": true,
+        "txt_open": false
+      },
+      {
+        "time": 140.521147,
+        "duration": 140.521147,
+        "map": "test_104",
+        "playing": false,
+        "txt_open": false
+      }
+    ]
+  },
+  "finished_task_ids_in_bag": [
+    "web_nav_1791190690362_eafb11",
+    "web_nav_1791190700902_9dd0f4"
+  ],
+  "recorded_floor_changes": [
+    {
+      "t": 0.0,
+      "current_map": "test_101",
+      "segment_index": 0,
+      "bag": "log_bag/robot2/backup/bags/20261005T165809+0800_terminal_bag"
+    },
+    {
+      "t": 80.424091,
+      "current_map": "test_104",
+      "segment_index": 0,
+      "bag": "log_bag/robot2/backup/bags/20261005T165809+0800_terminal_bag"
+    }
+  ],
+  "same_successful_mission_for_ui_and_replay": true,
+  "recording_note": "UI tour and bag ending were recorded separately from the same successful mission. No replies or task results were invented; the entire bag timeline is preserved. The ending was re-recorded after fixing trail discontinuities during floor changes; it uses the application map-fit function without overrides.",
+  "trajectory_fix_verification": {
+    "checkpoints": [
+      {
+        "time": 75,
+        "map": "test_101",
+        "before": {
+          "max_edge_meters": 0.0674171231958181,
+          "edges": 615,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 0.0674171231958181,
+          "edges": 615,
+          "starts": 1
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      },
+      {
+        "time": 80.5,
+        "map": "test_104",
+        "before": {
+          "max_edge_meters": 0,
+          "edges": 0,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 0,
+          "edges": 0,
+          "starts": 0
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      },
+      {
+        "time": 86.5,
+        "map": "test_104",
+        "before": {
+          "max_edge_meters": 28.34070066082348,
+          "edges": 50,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 1.9999999999462566e-05,
+          "edges": 2,
+          "starts": 1
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      },
+      {
+        "time": 92,
+        "map": "test_104",
+        "before": {
+          "max_edge_meters": 28.34070066082348,
+          "edges": 93,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 0.048263874689046526,
+          "edges": 45,
+          "starts": 1
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      },
+      {
+        "time": 140.521147,
+        "map": "test_104",
+        "before": {
+          "max_edge_meters": 28.34070066082348,
+          "edges": 476,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 0.048263874689046526,
+          "edges": 428,
+          "starts": 1
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      },
+      {
+        "time": 75,
+        "map": "test_101",
+        "before": {
+          "max_edge_meters": 0.0674171231958181,
+          "edges": 615,
+          "starts": 1
+        },
+        "after": {
+          "max_edge_meters": 0.0674171231958181,
+          "edges": 615,
+          "starts": 1
+        },
+        "map_pixels": {
+          "width": 240,
+          "height": 200
+        },
+        "scale": 2.5806000000000004,
+        "expected_scale": 2.5806000000000004
+      }
+    ],
+    "page_errors": []
+  }
+}

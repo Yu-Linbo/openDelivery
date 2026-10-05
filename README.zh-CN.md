@@ -15,6 +15,12 @@ OpenDelivery 是面向多机器人配送实验的 ROS 2 工作区，集成 Gazeb
 
 控制台可通过语言选择器切换英文和简体中文。当前跨层乘梯采用仿真电梯执行器。
 
+## 配送演示
+
+[播放配送演示](docs/videos/opendelivery-autonomous-delivery.mp4)（约 6 分钟，默认英文界面）：通过简短 OpenClaw 请求让 robot2 在一楼上线、取货，乘仿真电梯到四楼送达。视频展示控制台页面、完整助手反馈，最后以 2 倍速播放本轮任务的整个 bag；TXT 日志只展开 5 秒后收起。
+
+[录制说明与验证](docs/videos/README.md)包含成功任务 ID 和回放检查结果。
+
 ## Web 功能预览
 
 ### OpenDelivery 整体展示

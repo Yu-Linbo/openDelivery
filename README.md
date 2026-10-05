@@ -15,6 +15,12 @@ OpenDelivery is a ROS 2 workspace for experimenting with multi-robot delivery. I
 
 The console supports English and Simplified Chinese through its language selector. Cross-floor elevator execution currently uses a simulated elevator.
 
+## Delivery demo
+
+[Watch the delivery demo](docs/videos/opendelivery-autonomous-delivery.mp4) (about 6 minutes, English UI): a short OpenClaw request starts robot2 on floor 1, picks up the delivery, and sends it through the simulated elevator to floor 4. The video tours the console, shows the complete assistant feedback, and finishes with the full bag replay at 2×. The TXT log opens for five seconds before collapsing.
+
+See the [recording details and verification](docs/videos/README.md) for the successful task IDs and replay checks.
+
 ## Web console tour
 
 ### OpenDelivery overview
