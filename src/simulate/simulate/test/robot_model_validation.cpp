@@ -82,7 +82,7 @@ class RobotModelValidation : public WorldPlugin {
       const double contact_x = probe->WorldPose().Pos().X();
       const bool ok = own_range_ > 11.9 && peer_range_ > 1.45 && peer_range_ < 1.7 &&
           max_tilt_ < 0.05236 && min_range_ > 0.5 && distance > 0.1 &&
-          contact_x > 1.4 && contact_x < 1.58 && frames_ == 3;
+          contact_x > 1.4 && contact_x < 1.58 && frames_ == 4;
       std::ofstream report(output_ + "/report.json");
       report << "{\n\"passed\":" << (ok ? "true" : "false")
              << ",\n\"peer_range\":" << peer_range_

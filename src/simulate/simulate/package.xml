@@ -2,7 +2,7 @@
 <package format="3">
   <name>simulate</name>
   <version>0.0.1</version>
-  <description>Minimal 2D robot simulation with lidar, IMU, odometry, front camera and downward front camera.</description>
+  <description>SmolVLA mobile manipulator with a folded myCobot 280 arm, gripper, lidar, IMU, odometry and three cameras.</description>
   <maintainer email="dev@example.com">openDelivery</maintainer>
   <license>Apache-2.0</license>
 

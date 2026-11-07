@@ -70,7 +70,7 @@ def main():
                     node.remove(child)
         root.append(model)
     root.append(ET.fromstring('''<model name="inspection"><static>true</static>
-      <pose>0.8 -0.8 0.70 0 0.474 2.35619449</pose><link name="camera">
+      <pose>1.0 -1.0 0.95 0 0.42 2.35619449</pose><link name="camera">
       <sensor name="inspection" type="camera"><always_on>true</always_on><update_rate>5</update_rate>
         <camera><horizontal_fov>0.85</horizontal_fov><image><width>800</width><height>600</height>
           <format>R8G8B8</format></image><clip><near>0.01</near><far>30</far></clip></camera>

@@ -1,0 +1,24 @@
+{
+  "repository": "elephantrobotics/mycobot_ros",
+  "commit": "c0d6fbe8f7d9b18b46a9fcb0b041e5bc2d66196b",
+  "directory": "mycobot_description/urdf/mycobot_280_m5/",
+  "sha256": {
+    "LICENSE": "4f92a59ae8b059b11a4196d41b891bde0d4e29d472a47afe2886be9eee041efc",
+    "mycobot_280_m5.urdf": "9d8a533ebf7f8aa0376735b32d9ec039f2e78f22778de3995615cb126084edb9",
+    "G_base.dae": "a1ba4b3ea36c9841ede40db888cf20758bd85bf23e356c9b3c55f506510bd2d7",
+    "joint1.dae": "f52b34a30ca338ade26db6bdae960b524286e8835ba53e80de8baae2ad85fd1d",
+    "joint1.png": "2e8001d3f85c9ff982db7eae76325f002f40ba18f3a3ef33b1a1bfe6540bbee6",
+    "joint2.dae": "036bdfde4c462ae76b23c5ca4fd5f19499d6f33baba5983e53f0e333bae6102b",
+    "joint2.png": "01acd93e8e7d5481be208f8886b7311b83dbde972a7aa4242150c56ef638595f",
+    "joint3.dae": "1c47c05fe8b649e716bdb2a37eee6f24afbafcb8ab4af9452536fdd1cccdbf28",
+    "joint3.png": "01acd93e8e7d5481be208f8886b7311b83dbde972a7aa4242150c56ef638595f",
+    "joint4.dae": "db7f509081206308b7bc8d25ecef8f37642e26ffb6948e681b3975c1ccbd011e",
+    "joint4.png": "01acd93e8e7d5481be208f8886b7311b83dbde972a7aa4242150c56ef638595f",
+    "joint5.dae": "fc547cca1c85ac87bd560292a0f0b46c1effb3395db8e1ebdad63b8dc31184b2",
+    "joint5.png": "d5ce0a63b1cbb329dc650d5d2612e9d554966f055f0f163e2393403bfd7ac43c",
+    "joint6.dae": "3b1a9b81a11c1858020837168ff14ac096ac732a9343e849003cab948c32504e",
+    "joint6.png": "eea4ae06119277383be26af0723f1a33db03c7d80a1c1baa44ab7c78fa874609",
+    "joint7.dae": "23c95f5832bb496ad179f147aa1caf1611e15cc95742419ae28825bdc868103b",
+    "joint7.png": "087945cab31090ca575efd6c3e574dfc1fb695358ba7f8263083449bf476076e"
+  }
+}

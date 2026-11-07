@@ -53,6 +53,31 @@ relocalization 后被重置。
 
 ## 机器人几何与传感器约束
 
+默认机器人已替换为 `smolvla-demo` 的完整移动操作模型：OpenDelivery 底盘、
+myCobot 280 M5 机械臂、双指夹爪及腕部手眼相机。机械臂采用源项目的
+`Simulation.FOLD_Q` 收纳姿态，夹爪每指张开 28 mm；尺寸、网格、纹理和安装位置
+保持原比例。当前将臂和夹爪关节固化为 fixed，用于导航时稳定展示及实体碰撞，
+尚未接入 SmolVLA 推理、机械臂动作控制或 Gazebo 抓放。
+
+![Gazebo 中的 SmolVLA 小车与收纳机械臂](../../../docs/images/smolvla-robot.png)
+
+`urdf/smolvla_arm.urdf.xacro` 随主模型加载；所有新增 link 和 joint 使用
+`frame_prefix`，腕部图像为 `/<robot>/camera/wrist/image_raw`、
+相机参数为 `/<robot>/camera/wrist/camera_info`，frame 为
+`<robot>/wrist_camera_optical_frame`。相机使用 SmolVLA 的 `vla` 安装配置，
+320×240、垂直视场 75°；保留原有前视和下视相机。
+
+网格与纹理安装在 `model/mycobot280/`，运行时无需相邻的 SmolVLA 仓库、
+PyBullet、Torch 或模型权重。来源、许可和校验清单见
+[模型来源](model/mycobot280/SOURCES.md)。要从相邻源码重新导入，可运行：
+
+```bash
+python3 scripts/import_smolvla_model.py ../smolvla-demo
+```
+
+随后在 OpenDelivery 工作区执行 `colcon build --packages-select simulate --symlink-install`，
+重新加载 `install/setup.bash`，再重启仿真并重新生成机器人。
+
 `urdf/simple_2d_robot.urdf.xacro` 是机器人模型源文件。底盘离地 35 mm，
 前后低摩擦支撑球防止绕驱动轮轴俯仰；轮距仍为 260 mm，轮径仍为 120 mm。
 外壳下沿为 125 mm、上沿为 240 mm，避开轮顶并覆盖 170 mm 高的激光扫描面，
@@ -64,8 +89,9 @@ relocalization 后被重置。
 1、2 为引擎保留位）。过滤保留墙体、其他机器人和实体接触碰撞，不能用扩大
 `range/min` 替代。模型的激光扫描范围仍为前方 180°，不提供后方障碍覆盖。
 
-导航局部与全局 costmap 使用 0.28 m 半径，覆盖外壳角点和传感器，旧的 0.22 m
-半径不足以覆盖模型。修改尺寸时同步检查此半径与通道可通行性。
+导航局部与全局 costmap 使用相同矩形 footprint：X 为 -0.21～0.26 m、Y 为
+-0.16～0.16 m，覆盖外壳、传感器与收纳机械臂的全部碰撞体。
+修改姿态或尺寸时同步检查导航轮廓与通道可通行性。
 
 验证：在工作区 source ROS 环境后运行
 `python3 -m pytest src/simulate/simulate/test/test_robot_geometry.py`，会展开 Xacro、
@@ -85,5 +111,5 @@ DISPLAY=:99 python3 src/simulate/simulate/test/verify_robot_runtime.py
 需要已有可用的 X 显示服务（`:99` 是本项目默认 Xvfb 显示号），以及 Gazebo 开发库、
 `pkg-config` 和 C++ 编译器。脚本创建独立 Gazebo master 和临时世界，运行 27 秒仿真，
 验证朝后穿过自身的激光、其他机器人可见性、前进／倒退／转向、实体接触和相机输出。
-结束后自动关闭测试进程，报告与三张 PNG 保存在输出的临时目录。该测试直接驱动轮子，
+结束后自动关闭测试进程，报告与四张 PNG（含腕部图像）保存在输出的临时目录。该测试直接驱动轮子，
 不替代完整导航任务或 ROS 相机话题链路测试。

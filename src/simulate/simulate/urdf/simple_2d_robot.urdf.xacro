@@ -5,6 +5,7 @@
   <xacro:arg name="frame_prefix" default=""/>
   <xacro:arg name="collision_bit" default="4"/>
   <xacro:arg name="collision_filter_plugin" default="libray_collision_filter_plugin.so"/>
+  <xacro:include filename="smolvla_arm.urdf.xacro"/>
 
   <xacro:property name="lnk_bf" value="$(arg frame_prefix)base_footprint"/>
   <xacro:property name="lnk_base" value="$(arg frame_prefix)base_link"/>
@@ -397,6 +398,11 @@
       </plugin>
     </sensor>
   </gazebo>
+
+  <!-- SmolVLA mobile manipulator, frozen in its verified folded navigation pose. -->
+  <xacro:smolvla_arm parent="${lnk_base}" prefix="$(arg frame_prefix)"
+                     robot_namespace="$(arg robot_namespace)"
+                     mesh_dir="$(find simulate)/model/mycobot280"/>
 
   <gazebo>
     <plugin name="diff_drive_controller" filename="libgazebo_ros_diff_drive.so">
